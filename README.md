@@ -75,7 +75,7 @@ the daemon's http contract is [packages/client/openapi.json](packages/client/ope
 ## related projects
 
 - [boxbox](https://github.com/clauseo-ai/boxbox2): the web client for cmx2 (a progressive web app for phone, tablet and desktop). it pairs with a daemon using `cmx2 pair`.
-- [cmx](https://github.com/bb-deeplearning/codemaxxxing): the predecessor, a runtime built on a fork of opencode. cmx2 can import its history: `cmx2 db import-cmx` copies it in read-only, for browsing.
+- [cmx](https://github.com/clauseo-ai/codemaxxxing): the predecessor, a runtime built on a fork of opencode. cmx2 can import its history: `cmx2 db import-cmx` copies it in read-only, for browsing.
 - [pi](https://github.com/earendil-works/pi): the agent library cmx2 runs on.
 
 ## license

@@ -2,7 +2,7 @@
 
 locked unless the maintainer says otherwise. the reasoning for each is in its row.
 
-terms: pi is the open source agent engine cmx2 builds on; boxbox is the web client (https://github.com/clauseo-ai/boxbox2); the contract is the daemon's http api; cmx is the predecessor (https://github.com/bb-deeplearning/codemaxxxing).
+terms: pi is the open source agent engine cmx2 builds on; boxbox is the web client (https://github.com/clauseo-ai/boxbox2); the contract is the daemon's http api; cmx is the predecessor (https://github.com/clauseo-ai/codemaxxxing).
 
 | # | decision | status |
 |---|---|---|

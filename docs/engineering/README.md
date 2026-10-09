@@ -2,7 +2,7 @@
 
 design notes for people changing cmx2. if you only want to use it, start with the [quickstart](../quickstart.md). if you want the lay of the land first, read [docs/architecture.md](../architecture.md), which opens with a diagram and walks one request through the daemon.
 
-cmx2 is a coding-agent daemon built on [pi](https://github.com/earendil-works/pi) (an open source agent library, pinned to one exact version). it is the successor to [cmx](https://github.com/bb-deeplearning/codemaxxxing), an earlier runtime built on a fork of opencode. the web client is [boxbox](https://github.com/clauseo-ai/boxbox2).
+cmx2 is a coding-agent daemon built on [pi](https://github.com/earendil-works/pi) (an open source agent library, pinned to one exact version). it is the successor to [cmx](https://github.com/clauseo-ai/codemaxxxing), an earlier runtime built on a fork of opencode. the web client is [boxbox](https://github.com/clauseo-ai/boxbox2).
 
 | file | what it is | read it when |
 |---|---|---|
