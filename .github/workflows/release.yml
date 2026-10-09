@@ -1,0 +1,34 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit -p .
+      - run: bun test packages
+      - name: build the four binaries and SHA256SUMS
+        run: bun scripts/build.ts --all --version "${GITHUB_REF_NAME#v}" --out dist --repo "$GITHUB_REPOSITORY"
+      - name: the linux x64 binary runs and names the tag
+        run: |
+          got="$(dist/cmx2-linux-x64 --version)"
+          test "$got" = "${GITHUB_REF_NAME#v}" || { echo "binary says $got, tag says ${GITHUB_REF_NAME#v}"; exit 1; }
+          dist/cmx2-linux-x64 --help >/dev/null
+          (cd dist && sha256sum -c SHA256SUMS)
+      - name: notes from CHANGELOG.md
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '$0 ~ "^## \\[?"v"\\]?( |$)" {on=1; next} /^## / {if (on) exit} on' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "see CHANGELOG.md" > notes.md
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/cmx2-darwin-arm64 dist/cmx2-darwin-x64 dist/cmx2-linux-x64 dist/cmx2-linux-arm64 dist/SHA256SUMS --title "$GITHUB_REF_NAME" --notes-file notes.md

@@ -1,0 +1,19 @@
+{
+  "name": "@cmx2/eval",
+  "version": "0.0.0",
+  "description": "scripts that drive a real cmx2 daemon against real models to measure behaviour",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clauseo-ai/cmx2.git",
+    "directory": "packages/eval"
+  },
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "probe": "bun src/probe.ts"
+  },
+  "dependencies": {
+    "@cmx2/engine": "workspace:*"
+  }
+}

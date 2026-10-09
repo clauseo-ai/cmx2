@@ -1,0 +1,27 @@
+{
+  "name": "@cmx2/cli",
+  "version": "0.8.8",
+  "description": "the cmx2 command: run, serve, pair, doctor, upgrade and the terminal client launcher",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clauseo-ai/cmx2.git",
+    "directory": "packages/cli"
+  },
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@cmx2/engine": "workspace:*",
+    "@cmx2/routing": "workspace:*",
+    "@cmx2/server": "workspace:*",
+    "@cmx2/store": "workspace:*",
+    "@cmx2/tools": "workspace:*",
+    "@earendil-works/pi-ai": "0.99.1"
+  },
+  "bin": {
+    "cmx2": "./src/index.ts"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "cmx2-workspace",
+  "private": true,
+  "description": "cmx2: a coding-agent daemon with a terminal client and an http contract",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clauseo-ai/cmx2.git"
+  },
+  "homepage": "https://github.com/clauseo-ai/cmx2#readme",
+  "bugs": {
+    "url": "https://github.com/clauseo-ai/cmx2/issues"
+  },
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "test": "bun test packages",
+    "dev": "bun packages/cli/src/index.ts serve --port 4830 --hostname 127.0.0.1",
+    "contract": "bun packages/contract/src/generate.ts",
+    "test:integration": "bun test packages/server/test/integration"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "5.9.3"
+  }
+}

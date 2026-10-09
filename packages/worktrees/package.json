@@ -1,0 +1,16 @@
+{
+  "name": "@cmx2/worktrees",
+  "version": "0.0.0",
+  "description": "git worktrees for cmx2 agents: create, merge, discard",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clauseo-ai/cmx2.git",
+    "directory": "packages/worktrees"
+  },
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

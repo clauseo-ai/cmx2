@@ -1,0 +1,17 @@
+{
+  "name": "@cmx2/prompts",
+  "version": "0.0.0",
+  "description": "system prompt text per model family for cmx2",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clauseo-ai/cmx2.git",
+    "directory": "packages/prompts"
+  },
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {}
+}

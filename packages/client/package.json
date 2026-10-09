@@ -1,0 +1,21 @@
+{
+  "name": "@cmx2/client",
+  "version": "0.0.0",
+  "description": "typed events, a typed http client and the openapi document for the cmx2 daemon; generated from @cmx2/contract",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clauseo-ai/cmx2.git",
+    "directory": "packages/client"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./events": "./src/events.ts",
+    "./openapi.json": "./openapi.json"
+  },
+  "files": [
+    "src",
+    "openapi.json"
+  ]
+}

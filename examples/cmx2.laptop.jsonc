@@ -1,0 +1,2 @@
+// ~/.config/cmx2/cmx2.<hostname>.jsonc: merged over cmx2.jsonc on the machine whose short hostname is "laptop".
+{ "server": { "port": 4098 } }

@@ -1,0 +1,19 @@
+{
+  "name": "@cmx2/procs",
+  "version": "0.0.0",
+  "description": "background jobs and pty terminals for cmx2 sessions, with ownership and reaping",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clauseo-ai/cmx2.git",
+    "directory": "packages/procs"
+  },
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@cmx2/tools": "workspace:*"
+  }
+}

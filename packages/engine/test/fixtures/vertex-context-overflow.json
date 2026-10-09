@@ -1,0 +1,6 @@
+{
+	"recorded": "2026-09-30, through the anthropic-compatible vertex proxy, anthropic/claude-sonnet-5-5, a 6.36 MB prompt (3,900,056 tokens against a 1,000,000 window); pi's adapter handed this errorMessage over with stopReason error and zero usage",
+	"status": 400,
+	"body": { "type": "error", "error": { "type": "invalid_request_error", "message": "prompt is too long: 3900056 tokens > 1000000 maximum" }, "request_id": "req_vrtx_011CfZtxMi9hkwmnST1P193d" },
+	"errorMessage": "400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"prompt is too long: 3900056 tokens > 1000000 maximum\"},\"request_id\":\"req_vrtx_011CfZtxMi9hkwmnST1P193d\"}"
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@cmx2/store",
+  "version": "0.0.0",
+  "description": "sqlite store for cmx2 sessions, messages, agents and steps",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clauseo-ai/cmx2.git",
+    "directory": "packages/store"
+  },
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@cmx2/tools": "workspace:*"
+  }
+}

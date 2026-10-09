@@ -1,0 +1,23 @@
+{
+  "name": "@cmx2/tui",
+  "version": "0.0.0",
+  "description": "the terminal client: pi's tui, themed, talking to a cmx2 daemon over its http contract",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clauseo-ai/cmx2.git",
+    "directory": "packages/tui"
+  },
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@cmx2/client": "workspace:*",
+    "@earendil-works/pi-tui": "0.99.1"
+  },
+  "devDependencies": {
+    "@xterm/headless": "5.5.0"
+  }
+}

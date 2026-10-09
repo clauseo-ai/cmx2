@@ -1,0 +1,19 @@
+[
+	{
+		"id": "example-fix-slugify",
+		"repo": "~/code/example-project",
+		"commit": "0123456789abcdef0123456789abcdef01234567",
+		"base": "89abcdef0123456789abcdef0123456789abcdef",
+		"prompt": "slugify drops accents instead of folding them: \"Crème brûlée\" should become \"creme-brulee\", not \"crme-brle\". fix it and keep the existing behaviour for plain ascii.",
+		"test_cmd": "bun test test/slugify.test.ts",
+		"hidden_tests": ["test/slugify.test.ts"],
+		"files": ["src/slugify.ts", "test/slugify.test.ts"],
+		"setup": "bun install --frozen-lockfile",
+		"test_shift": 40,
+		"pilot": true,
+		"base_fails": true,
+		"commit_passes": true,
+		"test_seconds": 1.2,
+		"checked_at": "2026-10-09"
+	}
+]

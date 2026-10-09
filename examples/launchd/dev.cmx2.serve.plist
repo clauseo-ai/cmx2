@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- what cmx2 serve with the install flag writes on macos, to ~/Library/LaunchAgents/dev.cmx2.serve.plist.
+     let the command write it; this copy shows the shape. keys never go in the plist: they live in
+     ~/.local/share/cmx2/service.env (mode 600), which the sh line reads before it execs cmx2.
+     this one listens on every interface, for a machine on a private network (a tailnet) with paired clients. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.cmx2.serve</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>if [ -f &quot;$0&quot; ]; then set -a; . &quot;$0&quot;; set +a; fi; exec &quot;$1&quot; 'serve' '--port' '4096' '--hostname' '0.0.0.0'</string>
+		<string>/Users/you/.local/share/cmx2/service.env</string>
+		<string>/Users/you/.local/share/cmx2/bin/cmx2</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/you</string>
+		<key>PATH</key>
+		<string>/Users/you/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/Users/you</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>StandardOutPath</key>
+	<string>/Users/you/.local/share/cmx2/log/serve.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/you/.local/share/cmx2/log/serve.log</string>
+</dict>
+</plist>

@@ -1,0 +1,23 @@
+{
+  "name": "@cmx2/contract",
+  "version": "0.0.0",
+  "description": "the cmx2 daemon's routes and events as one manifest, and the generator for the client and openapi.json",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clauseo-ai/cmx2.git",
+    "directory": "packages/contract"
+  },
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/manifest.ts",
+    "./generate": "./src/generate.ts"
+  },
+  "dependencies": {
+    "typebox": "1.3.27"
+  },
+  "devDependencies": {
+    "@cmx2/client": "workspace:*"
+  }
+}

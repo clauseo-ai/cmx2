@@ -1,0 +1,33 @@
+{
+  "name": "@cmx2/engine",
+  "version": "0.0.0",
+  "description": "the adapter between cmx2 sessions and the pi agent library",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clauseo-ai/cmx2.git",
+    "directory": "packages/engine"
+  },
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.99.1",
+    "@earendil-works/pi-ai": "0.99.1",
+    "@earendil-works/pi-codemode": "0.99.1",
+    "jsonc-parser": "3.3.1",
+    "typebox": "1.3.27",
+    "@cmx2/prompts": "workspace:*",
+    "@cmx2/tools": "workspace:*"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./config": "./src/config.ts",
+    "./session": "./src/session.ts",
+    "./gates": "./src/gates.ts",
+    "./models": "./src/models.ts",
+    "./permission": "./src/permission.ts",
+    "./title": "./src/title.ts",
+    "./errors": "./src/errors.ts",
+    "./transcript": "./src/transcript.ts"
+  }
+}

@@ -1,0 +1,47 @@
+{
+ "version": "0.99.1",
+ "files": [
+  {
+   "package": "@earendil-works/pi-ai",
+   "file": "dist/api/anthropic-messages.js",
+   "sha256": "d0e2a3c24649be616c74c90f3b0316a033a9efc047ee3dc9e513377ff2d01b5c",
+   "relies": "payload shape the gates and prefix recorder read: system and tools cache_control placement, the deferred placeholder name and position, per-message effort markers (historical before each assistant, active last), refusal stop_details mapping, onPayload and onProviderStreamEvent call points"
+  },
+  {
+   "package": "@earendil-works/pi-ai",
+   "file": "dist/api/google-generative-ai.js",
+   "sha256": "3a19fb56e96e60751a27a19f891264a3ab471cf4973307308ffdc8f8d2669397",
+   "relies": "payload shape {model, contents, config} for the toolConfig and responseJsonSchema gates; onProviderStreamEvent chunks for promptFeedback and finishReason"
+  },
+  {
+   "package": "@earendil-works/pi-ai",
+   "file": "dist/api/openai-completions.js",
+   "sha256": "8167bfe47b0c9cc99a653d84f24ad055128e66888429f9f954e063918c074ea0",
+   "relies": "payload shape (messages, tools, tool_choice, response_format) for the gates; finish_reason chunks"
+  },
+  {
+   "package": "@earendil-works/pi-ai",
+   "file": "dist/utils/transcript.js",
+   "sha256": "cd63514661b4036c3bcdda11a108f6be853f790a01216bf30fa80121e4fd320f",
+   "relies": "leading system message as the recorded prefix (createInitialSystemMessage, toToolDeclaration json round trip), getCurrentTools on resume, collapse of later system messages for models without mid-conversation support"
+  },
+  {
+   "package": "@earendil-works/pi-agent-core",
+   "file": "dist/agent.js",
+   "sha256": "163ad28551f1c38b8eb899a5c9dd89cd9d9005fb7dd9c4abeb008ee380e98c51",
+   "relies": "initial system message only when messages[0] is not a system message (a resume replays the recorded one); state.tools and thinkingLevel setters"
+  },
+  {
+   "package": "@earendil-works/pi-agent-core",
+   "file": "dist/agent-loop.js",
+   "sha256": "65def8c7f3fa01e38fe05467520efc8673c22ea8197833a3b04b29c8a60cb1e3",
+   "relies": "declareToolChanges for tool_search additions, prepareNextTurn ordering, thinkingLevel recorded on each assistant message, message_end for every appended message (transcript persistence)"
+  },
+  {
+   "package": "@earendil-works/pi-codemode",
+   "file": "dist/index.js",
+   "sha256": "c0b89781961483e2d3aa13663934f433a9b06abd571f46d51c9e5d78f3480d21",
+   "relies": "CodemodeSandbox globals as namespaced helpers; result output, value and error shape used by run"
+  }
+ ]
+}

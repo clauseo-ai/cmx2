@@ -1,0 +1,21 @@
+# what cmx2 serve --install writes on linux, to ~/.config/systemd/user/cmx2.service.
+# let the command write it; this copy shows the shape. keys live in ~/.local/share/cmx2/service.env
+# (mode 600, KEY='value' lines), never in the unit. loopback here: the right bind on a machine with a
+# public interface. for a machine that should serve while nobody is logged in: loginctl enable-linger you
+[Unit]
+Description=cmx2 daemon (127.0.0.1:4096)
+
+[Service]
+Type=simple
+ExecStart=/home/you/.local/share/cmx2/bin/cmx2 serve --port 4096 --hostname 127.0.0.1
+WorkingDirectory=/home/you
+Environment="HOME=/home/you"
+Environment="PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin"
+EnvironmentFile=-/home/you/.local/share/cmx2/service.env
+Restart=always
+RestartSec=2
+StandardOutput=append:/home/you/.local/share/cmx2/log/serve.log
+StandardError=append:/home/you/.local/share/cmx2/log/serve.log
+
+[Install]
+WantedBy=default.target

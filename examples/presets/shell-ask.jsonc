@@ -1,0 +1,9 @@
+// preset: every shell command asks first. drop it into ~/.config/cmx2/cmx2.jsonc (every project) or a
+// project's .cmx2/cmx2.jsonc (that project only). a phone or the terminal answers once, always (saves the
+// command's prefix for the project, like `git status *`) or reject. file edits inside the project stay
+// allowed; see docs/permissions.md for the rest of the default policy.
+{
+  "permissions": {
+    "shell": "ask"
+  }
+}

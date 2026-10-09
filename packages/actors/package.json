@@ -1,0 +1,22 @@
+{
+	"name": "@cmx2/actors",
+	"description": "helper agents for cmx2: spawn, message, wait, park, roster and caps",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/clauseo-ai/cmx2.git",
+		"directory": "packages/actors"
+	},
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@cmx2/store": "workspace:*",
+		"@cmx2/tools": "workspace:*",
+		"@cmx2/routing": "workspace:*",
+		"typebox": "1.3.27",
+		"@cmx2/engine": "workspace:*"
+	}
+}

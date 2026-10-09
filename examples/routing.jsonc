@@ -1,0 +1,72 @@
+// routing.jsonc, version 2: the models a helper can run on, and a short guide the delegating model reads.
+// copy to ~/.config/cmx2/routing.jsonc and edit; the next spawn picks the change up, no restart.
+// this file spells out the shipped default. keys you leave out keep the default.
+// a version-1 file (preset, presets, seats, effort) still loads; those keys are ignored with a warning.
+{
+  // alias -> model. a spawn names an alias (the model it runs on), never a provider/model-id.
+  // effort is what a spawn gets when it names none; note is the one line the delegating model reads.
+  // your own model, the one you talk to, is your choice and is not routed from here.
+  // a layer removes a shipped alias with null: "fable": null.
+  "models": {
+    "haiku": { "ref": "anthropic/claude-haiku-5-5", "effort": "high", "note": "cheapest and fastest; bounded work; costs 5× once a request reaches 100k tokens" },
+    "sonnet": { "ref": "anthropic/claude-sonnet-5-5", "effort": "high", "note": "routine and terminal-heavy implementation, ui, docs" },
+    "opus": { "ref": "anthropic/claude-opus-5-5", "effort": "medium", "note": "hard implementation, debugging, review of risky changes" },
+    "fable": { "ref": "anthropic/claude-fable-5-1", "effort": "medium", "note": "second opinion on plans and designs; about 4× opus per task" }
+  },
+
+  // where to start for each kind of task, and where to step up when the output falls short.
+  // these are defaults the model reads, not limits. a layer that sets guide replaces the whole list.
+  "guide": [
+    { "task": "lookups: finding files and usages, reading logs and docs, summarising output", "start": "haiku medium (low only for one-shot text such as a commit message)", "up": "sonnet high" },
+    { "task": "exploration whose answer shapes a plan", "start": "sonnet high", "up": "opus medium" },
+    { "task": "mechanical work: renames, codemods, formatting, commit messages, changelogs, pr text", "start": "haiku (low for text, medium for code)", "up": "sonnet high" },
+    { "task": "a small coding task with a test to pass, under about 100k tokens of context", "start": "haiku high", "up": "sonnet high, then opus medium" },
+    { "task": "the same kind of task when it is larger", "start": "sonnet high", "up": "opus medium" },
+    { "task": "routine implementation with lots of terminal work: build and test loops, scripts, ci", "start": "sonnet medium", "up": "sonnet high, then opus high, then opus xhigh; sonnet max only after opus xhigh fails" },
+    { "task": "hard implementation and debugging: unclear cause, races, performance, migrations", "start": "opus medium", "up": "opus high, then opus xhigh; fable medium as a second opinion" },
+    { "task": "ui and frontend", "start": "sonnet high", "up": "opus medium" },
+    { "task": "docs and user-facing copy", "start": "sonnet high", "up": "opus medium" },
+    { "task": "review of risky changes: security, concurrency, migrations, public api", "start": "opus medium, high for security and concurrency", "up": "opus xhigh or fable medium" },
+    { "task": "a second opinion on a plan or design", "start": "opus high or fable medium, whichever is not running your session" },
+    { "task": "reading more than 100k tokens", "start": "sonnet high" }
+  ],
+
+  // short rules rendered after the guide. plain sentences, no dashes, no shouting.
+  "rules": [
+    "small work (under about 10 tool calls) stays with you; a helper starts with none of your context.",
+    "start with the cheapest option that can do the task, and judge the output, not the price.",
+    "when a helper's output falls short: retry once with a sharper brief, then spawn one step up with after, then do it yourself. no helper is retried more than twice.",
+    "difficulty or file count alone is no reason to start higher; a missing tool or permission gets fixed, not escalated.",
+    "tests and typecheck run before any review; only risky changes get a review.",
+    "a helper past about 250k tokens of context costs about twice as much per step; give the next task to a fresh helper.",
+    "disjoint work runs in parallel, one writer per area, each writer in its own worktree.",
+    "long watches (builds, test suites, dev servers) are background jobs with notify, not helpers.",
+    "when only helpers or jobs remain, end your turn; their reports wake you."
+  ],
+
+  // efforts a model never runs at. keys are a provider/model-id or a bare model id and match
+  // the model on any provider. nothing but this list is off, and an empty list lifts an entry a
+  // lower layer set. haiku 5.5 past high spends 2 to 3 times the tokens for 2 to 3 points, and an
+  // xhigh turn can end with no visible text, which is a helper's report.
+  "never": { "claude-haiku-5-5": ["xhigh", "max"] },
+
+  // running_turns counts turns running at once in one session tree, the root included;
+  // parked agents are free. depth is how far children nest. budget_tokens caps what one
+  // tree spends (cache reads not counted); null means no limit.
+  "caps": { "running_turns": 4, "depth": 3, "budget_tokens": null },
+
+  // when a helper's turn keeps failing, the harness raises its effort one rung for the next turn,
+  // never past the model's ceiling, and puts it back at the turn after one without failures. the
+  // main session is never escalated. one effort ("ceiling": "high") applies to every model and
+  // replaces the per-model entries; an object sets one per model, keyed like never (exact ref first,
+  // then bare id, on any provider), with "default" for the rest, and merges onto the shipped one
+  // entry by entry. opus 5.5 at max scores below xhigh on code for more money, and sonnet 5.5
+  // past high is better spent on opus.
+  "escalation": {
+    "ceiling": { "default": "xhigh", "claude-haiku-5-5": "high", "claude-sonnet-5-5": "high", "claude-opus-5-5": "xhigh", "claude-fable-5-1": "xhigh" }
+  }
+}
+
+// per machine: ~/.config/cmx2/routing.<hostname>.jsonc layers on top of this file, so a
+// small vm can run, say, { "caps": { "running_turns": 2 } } without forking the profile.
+// a project can add .cmx2/routing.jsonc on top of both.

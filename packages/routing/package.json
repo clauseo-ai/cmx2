@@ -1,0 +1,19 @@
+{
+  "name": "@cmx2/routing",
+  "version": "0.0.0",
+  "description": "cmx2's routing.jsonc: the table of models helpers run on, the guide and the rules",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clauseo-ai/cmx2.git",
+    "directory": "packages/routing"
+  },
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "jsonc-parser": "3.3.1"
+  }
+}

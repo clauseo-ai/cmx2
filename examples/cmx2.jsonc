@@ -1,0 +1,46 @@
+// ~/.config/cmx2/cmx2.jsonc: a profile for someone who reaches their models through a proxy.
+// copy what you need; everything here is optional. with no profile, cmx2 talks to anthropic directly
+// using ANTHROPIC_API_KEY.
+{
+  "model": "anthropic/claude-opus-5-5",
+  "effort": "medium",
+  // the batching nudge rides every turn as a turn-scoped message; false turns it off
+  "nudge": true,
+  // how turn-scoped messages reach the model: auto picks a mid-conversation system message where the
+  // model supports it and a <system-reminder> part in the user message elsewhere
+  "turnMessages": "auto",
+  "providers": {
+    // an anthropic-compatible proxy; use 127.0.0.1 rather than localhost if it only listens on ipv4
+    // blacklist: model ids (globs) the pickers leave out and new turns refuse
+    // maxRequestBytes: the most one request may carry. through a baseUrl of your own it defaults to 20 MB;
+    // a vertex proxy takes 30000000, bedrock 20000000, anthropic's own api 32 MiB
+    "anthropic": { "baseUrl": "http://127.0.0.1:8080", "apiKey": "$PROXY_KEY", "blacklist": ["*-fast"], "maxRequestBytes": 30000000 },
+    // google's generative language api, or a proxy that speaks it (base url includes /v1beta)
+    "google": { "baseUrl": "http://127.0.0.1:8080/v1beta", "apiKey": "$GEMINI_API_KEY" },
+    // any openai-compatible endpoint serving models pi's catalog does not know
+    "openai-compatible-example": {
+      "api": "openai-completions",
+      "baseUrl": "http://127.0.0.1:8080/openai/v1",
+      "apiKey": "$PROXY_KEY",
+      "models": {
+        "vendor/model-id": { "name": "a model", "reasoning": true, "contextWindow": 200000, "maxTokens": 32000 }
+      }
+    }
+  },
+  // named variants per model, picked by name from a client's variant menu; "*" names them for every model
+  "variants": {
+    "anthropic/claude-opus-5-5": { "quick": { "effort": "low" }, "deep": { "effort": "high" } }
+  },
+  // a desktop notification when a session asks for permission or a question and no client is watching
+  "notify": true,
+  // compaction: at 300k tokens (or a fraction of the window, like 0.8) the context becomes a summary plus the
+  // recent messages; the summary starts in the background at 85% of that; the newest 10% stays verbatim and
+  // keeps its newest 40k tokens of tool output whole. the transcript keeps everything; recall reads it back
+  "compaction": { "auto": true, "at": 300000, "prefire": 0.85, "keep": 0.1, "protect": 40000 },
+  // images cost a request bytes long before they cost compaction tokens. past 12 MB of base64 images in the
+  // context, the oldest ones the model has seen leave it in one batch, down to 40% of that, and the model
+  // reads a marker where each was (it can read the file again). false turns this off; a request that would
+  // pass maxRequestBytes still drops. the transcript keeps every image
+  "images": { "budget": 12000000, "keep": 0.4 },
+  "server": { "hostname": "127.0.0.1", "port": 4097 }
+}
