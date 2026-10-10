@@ -48,10 +48,11 @@ on every pull request and every push to `main`:
 bun install --frozen-lockfile
 bunx tsc --noEmit -p .
 bun test packages
+bun packages/contract/src/generate.ts --check   # the generated client matches the contract
 scripts/check-public.sh      # fails if a file holds a string from your own private patterns
 ```
 
-run the first three locally before you push. `scripts/check-public.sh` skips itself unless `CMX2_PRIVATE_PATTERN` or `CMX2_PRIVATE_PATTERN_FILE` names a pattern, so it passes on a fresh clone. a tag `v*` also runs the release workflow, which builds the binaries.
+run all five locally before you push. `scripts/check-public.sh` skips itself unless `CMX2_PRIVATE_PATTERN` or `CMX2_PRIVATE_PATTERN_FILE` names a pattern, so it passes on a fresh clone. a tag `v*` also runs the release workflow, which builds the binaries.
 
 ## pull requests
 

@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 980" width="1200" height="980" role="img" aria-labelledby="t d">
+<title id="t">one turn that spawns a helper</title>
+<desc id="d">a client posts a prompt. the daemon builds a request with a byte-identical prefix and sends it to the model through pi. the model streams text and a tool call, the daemon runs the tools, spawns a helper that works with its own requests and reports back, then sends the next step and streams the final message to the client.</desc>
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0.4" y2="1"><stop offset="0" stop-color="var(--bg1)"/><stop offset="1" stop-color="var(--bg2)"/></linearGradient>
+<pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1" fill="var(--grid)"/></pattern>
+<marker id="ah-muted" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1.5 1.5L8 5L1.5 8.5" fill="none" stroke="var(--muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="ah-violet" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1.5 1.5L8 5L1.5 8.5" fill="none" stroke="var(--violet)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="ah-mint" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1.5 1.5L8 5L1.5 8.5" fill="none" stroke="var(--mint)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="ah-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1.5 1.5L8 5L1.5 8.5" fill="none" stroke="var(--amber)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<style>:root{--bg1:#1a1544;--bg2:#0b0a1d;--border:#332b6e;--ink:#f4f4f6;--muted:#9a95c9;--faint:#3f3879;--card:#14112f;--violet:#b7abff;--violet-fill:rgba(183,171,255,0.14);--mint:#8fe6a5;--mint-fill:rgba(143,230,165,0.12);--amber:#ffb86b;--amber-fill:rgba(255,184,107,0.12);--grid:rgba(183,171,255,0.10)}
+text{font-family:ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace}
+.eyebrow{font-size:18px;letter-spacing:.12em;fill:var(--muted)}
+.t{font-size:22px;font-weight:700;fill:var(--ink)}.s{font-size:18px;fill:var(--muted)}.pk{font-size:18px;fill:var(--muted)}
+.lb{font-size:18px;fill:var(--ink)}.lbm{font-size:18px;fill:var(--muted)}
+.plate{fill:var(--card)}.plate.bare{fill:var(--bg1)}
+.card{fill:var(--card);stroke:var(--faint);stroke-width:1.5}.card.ext{stroke-dasharray:6 5;fill:none;stroke:var(--muted)}
+.zone{fill:none;stroke:var(--border);stroke-width:2}
+.ac-violet{fill:var(--violet)}.ac-mint{fill:var(--mint)}.ac-amber{fill:var(--amber)}
+.wire{fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.wire.dash{stroke-dasharray:5 5}
+.w-muted{stroke:var(--muted)}.w-violet{stroke:var(--violet)}.w-mint{stroke:var(--mint)}.w-amber{stroke:var(--amber)}
+.pre{fill:var(--mint)}.tail{fill:var(--amber)}
+.life{stroke:var(--faint);stroke-width:1.5;stroke-dasharray:3 6}
+.rule{stroke:var(--faint);stroke-width:1;opacity:.7}
+.act-violet{fill:var(--violet-fill);stroke:var(--violet);stroke-width:1.5}.act-muted{fill:var(--card);stroke:var(--muted);stroke-width:1.5}
+</style>
+<rect x=".5" y=".5" width="1199" height="979" rx="22" fill="url(#bg)" stroke="var(--border)"/>
+<rect x=".5" y=".5" width="1199" height="979" rx="22" fill="url(#grid)"/>
+<rect x="12" y="36" width="216" height="82" rx="12" class="card"/><rect x="12" y="50" width="4" height="54" rx="2" class="ac-violet"/><text x="32" y="67" class="t">client</text><text x="32" y="94" class="s">boxbox, scripts</text>
+<path d="M120 118V912" class="life"/>
+<rect x="312" y="36" width="216" height="82" rx="12" class="card"/><rect x="312" y="50" width="4" height="54" rx="2" class="ac-violet"/><text x="332" y="67" class="t">cmx2 daemon</text><text x="332" y="94" class="s">server + engine</text>
+<path d="M420 118V912" class="life"/>
+<rect x="682" y="36" width="216" height="82" rx="12" class="card ext"/><text x="702" y="67" class="t">model</text><text x="702" y="94" class="s">pi + provider</text>
+<path d="M790 118V912" class="life"/>
+<rect x="972" y="36" width="216" height="82" rx="12" class="card"/><rect x="972" y="50" width="4" height="54" rx="2" class="ac-violet"/><text x="992" y="67" class="t">helper agent</text><text x="992" y="94" class="s">own session</text>
+<path d="M1080 118V912" class="life"/>
+<rect x="415" y="150" width="10" height="752" rx="3" class="act-violet"/>
+<rect x="785" y="268" width="10" height="90" rx="3" class="act-muted"/>
+<rect x="785" y="556" width="10" height="68" rx="3" class="act-muted"/>
+<rect x="785" y="744" width="10" height="92" rx="3" class="act-muted"/>
+<rect x="1075" y="506" width="10" height="168" rx="3" class="act-violet"/>
+<path d="M125 170L415 170" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<text x="139" y="160" class="lb">POST /session/:id/prompt</text>
+<path d="M425 208L461 208L461 238L425 238" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<text x="477" y="229" class="lb">auth, lock, build request</text>
+<path d="M425 292L785 292" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<text x="439" y="282" class="lb">request: same prefix, new tail</text>
+<rect x="444" y="304" width="10" height="14" rx="2" class="pre"/>
+<rect x="458" y="304" width="10" height="14" rx="2" class="pre"/>
+<rect x="472" y="304" width="10" height="14" rx="2" class="pre"/>
+<rect x="486" y="304" width="10" height="14" rx="2" class="pre"/>
+<rect x="500" y="304" width="10" height="14" rx="2" class="pre"/>
+<rect x="514" y="304" width="10" height="14" rx="2" class="pre"/>
+<rect x="528" y="304" width="10" height="14" rx="2" class="pre"/>
+<rect x="542" y="304" width="10" height="14" rx="2" class="pre"/>
+<rect x="556" y="304" width="10" height="14" rx="2" class="pre"/>
+<rect x="570" y="304" width="10" height="14" rx="2" class="tail"/>
+<rect x="584" y="304" width="10" height="14" rx="2" class="tail"/>
+<rect x="598" y="304" width="10" height="14" rx="2" class="tail"/>
+<path d="M785 352L425 352" class="wire dash w-muted" marker-end="url(#ah-muted)"/>
+<text x="439" y="342" class="lb">stream: text, then a tool call</text>
+<path d="M415 402L125 402" class="wire dash w-muted" marker-end="url(#ah-muted)"/>
+<text x="139" y="392" class="lb">events over sse</text>
+<path d="M425 446L461 446L461 476L425 476" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<text x="477" y="467" class="lb">permission check, run tools</text>
+<path d="M425 528L1075 528" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<text x="439" y="518" class="lb">spawn(brief, cheaper model)</text>
+<path d="M1075 582L795 582" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<text x="809" y="572" class="lb">its own requests</text>
+<path d="M795 618L1075 618" class="wire dash w-muted" marker-end="url(#ah-muted)"/>
+<text x="809" y="608" class="lb">answer</text>
+<path d="M1075 668L425 668" class="wire dash w-muted" marker-end="url(#ah-muted)"/>
+<text x="439" y="658" class="lb">report to the parent's mailbox</text>
+<rect x="1006" y="695" width="148" height="30" rx="7" class="plate"/><text x="1080" y="716" class="lbm" text-anchor="middle">parked, warm</text>
+<path d="M425 770L785 770" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<text x="439" y="760" class="lb">next step, report in the tail</text>
+<rect x="444" y="782" width="10" height="14" rx="2" class="pre"/>
+<rect x="458" y="782" width="10" height="14" rx="2" class="pre"/>
+<rect x="472" y="782" width="10" height="14" rx="2" class="pre"/>
+<rect x="486" y="782" width="10" height="14" rx="2" class="pre"/>
+<rect x="500" y="782" width="10" height="14" rx="2" class="pre"/>
+<rect x="514" y="782" width="10" height="14" rx="2" class="pre"/>
+<rect x="528" y="782" width="10" height="14" rx="2" class="pre"/>
+<rect x="542" y="782" width="10" height="14" rx="2" class="pre"/>
+<rect x="556" y="782" width="10" height="14" rx="2" class="pre"/>
+<rect x="570" y="782" width="10" height="14" rx="2" class="tail"/>
+<rect x="584" y="782" width="10" height="14" rx="2" class="tail"/>
+<rect x="598" y="782" width="10" height="14" rx="2" class="tail"/>
+<path d="M785 830L425 830" class="wire dash w-muted" marker-end="url(#ah-muted)"/>
+<text x="439" y="820" class="lb">final message</text>
+<path d="M415 880L125 880" class="wire dash w-muted" marker-end="url(#ah-muted)"/>
+<text x="139" y="870" class="lb">events: session.status</text>
+<rect x="162.5" y="929" width="515" height="30" rx="7" class="plate"/><text x="420" y="950" class="lbm" text-anchor="middle">every change lands in sqlite and the event log</text>
+</svg>

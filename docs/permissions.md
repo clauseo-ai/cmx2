@@ -12,11 +12,11 @@ with no config, a session may do anything inside its working directory without a
 |---|---|---|
 | `*` | allow | anything not listed below |
 | `read` | allow, but `*.env` and `*.env.*` ask (`*.env.example` is allowed) | reading files |
-| `external_directory` | ask | any path outside the session's working directory, for every tool |
+| `external_directory` | ask | a path outside the session's working directory, for the tools that take a path (see below) |
 
-so edits, searches, shell commands, background jobs and web fetches run without a prompt as long as
-they stay inside the project. `.env` files ask before they are read, and anything that reaches outside
-the project asks.
+so edits, searches, shell commands, background jobs and web fetches run without a prompt. `.env` files ask
+before they are read. the outside-the-project check covers only some tools, listed under the table below.
+it does not make shell safe.
 
 to keep a person in the loop for commands, use the shell-ask preset below.
 
@@ -64,7 +64,12 @@ put it in `~/.config/cmx2/cmx2.jsonc` for every project or in a project's `.cmx2
 | websearch | `websearch` | the query |
 | skill | `skill` | the skill's name |
 | lsp | `lsp` | the file |
-| any path outside the working directory | `external_directory` also | the directory, as `dir/*` |
+| any path outside the working directory, for read, write, edit, grep, glob and lsp | `external_directory` also | the directory, as `dir/*` |
+
+the outside-the-project check (`external_directory`) runs for read, write, edit, grep, glob, lsp, and for the `cwd` a
+background job or terminal starts in. it does not run for shell command lines, for what is typed into a terminal,
+or for webfetch and websearch. a shell command like `cat /etc/passwd` is judged only by the `shell` rules, so with
+the default policy it runs without asking. to gate it, set `shell` to `ask` (see the preset above).
 
 `run` has no check of its own: every helper it calls (`fs.read`, `search.grep`, `shell.exec`,
 `pty.spawn`, ...) is checked as the tool it calls, with the same rules, and a refused helper rejects

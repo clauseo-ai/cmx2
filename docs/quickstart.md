@@ -21,6 +21,8 @@ it downloads the binary for your machine from the latest release, checks it agai
 `SHA256SUMS` and puts it in `~/.local/bin/cmx2`. if that folder is not on your `PATH`, it prints the line
 to add. `CMX2_INSTALL_DIR` changes the folder.
 
+no release is tagged yet, so the installer fails today. until the first release, build from source (next block).
+
 or build it yourself:
 
 ```sh
@@ -52,8 +54,8 @@ for anything else, write `~/.config/cmx2/cmx2.jsonc`. here is a proxy that speak
 ```
 
 `apiKey` takes a literal, a `$NAME` read from the environment, or a `!command` such as a keychain lookup.
-`examples/cmx2.jsonc` shows the other shapes: google, an openai-compatible server, and a per-machine
-overlay (`cmx2.<hostname>.jsonc`, read on top of the main file on that machine).
+`examples/cmx2.jsonc` shows the other shapes: google and an openai-compatible server. `examples/cmx2.laptop.jsonc`
+is a per-machine overlay (`cmx2.<hostname>.jsonc`, read on top of the main file on that machine).
 
 then check it:
 
@@ -80,7 +82,7 @@ has nobody to answer a prompt, so a call that needs an answer is refused.
 `cmx2` on its own opens the terminal client in the same directory (see [tui](tui.md)).
 
 the daemon is the background process that hosts sessions, runs tools and serves clients over http. neither
-command needs one running. when none is up, cmx2 starts one inside its own process for as long as it runs.
+command needs one running. when none is up, cmx2 starts one on loopback inside its own process for as long as it runs.
 
 `cmx2 session list` shows your sessions. `cmx2 --help` lists every command.
 
@@ -110,7 +112,7 @@ device, run it on a private network such as a tailnet (a private tailscale netwo
 `--hostname 0.0.0.0`. on a machine with a public address, keep the default. the daemon speaks plain http,
 so do not expose it on an open network. see [SECURITY.md](../SECURITY.md).
 
-`cmx2 upgrade` fetches the latest release and restarts the service.
+`cmx2 upgrade` fetches the latest release and restarts the service. it only works on release binaries. a source build has no repository stamped into it.
 
 ## where things live
 

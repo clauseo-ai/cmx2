@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 702" width="1200" height="702" role="img" aria-labelledby="t d">
+<title id="t">cmx2 architecture</title>
+<desc id="d">clients talk http and server-sent events to one daemon. the daemon holds the server, the engine, tools, helper agents, background jobs, worktrees and a sqlite store. the engine calls pi, which calls the model providers.</desc>
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0.4" y2="1"><stop offset="0" stop-color="var(--bg1)"/><stop offset="1" stop-color="var(--bg2)"/></linearGradient>
+<pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1" fill="var(--grid)"/></pattern>
+<marker id="ah-muted" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1.5 1.5L8 5L1.5 8.5" fill="none" stroke="var(--muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="ah-violet" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1.5 1.5L8 5L1.5 8.5" fill="none" stroke="var(--violet)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="ah-mint" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1.5 1.5L8 5L1.5 8.5" fill="none" stroke="var(--mint)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="ah-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M1.5 1.5L8 5L1.5 8.5" fill="none" stroke="var(--amber)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<style>:root{--bg1:#1a1544;--bg2:#0b0a1d;--border:#332b6e;--ink:#f4f4f6;--muted:#9a95c9;--faint:#3f3879;--card:#14112f;--violet:#b7abff;--violet-fill:rgba(183,171,255,0.14);--mint:#8fe6a5;--mint-fill:rgba(143,230,165,0.12);--amber:#ffb86b;--amber-fill:rgba(255,184,107,0.12);--grid:rgba(183,171,255,0.10)}
+text{font-family:ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace}
+.eyebrow{font-size:18px;letter-spacing:.12em;fill:var(--muted)}
+.t{font-size:22px;font-weight:700;fill:var(--ink)}.s{font-size:18px;fill:var(--muted)}.pk{font-size:18px;fill:var(--muted)}
+.lb{font-size:18px;fill:var(--ink)}.lbm{font-size:18px;fill:var(--muted)}
+.plate{fill:var(--card)}.plate.bare{fill:var(--bg1)}
+.card{fill:var(--card);stroke:var(--faint);stroke-width:1.5}.card.ext{stroke-dasharray:6 5;fill:none;stroke:var(--muted)}
+.zone{fill:none;stroke:var(--border);stroke-width:2}
+.ac-violet{fill:var(--violet)}.ac-mint{fill:var(--mint)}.ac-amber{fill:var(--amber)}
+.wire{fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.wire.dash{stroke-dasharray:5 5}
+.w-muted{stroke:var(--muted)}.w-violet{stroke:var(--violet)}.w-mint{stroke:var(--mint)}.w-amber{stroke:var(--amber)}
+.pre{fill:var(--mint)}.tail{fill:var(--amber)}
+.life{stroke:var(--faint);stroke-width:1.5;stroke-dasharray:3 6}
+.rule{stroke:var(--faint);stroke-width:1;opacity:.7}
+.act-violet{fill:var(--violet-fill);stroke:var(--violet);stroke-width:1.5}.act-muted{fill:var(--card);stroke:var(--muted);stroke-width:1.5}
+</style>
+<rect x=".5" y=".5" width="1199" height="701" rx="22" fill="url(#bg)" stroke="var(--border)"/>
+<rect x=".5" y=".5" width="1199" height="701" rx="22" fill="url(#grid)"/>
+<text x="30" y="66" class="eyebrow">CLIENTS</text>
+<rect x="30" y="96" width="220" height="80" rx="12" class="card"/><rect x="30" y="110" width="4" height="52" rx="2" class="ac-violet"/><text x="50" y="127" class="t">boxbox</text><text x="50" y="154" class="s">web app + server</text>
+<rect x="30" y="190" width="220" height="80" rx="12" class="card"/><rect x="30" y="204" width="4" height="52" rx="2" class="ac-violet"/><text x="50" y="221" class="t">terminal</text><text x="50" y="248" class="s">cmx2</text>
+<rect x="30" y="284" width="220" height="80" rx="12" class="card"/><rect x="30" y="298" width="4" height="52" rx="2" class="ac-violet"/><text x="50" y="315" class="t">headless</text><text x="50" y="342" class="s">cmx2 run</text>
+<rect x="30" y="378" width="220" height="80" rx="12" class="card"/><rect x="30" y="392" width="4" height="52" rx="2" class="ac-violet"/><text x="50" y="409" class="t">your scripts</text><text x="50" y="436" class="s">@cmx2/client</text>
+<text x="30" y="506" class="lbm">http in, sse out.</text>
+<text x="30" y="532" class="lbm">headless uses a daemon</text>
+<text x="30" y="558" class="lbm">or starts its own.</text>
+<rect x="310" y="40" width="580" height="632" rx="18" class="zone"/>
+<text x="336" y="78" class="t">cmx2 daemon</text>
+<text x="864" y="78" class="s" text-anchor="end">one bun process</text>
+<rect x="336" y="96" width="528" height="80" rx="12" class="card"/><rect x="336" y="110" width="4" height="52" rx="2" class="ac-violet"/><text x="356" y="127" class="t">server</text><text x="356" y="154" class="s">auth, routes, events, run lock</text>
+<rect x="336" y="212" width="528" height="80" rx="12" class="card"/><rect x="336" y="226" width="4" height="52" rx="2" class="ac-violet"/><text x="356" y="243" class="t">engine</text><text x="356" y="270" class="s">sessions, effort, prompt cache</text>
+<rect x="336" y="328" width="256" height="82" rx="12" class="card"/><rect x="336" y="342" width="4" height="54" rx="2" class="ac-violet"/><text x="356" y="359" class="t">tools</text><text x="356" y="386" class="s">files, shell, mcp</text>
+<rect x="608" y="328" width="256" height="82" rx="12" class="card"/><rect x="608" y="342" width="4" height="54" rx="2" class="ac-violet"/><text x="628" y="359" class="t">actors</text><text x="628" y="386" class="s">helpers and routing</text>
+<rect x="336" y="444" width="256" height="82" rx="12" class="card"/><rect x="336" y="458" width="4" height="54" rx="2" class="ac-violet"/><text x="356" y="475" class="t">procs</text><text x="356" y="502" class="s">jobs, terminals</text>
+<rect x="608" y="444" width="256" height="82" rx="12" class="card"/><rect x="608" y="458" width="4" height="54" rx="2" class="ac-violet"/><text x="628" y="475" class="t">worktrees</text><text x="628" y="502" class="s">checkouts on request</text>
+<rect x="336" y="560" width="528" height="82" rx="12" class="card"/><rect x="336" y="574" width="4" height="54" rx="2" class="ac-violet"/><text x="356" y="591" class="t">store</text><text x="356" y="618" class="s">sqlite state, jsonl transcripts</text>
+<path d="M600 176L600 212" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<path d="M464 292L464 328" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<path d="M736 292L736 328" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<path d="M464 410L464 444" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<path d="M736 410L736 444" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<path d="M464 526L464 560" class="wire dash w-muted"/>
+<path d="M736 526L736 560" class="wire dash w-muted"/>
+<path d="M250 136L280 136" class="wire w-violet"/>
+<path d="M250 230L280 230" class="wire w-violet"/>
+<path d="M280 230L280 136" class="wire w-violet"/>
+<path d="M250 324L280 324" class="wire dash w-violet"/>
+<path d="M280 324L280 230" class="wire w-violet"/>
+<path d="M250 418L280 418" class="wire w-violet"/>
+<path d="M280 418L280 324" class="wire w-violet"/>
+<path d="M280 136L336 136" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<text x="920" y="66" class="eyebrow">OUTSIDE THE DAEMON</text>
+<rect x="920" y="96" width="250" height="112" rx="12" class="card ext"/><text x="940" y="127" class="t">pi</text><text x="940" y="154" class="s">open source loop</text><text x="940" y="178" class="s">and provider layer</text>
+<path d="M864 252L895 252L895 152L920 152" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<path d="M1045 208L1045 268" class="wire w-violet" marker-end="url(#ah-violet)"/>
+<rect x="1009" y="223" width="72" height="30" rx="7" class="plate"/><text x="1045" y="244" class="lbm" text-anchor="middle">https</text>
+<rect x="920" y="268" width="250" height="170" rx="12" class="card ext"/><text x="940" y="299" class="t">model providers</text><text x="940" y="326" class="s">anthropic</text><text x="940" y="350" class="s">google</text><text x="940" y="374" class="s">or openai-compatible</text><text x="940" y="398" class="s">endpoint</text>
+<text x="920" y="484" class="lbm">a provider's cache</text>
+<text x="920" y="510" class="lbm">matches the stable</text>
+<text x="920" y="536" class="lbm">start of a request.</text>
+</svg>
