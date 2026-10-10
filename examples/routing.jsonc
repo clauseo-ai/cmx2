@@ -53,7 +53,7 @@
   // running_turns counts turns running at once in one session tree, the root included;
   // parked agents are free. depth is how far children nest. budget_tokens caps what one
   // tree spends (cache reads not counted); null means no limit.
-  "caps": { "running_turns": 4, "depth": 3, "budget_tokens": null },
+  "caps": { "running_turns": 50, "depth": 3, "budget_tokens": null },
 
   // when a helper's turn keeps failing, the harness raises its effort one rung for the next turn,
   // never past the model's ceiling, and puts it back at the turn after one without failures. the

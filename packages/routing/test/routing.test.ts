@@ -68,7 +68,7 @@ describe("routing", () => {
 	test("defaults load and validate", () => {
 		const c = routing.current();
 		expect(Object.keys(c.models)).toEqual(["haiku", "sonnet", "opus", "fable"]);
-		expect(c.caps).toEqual({ running_turns: 4, depth: 3, budget_tokens: null });
+		expect(c.caps).toEqual({ running_turns: 50, depth: 3, budget_tokens: null });
 		expect(routing.lastError()).toBeUndefined();
 		expect(routing.warnings()).toEqual([]);
 		expect(routing.version).toBe(1);

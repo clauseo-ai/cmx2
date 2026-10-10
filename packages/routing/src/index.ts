@@ -86,7 +86,8 @@ export const DEFAULT_ROUTING: RoutingConfig = {
 	],
 	// haiku past high spends 2 to 3x the tokens for 2 to 3 points, and an xhigh turn can end with no visible text, which is a helper's report
 	never: { "claude-haiku-5-5": ["xhigh", "max"] },
-	caps: { running_turns: 4, depth: 3, budget_tokens: null },
+	// 50, not 4: 4 was a coding agent's pick that left 3 child slots and went unnoticed (docs/routing.md, caps)
+	caps: { running_turns: 50, depth: 3, budget_tokens: null },
 	// on code opus 5.5 at max scores below xhigh for more, and sonnet 5.5 past high loses to a cheaper opus run
 	escalation: { ceiling: { default: "xhigh", "claude-haiku-5-5": "high", "claude-sonnet-5-5": "high", "claude-opus-5-5": "xhigh", "claude-fable-5-1": "xhigh" } },
 };

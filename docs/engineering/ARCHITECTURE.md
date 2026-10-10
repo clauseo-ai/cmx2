@@ -176,7 +176,7 @@ run(code)                                                                       
   "guide": [ { "task": "lookups: finding files and usages, ...", "start": "haiku medium", "up": "sonnet high" } ],
   "rules": [ "small work (under about 10 tool calls) stays with you; ..." ],
   "never":  { "claude-haiku-5-5": ["xhigh", "max"] },
-  "caps":   { "running_turns": 4, "depth": 3, "budget_tokens": null },
+  "caps":   { "running_turns": 50, "depth": 3, "budget_tokens": null },
   "escalation": { "ceiling": { "default": "xhigh", "claude-haiku-5-5": "high", "claude-sonnet-5-5": "high", "claude-opus-5-5": "xhigh", "claude-fable-5-1": "xhigh" } }
 }
 ```

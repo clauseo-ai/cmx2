@@ -51,6 +51,8 @@ stepping up is a spawn with `after` (an id, a path or a name): the new helper st
 
 `running_turns` counts turns running at once in one session tree, the root included; parked agents are free. `depth` is how far children nest below the root. `budget_tokens` caps what one tree spends, cache reads not counted; `null` means no limit.
 
+the default was 4 until 2026-10-10. a coding agent picked that number when it built the cap as a control, and nobody noticed that it left only 3 child slots, because the root takes one. the helper summary line also counted queued agents as working, so trees that looked like six helpers at once were really three running and three waiting. the default is now 50, which in practice means no limit. set a lower number only on a machine that needs one.
+
 ## escalation
 
 escalation applies to helpers only. when a helper's turn keeps failing (the same tool error twice, the same check failing twice after edits, output cut at the token limit), its next turn runs one rung higher, skipping rungs the model never runs at and stopping at the model's ceiling. the turn after one without failures puts it back at the effort it started at; the stored effort never changes. the session you talk to is never escalated: its effort is the dial's. the daemon lowers an effort, the model never does.

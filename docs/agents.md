@@ -26,11 +26,13 @@ and transcript, a path in the tree (`/root/<name>[/<child>]`) and a model from t
   and at most 8 idle ones stay loaded. after a daemon restart, a message to a parked agent reopens it from
   its transcript. an agent that was mid-turn when the daemon stopped comes back `interrupted`, and its
   spawner is told.
-- **caps count running turns.** `caps.running_turns` (default 4, the root included) limits how many
+- **caps count running turns.** `caps.running_turns` (default 50, the root included) limits how many
   agents in one tree run a turn at once. the rest wait as `queued`. parked agents do not count. an agent
   inside `wait` lends its slot out. `caps.depth` (default 3) and `caps.budget_tokens` (input, output and
   cache writes across the tree) refuse spawns with `AgentDepthExceededError` and `BudgetExceededError`;
   running agents stop at the budget with a partial report. `spawn(budget_tokens)` caps one dispatch.
+  the default used to be 4, which meant 3 helpers at a time. that was a mistake by a coding agent and
+  went unnoticed. see the caps section of [routing.md](routing.md).
 - **reports are bounded.** the deliverable comes from the turn that just ended, never from an earlier
   task, and is cut at 12,000 characters (the rest stays in the child's transcript). a report with no
   substantive text says so first. a last line `ABORT(<reason>): <details>` (spec_wrong,
