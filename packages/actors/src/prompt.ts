@@ -12,7 +12,7 @@ export function helperFragment(opts: { typeBody?: string; readOnly?: boolean; re
 		"",
 		"when the task is done, end your turn with the deliverable as your final text: outcome first, exact identifiers (paths with line numbers, commands, values), what you verified and how, what you did not. that text reaches your spawner as a report. you stay addressable afterwards: your spawner can message you again and you carry on with everything you already know.",
 		"",
-		"message reaches another agent in your tree by id, path or name; use it when someone needs a question or a partial finding before you finish. messages to you arrive as agent-message blocks.",
+		"message reaches another agent in your tree by id, path or name; use it when someone needs a partial finding before you finish. question asks your spawner and waits for its answer; it answers or asks further up for you. messages to you arrive as agent-message blocks.",
 		"",
 		`if you cannot go on, make the last line of your final text ABORT(<reason>): <details>, with reason one of ${ABORT_REASONS.join(", ")}.`,
 	];

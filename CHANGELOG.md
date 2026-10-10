@@ -2,6 +2,16 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
+## unreleased
+
+contract version 7. additive: completed tool states may carry `attachments` and `attachmentsDropped`.
+
+### added
+- a completed tool part carries the images its result returned (a read of an image, a screenshot) as `attachments`, file entries with a data url, so clients can preview them. at most 8 images and 4 MB of data urls per part; `attachmentsDropped` counts any left off. additive; the output text is unchanged.
+
+### changed
+- a helper's `question` tool asks the agent that started it, not the user. the question arrives as a message with a `correlation_id`, the spawner's reply is the answer, and the spawner asks further up with its own `question` tool when it cannot answer, so the user only hears questions from the root. while a helper waits its agent `cause` is `asking` and its running-turn slot goes to others. before, a helper's question went straight to the user, and its spawner sat parked without knowing.
+
 ## 0.8.8 - 2026-10-10
 
 contract version 7. additive.

@@ -2,7 +2,7 @@ import { webfetchTool, websearchTool } from "./deferred.ts";
 import { editTool, globTool, grepTool, readTool, writeTool } from "./fs.ts";
 import { type LspPool, lspTool } from "./lsp.ts";
 import { procTools } from "./procs.ts";
-import { type AskQuestions, questionTool } from "./question.ts";
+import { type AskQuestions, type QuestionAudience, questionTool } from "./question.ts";
 import { runTool } from "./run.ts";
 import { shellTool } from "./shell.ts";
 import { type Skills, skillTool } from "./skills.ts";
@@ -15,7 +15,7 @@ export { toolSearchTool, websearchUrl, type DeferredEntry, type SearchResult } f
 export type { RunDetails, NestedCallRecord } from "./run.ts";
 export { RUN_DESCRIPTION } from "./run.ts";
 export { runCommand, outputImages, type ShellResult } from "./shell.ts";
-export { type AskQuestions, type QuestionPrompt, QuestionDismissedError } from "./question.ts";
+export { type AgentAnswer, type AskQuestions, type QuestionAudience, type QuestionDetails, type QuestionPrompt, QuestionDismissedError } from "./question.ts";
 export { hostHeicDecoders, imageMimeOf, imageParts, isHeicMime, MAX_EDGE, MAX_IMAGE_BYTES, readDimensions, resizeDataUrl, resizeImage, sniffHeic, sniffImage, type Dimensions, type ResizedImage } from "./image.ts";
 export { defaultSkillDirs, frontmatter, listSkills, Skills, type SkillInfo } from "./skills.ts";
 export { formatFile, formatterFor, type Formatted } from "./format.ts";
@@ -28,8 +28,8 @@ export type { GrepDetails, GrepHit, GlobDetails, ReadDetails, ImageReadDetails, 
  * the hot set: declared in the recorded prefix from request one. order is by name so the tool list is
  * byte-identical across sessions and releases that do not change a definition.
  */
-export function hotTools(env: ToolEnv, call: NestedCall, ask: AskQuestions): Tool[] {
-	return [readTool(env), writeTool(env), editTool(env), grepTool(env), globTool(env), shellTool(env), runTool(call), questionTool(ask)].sort((a, b) =>
+export function hotTools(env: ToolEnv, call: NestedCall, ask: AskQuestions, audience: QuestionAudience = "user"): Tool[] {
+	return [readTool(env), writeTool(env), editTool(env), grepTool(env), globTool(env), shellTool(env), runTool(call), questionTool(ask, audience)].sort((a, b) =>
 		a.name.localeCompare(b.name),
 	);
 }

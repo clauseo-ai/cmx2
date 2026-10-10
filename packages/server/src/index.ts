@@ -1583,7 +1583,8 @@ export function serve(opts: ServeOptions) {
 			afterTurn: () => locks.release(id),
 			askPermission: (ask: Parameters<Asks["permission"]>[2], signal?: AbortSignal) => asks.permission(id, directory, ask, signal),
 			savedRules: () => store.rules([project, id]) as PermissionRule[],
-			askQuestion: (ask: Parameters<Asks["question"]>[2], signal?: AbortSignal) => asks.question(id, directory, ask, signal),
+			// a helper asks the agent that started it; only the root (or a session outside any tree) asks the user
+			askQuestion: (ask: Parameters<Asks["question"]>[2], signal?: AbortSignal) => (child && actors.isChild(id) ? actors.ask(id, ask.questions, signal) : asks.question(id, directory, ask, signal)),
 		};
 	}
 

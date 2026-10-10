@@ -4,6 +4,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import type { MailRecord, TurnEvent } from "@cmx2/engine/session";
 import { type Effort, modelId, type Routing, RoutingError } from "@cmx2/routing";
 import type { AgentRow, AgentState, MailKind, MailRow, Store } from "@cmx2/store";
+import type { AgentAnswer, QuestionPrompt } from "@cmx2/tools";
 import { computeViolations, resolveContract } from "./contracts.ts";
 import { childPath, isAncestor, nameFrom, ROOT_PATH, validName } from "./paths.ts";
 import { attemptAttachment, helperFragment, taskEnvelope } from "./prompt.ts";
@@ -193,6 +194,17 @@ interface Waiter {
 	resolve: (m: MailRow | undefined) => void;
 }
 
+/** a helper's question out to its spawner: the helper's tool call waits on it */
+interface PendingAsk {
+	id: string;
+	childID: string;
+	parentID: string;
+	/** the mail that carries the question to the spawner */
+	mailID: string;
+	resolve: (a: AgentAnswer) => void;
+	reject: (e: Error) => void;
+}
+
 interface PoolState {
 	id: string;
 	name: string;
@@ -219,6 +231,21 @@ function firstLine(s: string | null | undefined, max = 120): string {
 	return line.length > max ? `${line.slice(0, max - 3)}...` : line;
 }
 
+/** the mail a helper's question becomes: the questions with their options, then how to answer */
+export function askBody(from: { path: string }, questions: QuestionPrompt[], id: string): string {
+	const lines = [`${from.path} asks you, and waits for your answer:`, ""];
+	questions.forEach((q, i) => {
+		lines.push(`${questions.length > 1 ? `${i + 1}. ` : ""}${q.header ? `${q.header}: ` : ""}${q.question}`);
+		for (const o of q.options ?? []) lines.push(`   - ${o.label}${o.description ? `: ${o.description}` : ""}`);
+		if (q.multiple) lines.push("   (more than one may be chosen)");
+	});
+	lines.push(
+		"",
+		`answer with message(to: "${from.path}", body: <your answer>, correlation_id: "${id}"). answer from what you know when you can; when you cannot, ask with your own question tool and pass the answer on. it reads nothing else until you answer, and if you end your turn without answering it goes on without one.`,
+	);
+	return lines.join("\n");
+}
+
 export class Actors {
 	private readonly store: Store;
 	private readonly host: Host;
@@ -229,8 +256,10 @@ export class Actors {
 	private readonly running = new Map<string, Set<string>>();
 	/** per tree: children waiting for a slot, and lenders reclaiming theirs (first) */
 	private readonly queue = new Map<string, Array<{ id: string; resolve?: () => void }>>();
-	/** agents in `wait` who lent their slot out */
+	/** agents in `wait` or `question` who lent their slot out */
 	private readonly lent = new Set<string>();
+	/** helpers' questions out to their spawners, by correlation id */
+	private readonly asking = new Map<string, PendingAsk>();
 	/** who stopped a turn and why, so the watcher knows whether to report */
 	private readonly interrupting = new Map<string, { by: string; cause: "interrupted" | "closed" | "budget" | "pool" }>();
 	private readonly lastParked = new Map<string, string>();
@@ -835,6 +864,14 @@ export class Actors {
 		if (!input.body?.trim()) throw new ActorError("BadRequestError", 400, "a message needs a body");
 		const t = this.resolve(sender, input.to);
 		if (t.id === sender.id) throw new ActorError("BadRequestError", 400, "that is you; message another agent");
+		// a helper blocked on its question reads nothing else until it is answered, so any note from the agent it asked is the answer
+		const ask = this.askFor(t.id, sender.id, input.correlation_id);
+		if (ask) {
+			this.asking.delete(ask.id);
+			ask.resolve({ by: sender.path, text: input.body });
+			this.host.publish(sender.root_id, "agent.message", { sessionID: sender.id, from: sender.path, to: t.path, toID: t.id, wake: false, length: input.body.length, correlation_id: ask.id });
+			return { to: t.path, id: t.id, state: this.rows.get(t.id)!.state, woke: false, pending: this.rows.pending(t.id).length };
+		}
 		const wake = input.wake ?? true;
 		if (wake && t.depth > 0) this.checkBudget(t.root_id);
 		const fromParent = t.parent_id === sender.id;
@@ -899,6 +936,61 @@ export class Actors {
 			return { arrived: false, timed_out: true, waited_ms: waited, items: [], ...extra };
 		}
 		return { arrived: true, timed_out: false, waited_ms: waited, items: [item(got)], ...extra };
+	}
+
+	/** the open question a note from `fromID` to `toID` answers: the one its correlation id names, else the oldest */
+	private askFor(toID: string, fromID: string, correlation?: string): PendingAsk | undefined {
+		const open = [...this.asking.values()].filter((q) => q.childID === toID && q.parentID === fromID);
+		return open.find((q) => q.id === correlation) ?? open[0];
+	}
+
+	/** whether a helper has a question out to its spawner */
+	isAsking(sessionID: string): boolean {
+		for (const q of this.asking.values()) if (q.childID === sessionID) return true;
+		return false;
+	}
+
+	/**
+	 * a helper's question tool. the question goes to its spawner as mail (waking it when it is parked) and the call
+	 * waits until the spawner answers with a message. the spawner answers from what it knows or asks further up with
+	 * its own question tool, so at the root it reaches the user. the helper's slot is lent out while it waits. the
+	 * call fails when the helper's turn stops, or when the spawner ends a turn that read the question without answering.
+	 */
+	async ask(sessionID: string, questions: QuestionPrompt[], signal?: AbortSignal): Promise<AgentAnswer> {
+		const a = this.rowOf(sessionID);
+		const parent = a.parent_id ? this.rows.get(a.parent_id) : undefined;
+		if (!parent || parent.state === "closed") throw new ActorError("AgentNotFoundError", 404, "the agent that started you is gone, so nobody can answer; decide with what you have and say what you assumed");
+		if (signal?.aborted) throw new Error("the turn was stopped before the question went out");
+		const id = `ask_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+		const mail = this.post(parent, { kind: "message", from: a, body: askBody(a, questions, id), wake: true, system: true, correlation_id: id, meta: { label: "question", questions: questions.length } });
+		this.host.publish(a.root_id, "agent.message", { sessionID: a.id, from: a.path, to: parent.path, toID: parent.id, wake: true, length: mail.body.length, correlation_id: id });
+		this.setState(a.id, "working", { cause: "asking" });
+		this.lend(a);
+		let onAbort: (() => void) | undefined;
+		try {
+			return await new Promise<AgentAnswer>((resolve, reject) => {
+				this.asking.set(id, { id, childID: a.id, parentID: parent.id, mailID: mail.id, resolve, reject });
+				onAbort = () => {
+					if (this.asking.delete(id)) reject(new Error("the turn was stopped while the question waited for an answer"));
+				};
+				signal?.addEventListener("abort", onAbort, { once: true });
+			});
+		} finally {
+			if (onAbort) signal?.removeEventListener("abort", onAbort);
+			this.asking.delete(id);
+			await this.reclaim(a);
+			const now = this.rows.get(a.id);
+			if (now?.state === "working" && now.cause === "asking" && !this.isAsking(a.id)) this.setState(a.id, "working", { cause: null });
+		}
+	}
+
+	/** questions a spawner read in the turn that just ended and did not answer: the helpers go on without an answer */
+	private settleUnanswered(parent: AgentRow) {
+		for (const q of [...this.asking.values()]) {
+			if (q.parentID !== parent.id || !this.rows.mail(q.mailID)?.delivered_at) continue;
+			this.asking.delete(q.id);
+			q.reject(new Error(`${parent.path} ended its turn without answering. decide with what you have and say what you assumed, or end your turn with ABORT(user_question): <the question>`));
+		}
 	}
 
 	/** ends an agent for good, leaves first: its turn stops, its processes are reaped, it leaves the roster as a tombstone */
@@ -997,6 +1089,7 @@ export class Actors {
 
 	private async turnEnded(a: AgentRow, e: Extract<TurnEvent, { type: "end" }>) {
 		if (a.depth > 0) this.runningOf(a.root_id).delete(a.id);
+		this.settleUnanswered(a);
 		const intr = this.interrupting.get(a.id);
 		this.interrupting.delete(a.id);
 		const now = this.rows.get(a.id)!;

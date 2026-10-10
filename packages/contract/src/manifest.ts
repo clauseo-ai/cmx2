@@ -126,7 +126,7 @@ export const ToolStateRunning = Type.Object(
 );
 export const ToolStatePending = Type.Object({ status: Type.Literal("pending"), input: ToolInput }, { additionalProperties: true });
 export const ToolStateCompleted = Type.Object(
-	{ status: Type.Literal("completed"), input: ToolInput, output: Type.String(), title: Type.String(), metadata: Type.Record(Type.String(), Type.Unknown(), { description: "what the tool reported. a completed edit or write carries filediff {file, patch, additions, deletions} (the shape imported history has; the patch is a unified patch cut at 64 KB, 8 KB for a file the call created, the counts cover the whole change) and truncated (the patch was cut). a change too big to diff (a changed region over 32 MB, or a file over 64 MB) carries no filediff: counts made up for it would look exact" }), time: ToolTime },
+	{ status: Type.Literal("completed"), input: ToolInput, output: Type.String(), title: Type.String(), metadata: Type.Record(Type.String(), Type.Unknown(), { description: "what the tool reported. a completed edit or write carries filediff {file, patch, additions, deletions} (the shape imported history has; the patch is a unified patch cut at 64 KB, 8 KB for a file the call created, the counts cover the whole change) and truncated (the patch was cut). a change too big to diff (a changed region over 32 MB, or a file over 64 MB) carries no filediff: counts made up for it would look exact" }), time: ToolTime, attachments: Type.Optional(Type.Array(Type.Object({ type: Type.Literal("file"), mime: Type.String(), filename: Type.String(), url: Type.String({ description: "a data url" }) }, { additionalProperties: true }), { description: "the images the tool returned (a read of an image, a screenshot), for clients to preview; present only when the result carried at least one. in result order, at most 8 and at most 4 MB of data urls per part; the filename is the label the tool gave the image (the file name for a read), else image" })), attachmentsDropped: Type.Optional(Type.Number({ description: "how many of the result's images were left off attachments by the 8 image or 4 MB cap; absent when none were" })) },
 	{ additionalProperties: true },
 );
 export const ToolStateError = Type.Object({ status: Type.Literal("error"), input: ToolInput, error: Type.String(), time: ToolTime }, { additionalProperties: true });
@@ -312,7 +312,7 @@ export const AgentInfo = Type.Object(
 		state: Type.Union([Type.Literal("queued"), Type.Literal("working"), Type.Literal("parked"), Type.Literal("interrupted"), Type.Literal("closed")], {
 			description: "queued waits for a running-turn slot; parked is idle, addressable and free; closed is a tombstone",
 		}),
-		cause: Type.Optional(Type.String({ description: "why it is interrupted or closed: interrupted, budget, daemon_restart, closed, respawned, pool_collected, pool_failed, session_ended" })),
+		cause: Type.Optional(Type.String({ description: "why it is interrupted or closed: interrupted, budget, daemon_restart, closed, respawned, pool_collected, pool_failed, session_ended; or asking while a working helper waits on its question to its spawner" })),
 		previousState: Type.Optional(Type.String()),
 		files: Type.Array(Type.String(), { description: "paths it wrote or edited" }),
 		lastTask: Type.Optional(Type.String()),

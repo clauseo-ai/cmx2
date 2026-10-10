@@ -72,6 +72,17 @@ export type ToolStateCompleted = {
 		end?: number;
 		[key: string]: unknown;
 	};
+	/** the images the tool returned (a read of an image, a screenshot), for clients to preview; present only when the result carried at least one. in result order, at most 8 and at most 4 MB of data urls per part; the filename is the label the tool gave the image (the file name for a read), else image */
+	attachments?: Array<{
+		type: "file";
+		mime: string;
+		filename: string;
+		/** a data url */
+		url: string;
+		[key: string]: unknown;
+	}>;
+	/** how many of the result's images were left off attachments by the 8 image or 4 MB cap; absent when none were */
+	attachmentsDropped?: number;
 	[key: string]: unknown;
 };
 
@@ -994,7 +1005,7 @@ export interface EventMap {
 			effort: string | null;
 			/** queued waits for a running-turn slot; parked is idle, addressable and free; closed is a tombstone */
 			state: "queued" | "working" | "parked" | "interrupted" | "closed";
-			/** why it is interrupted or closed: interrupted, budget, daemon_restart, closed, respawned, pool_collected, pool_failed, session_ended */
+			/** why it is interrupted or closed: interrupted, budget, daemon_restart, closed, respawned, pool_collected, pool_failed, session_ended; or asking while a working helper waits on its question to its spawner */
 			cause?: string;
 			previousState?: string;
 			/** paths it wrote or edited */
@@ -1042,7 +1053,7 @@ export interface EventMap {
 			effort: string | null;
 			/** queued waits for a running-turn slot; parked is idle, addressable and free; closed is a tombstone */
 			state: "queued" | "working" | "parked" | "interrupted" | "closed";
-			/** why it is interrupted or closed: interrupted, budget, daemon_restart, closed, respawned, pool_collected, pool_failed, session_ended */
+			/** why it is interrupted or closed: interrupted, budget, daemon_restart, closed, respawned, pool_collected, pool_failed, session_ended; or asking while a working helper waits on its question to its spawner */
 			cause?: string;
 			previousState?: string;
 			/** paths it wrote or edited */
@@ -1090,7 +1101,7 @@ export interface EventMap {
 			effort: string | null;
 			/** queued waits for a running-turn slot; parked is idle, addressable and free; closed is a tombstone */
 			state: "queued" | "working" | "parked" | "interrupted" | "closed";
-			/** why it is interrupted or closed: interrupted, budget, daemon_restart, closed, respawned, pool_collected, pool_failed, session_ended */
+			/** why it is interrupted or closed: interrupted, budget, daemon_restart, closed, respawned, pool_collected, pool_failed, session_ended; or asking while a working helper waits on its question to its spawner */
 			cause?: string;
 			previousState?: string;
 			/** paths it wrote or edited */

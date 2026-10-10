@@ -460,7 +460,7 @@ export function createClient(opts: ClientOptions) {
 					effort: string | null;
 					/** queued waits for a running-turn slot; parked is idle, addressable and free; closed is a tombstone */
 					state: "queued" | "working" | "parked" | "interrupted" | "closed";
-					/** why it is interrupted or closed: interrupted, budget, daemon_restart, closed, respawned, pool_collected, pool_failed, session_ended */
+					/** why it is interrupted or closed: interrupted, budget, daemon_restart, closed, respawned, pool_collected, pool_failed, session_ended; or asking while a working helper waits on its question to its spawner */
 					cause?: string;
 					previousState?: string;
 					/** paths it wrote or edited */
@@ -537,7 +537,7 @@ export function createClient(opts: ClientOptions) {
 					effort: string | null;
 					/** queued waits for a running-turn slot; parked is idle, addressable and free; closed is a tombstone */
 					state: "queued" | "working" | "parked" | "interrupted" | "closed";
-					/** why it is interrupted or closed: interrupted, budget, daemon_restart, closed, respawned, pool_collected, pool_failed, session_ended */
+					/** why it is interrupted or closed: interrupted, budget, daemon_restart, closed, respawned, pool_collected, pool_failed, session_ended; or asking while a working helper waits on its question to its spawner */
 					cause?: string;
 					previousState?: string;
 					/** paths it wrote or edited */

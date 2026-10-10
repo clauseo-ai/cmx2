@@ -8,6 +8,7 @@ import { type Api, getCurrentTools, type Model, normalizeContext } from "@earend
 import { profileFor, profileText } from "@cmx2/prompts";
 import {
 	type AfterWrite,
+	type AgentAnswer,
 	type AskQuestions,
 	type Before,
 	type CallDecision,
@@ -348,8 +349,8 @@ export interface EngineSessionOptions {
 	savedRules?: () => PermissionRule[];
 	/** what the session has running, appended to the turn context when it changed */
 	ledger?: () => string | undefined;
-	/** answers the question tool; without it the tool reports that nobody can answer */
-	askQuestion?: (ask: QuestionAsk, signal?: AbortSignal) => Promise<string[][]>;
+	/** answers the question tool (a helper's goes to its spawner, which answers in text); without it the tool reports that nobody can answer */
+	askQuestion?: (ask: QuestionAsk, signal?: AbortSignal) => Promise<string[][] | AgentAnswer>;
 	/** the session's processes, bound to it; without them background jobs and ptys are unavailable */
 	procs?: ProcHost;
 	/** skills for this working directory, shared so a config reload can flush them; one is made when absent */
@@ -599,7 +600,7 @@ export class EngineSession {
 		};
 		const exclude = this.exclude;
 		const memory = [notesTool(this.notesFile), recallTool((query, limit) => this.recall(query, limit))];
-		this.hot = [...hotTools(env, (tool, args, signal) => this.nestedCall(tool, args, signal), ask), search, ...memory, ...(this.opts.extraTools ?? [])]
+		this.hot = [...hotTools(env, (tool, args, signal) => this.nestedCall(tool, args, signal), ask, this.opts.child ? "spawner" : "user"), search, ...memory, ...(this.opts.extraTools ?? [])]
 			.filter((t) => !exclude.has(t.name))
 			.sort((a, b) => a.name.localeCompare(b.name));
 

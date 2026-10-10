@@ -40,6 +40,36 @@ function textOf(content: unknown): string {
 		.join("\n");
 }
 
+/** a completed tool part carries at most this many of its result's images, and at most this many characters of their data urls */
+export const TOOL_ATTACHMENTS_MAX = 8;
+export const TOOL_ATTACHMENTS_BUDGET = 4 * 1024 * 1024;
+
+/**
+ * the images a tool result returned, as file attachments clients can preview. taken in order; an image that would pass
+ * TOOL_ATTACHMENTS_MAX images or TOOL_ATTACHMENTS_BUDGET characters of data urls is left off and counted in dropped.
+ * the filename is the label from the caption the tools put before an image ("image <label> (WxH, ...)"), else "image"
+ */
+export function toolAttachments(content: unknown): { attachments: Array<{ type: "file"; mime: string; filename: string; url: string }>; dropped: number } {
+	const attachments: Array<{ type: "file"; mime: string; filename: string; url: string }> = [];
+	let dropped = 0;
+	let used = 0;
+	if (!Array.isArray(content)) return { attachments, dropped };
+	content.forEach((b: any, i: number) => {
+		if (b?.type !== "image" || typeof b.data !== "string" || !b.data) return;
+		const mime = typeof b.mimeType === "string" && b.mimeType ? b.mimeType : "image/png";
+		const url = `data:${mime};base64,${b.data}`;
+		if (attachments.length >= TOOL_ATTACHMENTS_MAX || used + url.length > TOOL_ATTACHMENTS_BUDGET) {
+			dropped++;
+			return;
+		}
+		used += url.length;
+		const prev = content[i - 1] as any;
+		const label = prev?.type === "text" ? String(prev.text ?? "").match(/^image (.+?) \((?:\d+x\d+|unknown size), /)?.[1] : undefined;
+		attachments.push({ type: "file", mime, filename: label ? (label.split(/[\\/]/).pop() || label) : "image", url });
+	});
+	return { attachments, dropped };
+}
+
 function cap(s: string, max: number): string {
 	return s.length <= max ? s : `${s.slice(0, max)}\n…[${s.length - max} more characters in the transcript]`;
 }
@@ -299,9 +329,19 @@ export function projectMessage(store: Store, ctx: ProjectContext, m: any): Touch
 		const data = JSON.parse(part.data);
 		const output = cap(textOf(m.content), TOOL_OUTPUT_CAP);
 		const time = { ...(data.state?.time ?? {}), end: ctx.completedAt ?? data.state?.time?.end ?? created };
+		const images = m.isError ? undefined : toolAttachments(m.content);
 		data.state = m.isError
 			? { status: "error", input: data.state?.input ?? {}, error: output, time }
-			: { status: "completed", input: data.state?.input ?? {}, output, title: toolTitle(m.toolName, data.state?.input, m.details), metadata: summariseDetails(m.details, m.toolName), time };
+			: {
+					status: "completed",
+					input: data.state?.input ?? {},
+					output,
+					title: toolTitle(m.toolName, data.state?.input, m.details),
+					metadata: summariseDetails(m.details, m.toolName),
+					time,
+					...(images?.attachments.length ? { attachments: images.attachments } : {}),
+					...(images?.dropped ? { attachmentsDropped: images.dropped } : {}),
+				};
 		store.putPart({ ...part, data: JSON.stringify(data) });
 		store.putRecallDoc(doc(ctx, part.message_id, `out:${m.toolCallId}`, "tool", "tool output", created, textOf(m.content), { tool: m.toolName, call_id: m.toolCallId }));
 		const closed = closeIfDone(store, part.message_id, time.end);

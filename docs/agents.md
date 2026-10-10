@@ -36,6 +36,12 @@ and transcript, a path in the tree (`/root/<name>[/<child>]`) and a model from t
   substantive text says so first. a last line `ABORT(<reason>): <details>` (spec_wrong,
   transient_tool_error, out_of_scope, context_full, approach_failed, user_question) is parsed, and
   behaviour contracts per agent type flag a missing deliverable or an undeclared reason.
+- **a helper's questions go to its spawner.** a helper's `question` tool sends the questions to the agent that
+  started it as a message with a `correlation_id` (waking it when it is parked) and waits. any `message` from that
+  agent to the helper is the answer and comes back as the tool result. the spawner answers from what it knows or
+  asks with its own `question` tool, so a question reaches the user only through the root. while it waits the
+  helper's `cause` is `asking` and its running-turn slot is lent out. the call fails when the helper's turn is
+  stopped, or when the spawner ends a turn that read the question without answering.
 - **mailboxes hold 32 unread notes**; a full one answers `MailboxFullError`. reports and lifecycle notes
   never bounce.
 - **siblings share a cache.** a child's system prompt depends only on its agent type; its name, path,
