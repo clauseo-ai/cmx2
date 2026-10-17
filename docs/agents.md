@@ -35,7 +35,9 @@ and transcript, a path in the tree (`/root/<name>[/<child>]`) and a model from t
   went unnoticed. see the caps section of [routing.md](routing.md).
 - **reports are bounded.** the deliverable comes from the turn that just ended, never from an earlier
   task, and is cut at 12,000 characters (the rest stays in the child's transcript). a report with no
-  substantive text says so first. a last line `ABORT(<reason>): <details>` (spec_wrong,
+  substantive text says so first. a failed turn's text comes with a line that says what it is: what the
+  failing message had written when it broke, or the child's last note from earlier in the turn, never a
+  report. a last line `ABORT(<reason>): <details>` (spec_wrong,
   transient_tool_error, out_of_scope, context_full, approach_failed, user_question) is parsed, and
   behaviour contracts per agent type flag a missing deliverable or an undeclared reason.
 - **a helper's questions go to its spawner.** a helper's `question` tool sends the questions to the agent that

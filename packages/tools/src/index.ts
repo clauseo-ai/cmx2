@@ -1,4 +1,4 @@
-import { webfetchTool, websearchTool } from "./deferred.ts";
+import { webcrawlTool, webfetchTool, websearchTool } from "./deferred.ts";
 import { editTool, globTool, grepTool, readTool, writeTool } from "./fs.ts";
 import { type LspPool, lspTool } from "./lsp.ts";
 import { procTools } from "./procs.ts";
@@ -7,11 +7,13 @@ import { runTool } from "./run.ts";
 import { shellTool } from "./shell.ts";
 import { type Skills, skillTool } from "./skills.ts";
 import type { NestedCall, Tool, ToolEnv } from "./types.ts";
+import type { WebOptions } from "./web.ts";
 
 export * from "./types.ts";
 export { nestedDetails, shrinkDetails, titleLine, toolTitle } from "./record.ts";
 export { diffOnDisk, fileDiff, snapshot, CREATED_PATCH_CAP, DIFF_MAX_BYTES, MIDDLE_MAX_BYTES, PATCH_CAP, type Before, type FileDiff, type FileDiffResult } from "./diff.ts";
 export { toolSearchTool, websearchUrl, type DeferredEntry, type SearchResult } from "./deferred.ts";
+export { pickSearch, SEARCH_ENV_KEYS, SEARCH_PROVIDERS, type SearchHit, type SearchProviderName, type WebOptions } from "./web.ts";
 export type { RunDetails, NestedCallRecord } from "./run.ts";
 export { RUN_DESCRIPTION } from "./run.ts";
 export { runCommand, outputImages, type ShellResult } from "./shell.ts";
@@ -39,11 +41,14 @@ export interface DeferredOptions {
 	skills?: Skills;
 	/** the daemon's language servers; without them there is no lsp tool */
 	lsp?: LspPool;
+	/** the profile's web provider for websearch, webfetch and webcrawl; without it the first key in the environment picks, else keyless tavily */
+	web?: WebOptions;
 }
 
 /** tools kept out of the prefix until tool_search loads them */
 export function deferredTools(env: ToolEnv, opts: DeferredOptions = {}): Tool[] {
-	const tools = [webfetchTool(env), websearchTool(env)];
+	const tools = [webfetchTool(env, opts.web), websearchTool(env, opts.web)];
+	if (opts.web?.crawl) tools.push(webcrawlTool(env, opts.web));
 	if (opts.skills) tools.push(skillTool(opts.skills, env));
 	if (opts.lsp) tools.push(lspTool(opts.lsp, env));
 	return tools.sort((a, b) => a.name.localeCompare(b.name));

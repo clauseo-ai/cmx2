@@ -289,6 +289,9 @@ export function checksFor(tool: string, args: any, cwd: string): PermissionCheck
 		case "webfetch":
 			checks.push({ permission: "webfetch", patterns: [String(args?.url ?? "")], always: ["*"], metadata: { url: args?.url } });
 			break;
+		case "webcrawl":
+			checks.push({ permission: "webcrawl", patterns: [String(args?.url ?? "")], always: ["*"], metadata: { url: args?.url } });
+			break;
 		case "websearch":
 			checks.push({ permission: "websearch", patterns: [String(args?.query ?? "")], always: ["*"], metadata: { query: args?.query } });
 			break;

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mcpContent } from "../src/mcp.ts";
+import { mcpContent, wrap } from "../src/mcp.ts";
 import { MAX_EDGE, readDimensions } from "../src/image.ts";
 import type { ImagePart, TextPart } from "../src/types.ts";
 import { makePng } from "./helpers.ts";
@@ -36,4 +36,13 @@ test("an mcp image that is not an image comes back as a placeholder line, and te
 test("a tool that returns nothing says so", async () => {
 	const parts = await mcpContent(call([]), "shots", "capture", toLlmContent);
 	expect((parts[0] as TextPart).text).toBe("(the tool returned nothing)");
+});
+
+test("a tool is read-only only when its server says readOnlyHint: true", () => {
+	const client = () => { throw new Error("not called"); };
+	const as = (annotations?: object) => wrap("srv", { name: "t", inputSchema: { type: "object" }, ...(annotations ? { annotations } : {}) } as never, client, toLlmContent);
+	expect(as({ readOnlyHint: true }).readOnly).toBe(true);
+	expect(as({ readOnlyHint: false }).readOnly).toBe(false);
+	expect(as({ destructiveHint: false }).readOnly).toBe(false);
+	expect(as().readOnly).toBe(false);
 });

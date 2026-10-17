@@ -35,12 +35,23 @@
   "notify": true,
   // compaction: at 300k tokens (or a fraction of the window, like 0.8) the context becomes a summary plus the
   // recent messages; the summary starts in the background at 85% of that; the newest 10% stays verbatim and
-  // keeps its newest 40k tokens of tool output whole. the transcript keeps everything; recall reads it back
-  "compaction": { "auto": true, "at": 300000, "prefire": 0.85, "keep": 0.1, "protect": 40000 },
+  // keeps its newest 40k tokens of tool output whole. the transcript keeps everything; recall reads it back.
+  // cold: a session idle at 200k or more makes its summary shortly before its prompt cache expires (a cheap
+  // cache read), and the first request after the cache expired compacts with it instead of paying to write the
+  // whole context again; a session that never comes back pays for that one summary. a token count, a fraction
+  // of the window, or false to turn it off
+  "compaction": { "auto": true, "at": 300000, "prefire": 0.85, "keep": 0.1, "protect": 40000, "cold": 200000 },
   // images cost a request bytes long before they cost compaction tokens. past 12 MB of base64 images in the
   // context, the oldest ones the model has seen leave it in one batch, down to 40% of that, and the model
   // reads a marker where each was (it can read the file again). false turns this off; a request that would
   // pass maxRequestBytes still drops. the transcript keeps every image
   "images": { "budget": 12000000, "keep": 0.4 },
+  // the web tools. with no "web" entry, the first of TAVILY_API_KEY, EXA_API_KEY, BRAVE_API_KEY in the environment
+  // picks the provider, and with none search goes through tavily's free keyless mode (https://tavily.com; a free
+  // key with 1,000 credits a month is at https://app.tavily.com). apiKey takes a literal, $NAME or !command like
+  // a provider key; search holds extra request fields; fetch "provider" reads public pages through tavily extract
+  // and crawl true adds webcrawl (both need provider tavily, both off by default)
+  "web": { "provider": "tavily", "apiKey": "$TAVILY_API_KEY", "search": { "search_depth": "advanced" }, "fetch": "local", "crawl": false },
+  // "web": { "provider": "searxng", "url": "http://127.0.0.1:8888" },
   "server": { "hostname": "127.0.0.1", "port": 4097 }
 }

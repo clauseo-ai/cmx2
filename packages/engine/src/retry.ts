@@ -2,9 +2,13 @@ import { type AssistantMessage, type AssistantMessageEvent, type AssistantMessag
 import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 
 /**
- * transient provider failures (429, 529, overloaded, 5xx) are retried with backoff and jitter before a
- * turn sees them. only a failure that arrives before any content is retried: once text or a tool call
- * has streamed to the session, a retry would replay it, so that error passes through as it is.
+ * transient provider failures (429, 529, overloaded, 5xx, a dropped connection) are retried with backoff
+ * and jitter before a turn sees them. a failure is retried until text or a tool call has streamed: a retry
+ * would replay those, so that error passes through as it is. thinking alone does not stop a retry. the
+ * retried attempt's own start event is dropped, so pi's agent loop keeps the one message it opened and
+ * replaces its content with the retried attempt's partials: the failed attempt's unsigned thinking never
+ * reaches the transcript or the next request. clients see the part restart: the retry's request resets
+ * the session's streaming parts (onPayload), so its first token announces the message and its parts again.
  */
 export interface RetryPolicy {
 	/** retries after the first attempt */
@@ -23,7 +27,12 @@ export interface RetryHooks {
 	onRetry?: (attempt: number, delayMs: number, message: string) => void;
 	/** the retry's request is going out (the wait is over) */
 	onResume?: () => void;
+	/** the failed attempt had streamed thinking, which the retry discards and streams again; called before onRetry */
+	onDiscard?: () => void;
 }
+
+/** the events a retry may discard and stream again; any other event commits the attempt */
+const THINKING = new Set<string>(["thinking_start", "thinking_delta", "thinking_end"]);
 
 /** 429 and 5xx by status too: pi's classifier reads the text, and a bare "529" is easy to miss */
 export function retryable(m: AssistantMessage): boolean {
@@ -63,6 +72,8 @@ export function withRetry(produce: () => Promise<AssistantMessageEventStream>, o
 	const policy = opts.policy ?? DEFAULT_RETRY;
 	const out = createAssistantMessageEventStream();
 	void (async () => {
+		// a start reached the loop: a later attempt's start is dropped, the loop already holds that message
+		let opened = false;
 		for (let attempt = 0; ; attempt++) {
 			let inner: AssistantMessageEventStream;
 			try {
@@ -74,8 +85,11 @@ export function withRetry(produce: () => Promise<AssistantMessageEventStream>, o
 				out.end();
 				return;
 			}
-			let held: AssistantMessageEvent[] = [];
-			let flowing = false;
+			// held: this attempt's start, until something follows it. committed: text, a tool call or the end
+			// reached the loop, so a failure is no longer retried. streamed: thinking reached it
+			let held: AssistantMessageEvent | undefined;
+			let committed = false;
+			let streamed = false;
 			let retry: string | undefined;
 			let since = performance.now();
 			for await (const ev of inner) {
@@ -85,26 +99,29 @@ export function withRetry(produce: () => Promise<AssistantMessageEventStream>, o
 					await new Promise((ok) => setImmediate(ok));
 					since = performance.now();
 				}
-				if (!flowing && ev.type === "error" && attempt < policy.maxRetries && !opts.signal?.aborted && retryable(ev.error)) {
+				if (!committed && ev.type === "error" && attempt < policy.maxRetries && !opts.signal?.aborted && retryable(ev.error)) {
 					retry = ev.error.errorMessage ?? "the provider failed";
 					break;
 				}
-				if (!flowing && ev.type === "start") {
-					held.push(ev);
+				if (ev.type === "start") {
+					if (!opened) held = ev;
 					continue;
 				}
-				if (!flowing) {
-					for (const h of held) out.push(h);
-					held = [];
-					flowing = true;
+				if (held) {
+					out.push(held);
+					held = undefined;
+					opened = true;
 				}
+				if (THINKING.has(ev.type)) streamed = true;
+				else committed = true;
 				out.push(ev);
 			}
 			if (retry === undefined) {
-				for (const h of held) out.push(h);
+				if (held) out.push(held);
 				out.end();
 				return;
 			}
+			if (streamed) opts.hooks?.onDiscard?.();
 			const delay = retryDelay(policy, attempt + 1);
 			opts.hooks?.onRetry?.(attempt + 1, delay, retry);
 			const slept = await sleep(delay, opts.signal);

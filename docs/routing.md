@@ -23,8 +23,8 @@ every spawn reads the table fresh: cmx2 checks the files' size and modification 
 
 ```jsonc
 "models": {
-  "haiku": { "ref": "anthropic/claude-haiku-5-5", "effort": "high", "note": "cheapest and fastest; bounded work; costs 5× once a request reaches 100k tokens" },
-  "sonnet": { "ref": "anthropic/claude-sonnet-5-5", "effort": "high", "note": "routine and terminal-heavy implementation, ui, docs" }
+  "haiku": { "ref": "anthropic/claude-haiku-5-5", "effort": "high", "note": "where bounded work starts; about a seventeenth of a sonnet step under 100k tokens of context and about a third past it, so split at 100k when the work splits" },
+  "sonnet": { "ref": "anthropic/claude-sonnet-5-5", "effort": "high", "note": "ui, docs and copy, work the brief cannot pin down, diagnosis; about 17× a haiku step under 100k tokens of context" }
 }
 ```
 
@@ -41,7 +41,41 @@ the guide is a list of `{ task, start, up? }` rows: the kind of task, where to s
 
 notes, guide and rules are text the model reads, so they follow the voice rules: no en or em dashes, and none of `DO NOT`, `MUST` or `IMPORTANT`. a file that breaks them does not load (`invalid_guide`).
 
+the shipped guide is haiku first, with opus as the step up: its first row names haiku as the start for any bounded task whose brief pins down the behaviour and the checks, and the other rows are the exceptions (exploration, judgment, ui, docs, diagnosis, hard debugging and reviews, all on opus). the rules ask a spawn above haiku to say in its brief, in one line, why haiku cannot do the task. this is deliberate. left to choose, a driver picks the model it trusts over the cheapest one that can do the job: across two threads in october 2026 where the user said nothing about models, 0 of 43 helpers ran on haiku, while a thread that asked for haiku shipped its core code on haiku with a review after each task. the price ratios in the notes are averages per helper step from the step table in the same month (haiku about $0.002 under 100k tokens of context, sonnet about $0.03, opus about $0.06); they follow the list prices, so revise them when those move. per task the sonnet to opus gap closes: sonnet high writes about 1.4× the output tokens per step and takes about twice the steps per review, so matched reviews in the same thread cost about the same on either (iOS: $1.48 against $1.35). that is why the step up from haiku is opus rather than sonnet. sonnet has no start row: at the same per-task cost it sits a little behind opus on the design boards (design arena, read 2026-10-11: opus 1417 overall, 1400 on ui components, 1335 on websites; sonnet 1382, 1384, 1314) and well behind on writing (arena creative writing: opus 5.5 high 1516, sonnet 5.5 xhigh 1447). it stays in the table for the cases where per-step price matters: short tasks, or one long read that cannot be split.
+
 stepping up is a spawn with `after` (an id, a path or a name): the new helper starts with the earlier helper's brief and last report attached. the earlier helper keeps running unless you close it. a `step_up` metric is recorded when the model or the effort changes and a `retry` when neither does (`cmx2 stats` counts both per model). the third attempt on one model is told which attempt it is.
+
+opus runs at high by default for helpers. at medium it stops short of the checks: across 55 opus medium helpers in october 2026 it ran half the steps of high (86 against 181) and the owner found the results unfinished. high costs more per helper, mostly because it runs longer and its context grows; the 250k rule and compaction are what hold that down, not the effort.
+
+## tuning the guide
+
+the guide is revised from sessions, not from first principles. two sources feed it: what the driver saw, which only it knows, and what the step table recorded, which `cmx2 stats --session <id>` prints (cost split between the session and its helpers, helpers by model with step-ups and retries, helpers that passed 250k tokens of context).
+
+at the end of a session, paste this as the last message. the driver still has its context, so it can account for each spawn; the fixed shape makes the reports easy to compile across sessions.
+
+```text
+routing debrief. answer from what you already have in context; spawn nothing and read nothing new. facts and outcomes only: your own verdict on your own choices is not evidence. keep it under 600 words, in this shape.
+
+1. session: what was built, in one line. your model and effort. what the user said about models or cost, quoted, or "nothing".
+
+2. helpers: one line each. name | model and effort | the guide row it matched, or "none" | if above haiku, the one-line reason from the brief, verbatim | outcome: first pass shipped, shipped after N fix rounds, stepped up to X, abandoned | defects a review found, as a count and the worst one | peak context, if you know it.
+
+3. where you did not follow the guide, and why. include spawns you considered and did not make.
+
+4. haiku: what it did well and where it fell short, each with the helper name and what happened. "needs judgment" is not a finding; say which decision it got wrong or could not make.
+
+5. misrouted: tasks that went above haiku and could have gone to haiku with a tighter brief, and the reverse. for each, what the brief would have had to say.
+
+6. briefs: decisions a helper made mid-task that belonged in the brief. targets (frame time, latency, size) nobody stated and the result missed because of it.
+
+7. you: steps you spent reading files or running commands that a helper could have done, roughly. your peak context. anything you held in context that you only needed a digest of.
+
+8. proposals: at most five, each as a routing.jsonc row, note or rule, each tied to a numbered observation above. no proposal without an observation.
+
+9. keep as is, and unsure: what this session confirmed, and what it cannot tell.
+```
+
+then run `cmx2 stats --session <id>` and keep both with the date. after a few sessions, give the compiled debriefs and stats to a fresh session with `examples/routing.jsonc` and ask it which proposals recur, which contradict each other, and which the stats support; change the guide from that, one or two rows at a time, so the next sessions show whether the change did what it should. the numbers to watch across sessions: haiku's share of spawns in threads where the user said nothing about models, review rounds per haiku task, step-ups out of haiku, and the driver's share of the tree's cost.
 
 ## never
 

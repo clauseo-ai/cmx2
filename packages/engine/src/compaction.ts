@@ -21,9 +21,15 @@ export interface CompactionSettings {
 	keep: number;
 	/** the newest tool output kept whole in that tail, in tokens; older outputs there are cleared (recall reads them) */
 	protect: number;
+	/**
+	 * the floor for compacting on a cold cache: tokens, or a fraction of the model's window when at most 1. a
+	 * session idle at or past it makes its summary shortly before the cache expires, and compacts on the first
+	 * request after it expired; false keeps only the ready-summary rule under the threshold
+	 */
+	cold: number | false;
 }
 
-export const COMPACTION_DEFAULTS: CompactionSettings = { auto: true, at: 300_000, prefire: 0.85, keep: 0.1, protect: 40_000 };
+export const COMPACTION_DEFAULTS: CompactionSettings = { auto: true, at: 300_000, prefire: 0.85, keep: 0.1, protect: 40_000, cold: 200_000 };
 
 /** a summary shorter than this, over a head this long, cannot carry the state it replaces */
 const DEGENERATE_MIN_CHARS = 500;
@@ -53,6 +59,8 @@ export interface CompactionRecord {
 	summaryMs: number;
 	/** the summary was made in the background before the threshold (prefire) */
 	prefire: boolean;
+	/** compacted because the prompt cache had gone cold: past the cold floor, or under it with a summary ready */
+	cold?: true;
 	timestamp: number;
 }
 
@@ -60,6 +68,13 @@ export function thresholdOf(s: CompactionSettings, contextWindow: number): numbe
 	const window = contextWindow > 0 ? contextWindow : 200_000;
 	if (s.at <= 1) return Math.floor(s.at * window);
 	return Math.min(s.at, Math.floor(window * 0.9));
+}
+
+/** the cold floor in tokens, read like `at`; undefined when it is off */
+export function coldFloorOf(s: CompactionSettings, contextWindow: number): number | undefined {
+	if (s.cold === false || s.cold === undefined) return undefined;
+	const window = contextWindow > 0 ? contextWindow : 200_000;
+	return s.cold <= 1 ? Math.floor(s.cold * window) : s.cold;
 }
 
 /** a rough token count for a message: characters over three (prose runs near four, code and json near two and a half), images a flat 1,600 */

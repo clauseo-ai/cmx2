@@ -28,6 +28,17 @@ format: slug, what happened, the fix or the rule.
   yes. verify against the real endpoint before relying on mid-loop escalation.
 - **sonnet 5.5 `between_tools`.** per-message effort is a 400 when
   `thinking.display` is `between_tools` on sonnet 5.5.
+- **retry after streamed thinking.** pi's agent loop pushes a message on a
+  stream's `start` and replaces it on every delta, so a wrapper that retries
+  a stream must drop the retried attempt's `start`, or the failed partial
+  (unsigned thinking) stays in context and breaks the next request. withRetry
+  retries until text or a tool call streams; clients see the restart as a
+  second `message.started` and the part announced again, empty.
+- **codemode's per-call signal.** a global's `execute` gets a context whose
+  signal fires when the script ends, times out or is aborted. `run` used to
+  ignore it and pass its own signal, so a script that timed out left its
+  `shell.exec` running. it now stops pending calls on a timeout only, so an
+  unawaited call in a script that returns is left alone as before.
 
 ## anthropic through vertex
 
@@ -267,10 +278,31 @@ format: slug, what happened, the fix or the rule.
 - **a daemon stopping mid-snapshot left git running.** a test that ended right after a turn stopped its daemon while the end-of-turn `git add` was still going; bun killed the orphan and the test's hook timed out, four at once on main. `stop()` now closes the snapshots: nothing new starts, work in flight gets 3 s, then its git is killed. a checkout removed under a turn (a merge) now logs that its directory is gone, not that git is missing.
 - **the turn-start snapshot races the first tool call.** the before-turn tree is taken while the first request is in flight; a first snapshot of a huge repo (20k files) could still be running when the model's first write lands. in practice the first request takes seconds; the limit and the log line are in `snapshot.ts`.
 - **a disposed session must start nothing.** the overflow recovery ran after `dispose()` in a unit test and its requests landed in the next test's fake provider. recovery waits a tick and checks `disposed`; so does the prefire.
+- **a ready prefire sat unused through cold caches.** the prefire summary was only applied at `at`, so a session that idled past the ttl between the prefire line and `at` rewrote its whole context on each return while a summary that would have shrunk it was ready (D25). the cold check reads `lastCacheUseAt`, set by the turn's request, a warm refresh and the summary request; a provider request this session sends that touches its cache and does not set it would make the session look cold and compact early.
+- **a refresh races the compaction that makes it pointless.** the refresh's summary describes the context it started on; a compaction (or a revert, or a cold attempt that found the old summary stale) clears `refresh` before it can land, and the refresh adopts its result only while it is still `this.refresh`, else it reports `stale` with `refresh: true`. a compaction never waits on a refresh: it uses the old ready summary. if the old one is stale at the threshold, the synchronous summary runs while the dropped refresh's request may still be in flight, the one case with two summary requests at once.
 - **recall found its own query first.** fts5 ranks short rows high, so the model's recall call and the prompt that asked for it outranked the cleared output. recall skips its own calls and results, reads four times the limit, and orders cleared output, then compacted-away rows, then what is still in context.
+- **an evicted session forgot its cache clock.** `lastCacheUseAt` lived only in memory, so a reloaded session never looked cold, and the summary made ahead was dropped with it. dispose leaves both behind (session.ts `leaveBehind`); after a restart the last reply's time stands in.
+- **the idle timer counts from the request's start.** a timer set at the turn's end added the last request's duration and could fire after a 5m entry had expired.
+- **`recall_doc` had no index on `message_id`.** `putRecall` deletes a message's rows before it writes them, and that delete scanned the whole table (454 MB, 311k rows on a two-week database) on the main thread for every projected message. with the pages in the os cache it passed unnoticed; on a machine 9 GB into swap every page was a page-in, `sample` showed the main thread in `sqlite3BtreeNext → readDbPage → pread` for minutes, and `/global/health` timed out. migration 12 adds the index. when a daemon is up but not answering, `sample <pid> 3` first, then `explain query plan` for whatever it is stepping; a query on a table that grows with history needs an index on every column it filters by.
 
 ## installing as a service (m8c)
 
+- **an ad-hoc signature costs the privacy grants on every upgrade.** bun signs its
+  builds ad hoc, and macos keeps desktop, documents and full disk access against the
+  designated requirement, which for an ad-hoc binary is its hash. after an upgrade the
+  daemon touched a session directory under ~/Desktop, macos put up a prompt with nobody
+  at the mac, and the synchronous file call it was in held the main thread, so every
+  session stopped for 18 minutes until someone answered. the tcc log says "failed to
+  match existing code requirement". `placeBinary` signs the copy with a keychain
+  identity (`codesign -d -r-` then reads "identifier ... and certificate leaf ...",
+  which survives rebuilds), and the daemon's first touch of a directory runs off the
+  main thread.
+- **a sync fs call or spawnSync in a session directory can freeze the whole daemon.**
+  git as a child waits on the same prompt, and the 2 s git call behind every published
+  event and the untimed `git status` in session rows ran in the incident too. go
+  through `reachFor(dir)` (packages/server/src/reach.ts) before any sync read of a
+  directory the daemon has not touched yet. a FIFO at `<dir>/.cmx2/cmx2.jsonc`
+  reproduces a blocking open (not a blocking stat).
 - **the unit took a PATH entry that dies with the shell.** `serve --install` copied the installing shell's PATH into the plist, and fnm puts a per-shell link first (`~/.local/state/fnm_multishells/<pid>/bin`), gone when that shell exits; the service would have lost node. `servicePath` drops `fnm_multishells` entries and directories that are not there. a node the service needs should come from a stable install (homebrew, or fnm's `node-versions/<v>/installation/bin`).
 - **importing from a live cmx db needs one snapshot.** the importer read the session list once and each session's rows later, so a cmx serve writing meanwhile could make "imported" and "source" disagree. the import is one read transaction now (wal: the serve keeps writing, its checkpoints wait about a minute) and prints the source's own counts from that snapshot. the full import of a 4.7 GB db took 159 s at a peak rss of 434 MB.
 - **next dev does not hydrate on 127.0.0.1.** next 16 blocks its dev resources for any origin but localhost unless `allowedDevOrigins` lists it; boxbox lists its tailnet names (a tailnet is a private tailscale network), so drive it through a tailnet name (what a phone client uses) or `localhost`, never `127.0.0.1`. the symptom is a login button that stays disabled.
@@ -420,6 +452,10 @@ format: slug, what happened, the fix or the rule.
 
 - **boxbox's dev server does not hydrate on `127.0.0.1`.** next's dev bundle answers but React never attaches (the login button stays disabled, the desk says "radio silence"); open `http://localhost:<port>` instead. set `BOXBOX_PASSWORD=boxbox` in the dev server's env, or it reads the password in the repo's `.env.local`.
 - **a subagent's shell env breaks git in tests.** an agent running as a cmx2 subagent has `GIT_CONFIG_COUNT=1` and a `pushInsteadOf` key in its env; any `git push` in a test run from it fails with `remote-cmx2-subagents-do-not-push`. run the suites with `env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0`.
+- **`os.freemem()` on macos counts only free pages.** on a 16 GB mac it read under 1 GB while activity monitor showed about 5 GB available, since file cache and purgeable pages are not free. `/global/system` reads `host_statistics64` through ffi (no process per request) and counts available as physical memory less app (anonymous less purgeable), wired and compressed pages. the field offsets are in `vm_statistics64`; `vm_stat` prints the same counters, which is what the fixture is.
+- **apple silicon model identifiers do not name the family.** `MacBookPro18,3` does, `Mac16,11` (a mac mini) does not. `system_profiler SPHardwareDataType -json` has `machine_name`; it takes about 0.3 s, so it runs once. a command killed at its timeout can leave an xpc helper holding the pipe, so `close` may never fire: `run()` in `system.ts` resolves from its own timer.
+- **a docker container sees no dmi.** `/sys/class/dmi` and `/sys/firmware` are hidden and cannot be bind-mounted over, and arm or rosetta x86 cpuinfo has no `hypervisor` flag, so in an orbstack container `/global/system` says `model: null, virtual: false`. os-release, meminfo and statfs read true there; check `machine` on a real vm.
+- **the data directory on macos sits on `/System/Volumes/Data`**, not `/`: `df -P` names that mount, and the apfs container's free space is the same for both.
 
 ## licenses
 

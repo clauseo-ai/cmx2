@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { capBody, computeViolations, extractDeliverable, looksLikeMissingDeliverable, parseAbort, reportBody, resolveContract } from "../src/index.ts";
+import { capBody, computeViolations, extractDeliverable, failedTurnBody, looksLikeMissingDeliverable, parseAbort, reportBody, resolveContract } from "../src/index.ts";
 
 const assistant = (text: string, tool = false) => ({ role: "assistant", content: [{ type: "text", text }, ...(tool ? [{ type: "toolCall", id: "t", name: "read", arguments: { path: "a" } }] : [])] });
 
@@ -59,4 +59,14 @@ test("contracts: missing delivery, undeclared failure modes, versions side by si
 	expect(computeViolations(v1, { delivered: false }).map((v) => v.kind)).toEqual(["missing_delivery"]);
 	expect(computeViolations(resolveContract("explore"), { delivered: true, abort: { reason: "approach_failed", details: "x" } }).map((v) => v.kind)).toEqual(["undeclared_failure_mode"]);
 	expect(computeViolations(v1, { delivered: true, abort: { reason: "approach_failed", details: "x" } })).toEqual([]);
+});
+
+test("a failed turn's text says whether it was cut off or is a note from earlier in the turn", () => {
+	const failedThinking = { role: "assistant", stopReason: "error", content: [{ type: "thinking", thinking: "weighing the build slots" }] };
+	const early = extractDeliverable([assistant("Tests are pure; flipping the default is safe.", true), { role: "toolResult" }, failedThinking]);
+	expect(early).toBe("Tests are pure; flipping the default is safe.");
+	expect(failedTurnBody([assistant(early, true), { role: "toolResult" }, failedThinking], early)).toBe("it had not written a report. its last text, from earlier in the turn:\n\nTests are pure; flipping the default is safe.");
+	const cut = { role: "assistant", stopReason: "error", content: [{ type: "text", text: "the fix is in and the suite" }] };
+	expect(failedTurnBody([assistant("reading", true), { role: "toolResult" }, cut], "the fix is in and the suite")).toStartWith("it failed while writing this; the text stops where the turn did:\n\n");
+	expect(failedTurnBody([failedThinking], "")).toBe("");
 });

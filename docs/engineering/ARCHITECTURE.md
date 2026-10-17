@@ -168,13 +168,13 @@ run(code)                                                                       
 ```jsonc
 {
   "models": {
-    "haiku":  { "ref": "anthropic/claude-haiku-5-5",  "effort": "high",   "note": "cheapest and fastest; bounded work; costs 5× once a request reaches 100k tokens" },
-    "sonnet": { "ref": "anthropic/claude-sonnet-5-5", "effort": "high",   "note": "routine and terminal-heavy implementation, ui, docs" },
-    "opus":   { "ref": "anthropic/claude-opus-5-5",   "effort": "medium", "note": "hard implementation, debugging, review of risky changes" },
+    "haiku":  { "ref": "anthropic/claude-haiku-5-5",  "effort": "high",   "note": "where bounded work starts; about a seventeenth of a sonnet step under 100k tokens of context ..." },
+    "sonnet": { "ref": "anthropic/claude-sonnet-5-5", "effort": "high",   "note": "about 17× a haiku step under 100k tokens of context and about opus medium per task on long contexts; ..." },
+    "opus":   { "ref": "anthropic/claude-opus-5-5",   "effort": "medium", "note": "exploration that shapes a plan, implementation that needs judgment, ui, docs and copy, debugging, code review; ..." },
     "fable":  { "ref": "anthropic/claude-fable-5-1",  "effort": "medium", "note": "second opinion on plans and designs; about 4× opus per task" }
   },
-  "guide": [ { "task": "lookups: finding files and usages, ...", "start": "haiku medium", "up": "sonnet high" } ],
-  "rules": [ "small work (under about 10 tool calls) stays with you; ..." ],
+  "guide": [ { "task": "any bounded task whose brief pins down the behaviour and the checks; ...", "start": "haiku high", "up": "opus medium" } ],
+  "rules": [ "haiku is where a task starts unless a row above says otherwise. ..." ],
   "never":  { "claude-haiku-5-5": ["xhigh", "max"] },
   "caps":   { "running_turns": 50, "depth": 3, "budget_tokens": null },
   "escalation": { "ceiling": { "default": "xhigh", "claude-haiku-5-5": "high", "claude-sonnet-5-5": "high", "claude-opus-5-5": "xhigh", "claude-fable-5-1": "xhigh" } }

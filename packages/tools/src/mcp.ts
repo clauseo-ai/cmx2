@@ -46,6 +46,13 @@ export interface McpStatus {
 
 const CONNECT_TIMEOUT_MS = 15_000;
 const CALL_TIMEOUT_MS = 120_000;
+/**
+ * a server that closes its connection is dialled again after these waits, one per try; the last one
+ * repeats until REDIAL_TRIES tries have failed. a stdio server is a process that can go away (xcode's
+ * mcpbridge exits when xcode's own service quits) and comes back as soon as it is started again
+ */
+const REDIAL_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
+const REDIAL_TRIES = 12;
 
 /** provider tool names allow 64 characters of [A-Za-z0-9_-] */
 export function mcpToolName(server: string, tool: string): string {
@@ -97,12 +104,16 @@ interface Entry {
 	client?: McpClient;
 	tools: Tool[];
 	ready: Promise<void>;
+	/** failed redials since the connection was last up; 0 for a first dial */
+	tries: number;
+	/** the next redial, while one is waiting */
+	timer?: ReturnType<typeof setTimeout>;
 }
 
 export class McpPool {
 	private entries = new Map<string, Entry>();
 
-	constructor(private readonly opts: { dataDir: string; version: string; cwd: string; onChange?: (s: McpStatus) => void; log?: (line: string) => void }) {}
+	constructor(private readonly opts: { dataDir: string; version: string; cwd: string; onChange?: (s: McpStatus) => void; log?: (line: string) => void; redialMs?: number[] }) {}
 
 	/** matches the connections to a config: new or changed servers dial, removed ones close */
 	configure(servers: Record<string, McpServerConfig> | undefined) {
@@ -110,6 +121,7 @@ export class McpPool {
 		for (const [name, e] of this.entries) {
 			if (want.get(name) !== e.key) {
 				this.entries.delete(name);
+				clearTimeout(e.timer);
 				void e.client?.close().catch(() => {});
 			}
 		}
@@ -122,6 +134,7 @@ export class McpPool {
 	async reconnect(servers: Record<string, McpServerConfig> | undefined, waitMs = CONNECT_TIMEOUT_MS): Promise<McpStatus[]> {
 		const old = [...this.entries.values()];
 		this.entries.clear();
+		for (const e of old) clearTimeout(e.timer);
 		await Promise.all(old.map((e) => e.client?.close().catch(() => {})));
 		this.configure(servers);
 		await this.ready(waitMs);
@@ -147,6 +160,7 @@ export class McpPool {
 	async close() {
 		const all = [...this.entries.values()];
 		this.entries.clear();
+		for (const e of all) clearTimeout(e.timer);
 		await Promise.all(all.map((e) => e.client?.close().catch(() => {})));
 	}
 
@@ -156,7 +170,30 @@ export class McpPool {
 		this.opts.onChange?.({ ...e.status });
 	}
 
-	private dial(name: string, config: McpServerConfig): Entry {
+	/**
+	 * a dropped connection, or a redial that failed: the server is dialled again after a wait, unless the
+	 * entry was replaced or closed meanwhile, it needs a sign-in, or the tries ran out
+	 */
+	private redial(e: Entry, why: string) {
+		if (this.entries.get(e.name) !== e) return;
+		const waits = this.opts.redialMs ?? REDIAL_MS;
+		if (e.tries >= REDIAL_TRIES) {
+			this.set(e, { status: "failed", error: `${why}; gave up after ${REDIAL_TRIES} tries to reconnect (a reload dials again)` });
+			this.opts.log?.(`cmx2: mcp ${e.name}: ${e.status.error}`);
+			return;
+		}
+		const wait = waits[Math.min(e.tries, waits.length - 1)]!;
+		this.set(e, { status: "failed", error: `${why}; reconnecting in ${Math.max(1, Math.round(wait / 1000))} s` });
+		this.opts.log?.(`cmx2: mcp ${e.name}: ${e.status.error}`);
+		e.timer = setTimeout(() => {
+			e.timer = undefined;
+			if (this.entries.get(e.name) !== e) return;
+			this.entries.set(e.name, this.dial(e.name, e.config, e.tries + 1));
+		}, wait);
+		(e.timer as { unref?: () => void }).unref?.();
+	}
+
+	private dial(name: string, config: McpServerConfig, tries = 0): Entry {
 		const remote = config.type === "remote" || (!!config.url && !config.command);
 		const e: Entry = {
 			name,
@@ -165,6 +202,7 @@ export class McpPool {
 			status: { name, transport: remote ? "http" : "stdio", status: "connecting", tools: [] },
 			tools: [],
 			ready: Promise.resolve(),
+			tries,
 		};
 		if (config.enabled === false) {
 			e.status.status = "disabled";
@@ -174,6 +212,8 @@ export class McpPool {
 			// with saved tokens an expired sign-in is an oauth error; without any, the server's 401 is a plain auth error
 			const { McpOAuthAuthorizationRequiredError, McpAuthRequiredError } = await lib();
 			const needsAuth = err instanceof McpOAuthAuthorizationRequiredError || err instanceof McpAuthRequiredError;
+			// a redial that failed waits and tries again; a first dial that fails is a config problem and stays failed
+			if (tries > 0 && !needsAuth) return this.redial(e, err instanceof Error ? err.message : String(err));
 			this.set(e, {
 				status: needsAuth ? "needs_auth" : "failed",
 				error: needsAuth ? `${name} needs you to sign in: run cmx2 mcp auth ${name} on this machine` : err instanceof Error ? err.message : String(err),
@@ -216,10 +256,14 @@ export class McpPool {
 		try {
 			const init = await guard(client.connect(transport), `connecting to ${name}`);
 			const listed = await guard(client.listTools(), `listing ${name}'s tools`);
+			const connectedAt = Date.now();
 			// the server says when its tools change; the list is read again
 			client.onNotification("notifications/tools/list_changed", () => void client.listTools().then((t) => this.adopt(e, t, toLlmContent)).catch(() => {}));
 			client.onClose(() => {
-				if (this.entries.get(name) === e) this.set(e, { status: "failed", error: `${name} closed the connection${stderr.trim() ? `: ${stderr.trim().split("\n").at(-1)}` : ""}` });
+				if (this.entries.get(name) !== e) return;
+				// a connection that held for a while starts the waits over; one that drops at once keeps backing off
+				if (Date.now() - connectedAt > 30_000) e.tries = 0;
+				this.redial(e, `${name} closed the connection${stderr.trim() ? `: ${stderr.trim().split("\n").at(-1)}` : ""}`);
 			});
 			this.adopt(e, listed, toLlmContent);
 			e.status.server = { name: init.serverInfo.name, version: init.serverInfo.version };
@@ -263,13 +307,15 @@ export async function mcpContent(result: Parameters<ToLlm>[0], server: string, t
 	return content;
 }
 
-function wrap(server: string, tool: McpTool, client: () => McpClient, toLlmContent: ToLlm): Tool {
+/** one server tool as a deferred cmx2 tool. a server the user configured is trusted, so its `readOnlyHint` stands (the spec treats annotations as untrusted otherwise) */
+export function wrap(server: string, tool: McpTool, client: () => McpClient, toLlmContent: ToLlm): Tool {
 	const schema = (tool.inputSchema ?? { type: "object" }) as Record<string, unknown>;
 	return {
 		name: mcpToolName(server, tool.name),
 		label: tool.title ?? tool.name,
 		description: `${tool.description?.trim() || tool.name} (mcp server ${server}, tool ${tool.name})`,
 		parameters: Type.Unsafe({ ...schema, type: "object", properties: (schema.properties as object) ?? {} }),
+		readOnly: tool.annotations?.readOnlyHint === true,
 		async execute(_id, params, signal): Promise<ToolResult<Record<string, unknown>>> {
 			const result = await client().callTool(tool.name, (params ?? {}) as Record<string, unknown>, { signal, timeoutMs: CALL_TIMEOUT_MS });
 			const content = await mcpContent(result, server, tool.name, toLlmContent);

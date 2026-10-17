@@ -2,7 +2,47 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
-## unreleased
+## 0.8.14 - 2026-10-17
+
+contract version 7. additive: `GET /global/system`.
+
+### added
+- `GET /global/system`: the machine the daemon runs on, for a client that lists machines. `os` (platform, name, version, kernel, arch), `machine` (a mac's family and model identifier, else the dmi product name; `virtual` for a vm or cloud instance), `cpu` (model, logical cores, 1, 5 and 15 minute load), `memory` (total and available bytes), `disk` (the mount point holding the data directory, total and available bytes), host `uptime`, the daemon's `rss` and `uptime`, and `at`. the static fields are read on the first request and kept (macos spawns `sysctl`, `system_profiler` and `df` once then); the live ones come from the kernel on each request without a process. available memory is `MemAvailable` on linux and, on macos, physical memory less app, wired and compressed memory as activity monitor counts it, since `os.freemem()` leaves out file cache. on arm linux, where /proc/cpuinfo has no model name, the cpu reads from its implementer and part codes ("Arm Neoverse N1"). inside a container `machine` reads null and not virtual, since docker hides the dmi files. authenticated like every route but `/pair`.
+
+## 0.8.13 - 2026-10-15
+
+contract version 7. additive: a `busy` session status may carry `waiting`, a plain line saying what the session waits for.
+
+### added
+- `compaction.cold` (200k tokens by default, or a fraction of the window up to 1; `false` turns it off): a session idle at or past it makes its compaction summary just before its prompt cache expires, at 90% of the ttl, reading the cache; nothing is compacted then. the first request after the cache expired compacts with that summary, so a thread that comes back does not rewrite its whole context, and one that never comes back paid for one summary from cache. a cold session past the floor with no summary ready makes one on the spot, sent without writing the cache, and compacts. closed helpers get no idle summary. why: across two weeks of one machine's sessions idle past an hour at 200k or more, roots came back 75% of the time and open helpers 38%, against a break-even near 16%. a session evicted from memory keeps its summary and its cache clock now (up to 64 of them); before, a reloaded session never read as cold.
+
+### changed
+- the routing guide, from the first days on it: opus helpers run at high by default, since at medium they stop short of the checks on open work (across 55 opus medium helpers in october 2026, half the steps of high and claims without evidence behind them); medium is for applying a given defect list or re-checking a delta. merge conflicts where the brief says which side wins are mechanical work for haiku, with "stop and report when claims contradict". three rules added: a brief asks for a report under about 300 words with the detail in a file, every claim naming the check behind it; a brief names the files the task touches and attaches digests with `files` rather than a reading list; a task that needs more than about 150k of context is split or gets its own compaction point. why: in a three-day thread the opus helpers' cost was 57% cache reads at an average 206k of context per step, and the tool output cap fired 28 times in 10,298 calls, so the size came from steps, not from logs.
+
+### fixed
+- the recall index has an index on `message_id`. projecting a message replaces its recall rows, and the delete before the write scanned the whole table (454 MB after two weeks); on a machine deep in swap that held the daemon's main thread on disk reads for minutes and `/global/health` timed out. the index is added by migration on the next start.
+- `cmx2 doctor` tells a daemon that holds the port but does not answer within 2 s apart from a port held by something else. before, a slow cmx2 read as "something that is not cmx2 holds port 4097", and the fix line said to stop it.
+- a session whose directory does not answer (a macos privacy prompt for desktop, documents or downloads, a hung network mount) holds only itself. the daemon's first touch of a directory, its project config, its git root and the project picker's listing now run off the main thread, and git does not run in a directory until that first touch has settled. before, one such directory stopped every session and route until the prompt was answered: 18 minutes once, after an upgrade. the waiting session reads `busy` with `waiting` ("waiting for access to <dir>. macos may be asking on the mac"), and `prompt` and `prompt_async` still answer at once, queuing the prompt until the directory answers.
+- on macos, `cmx2 serve --install` and `cmx2 upgrade` sign the copy they place with a code signing identity from your keychain (one named for cmx2, then developer id, then apple development; `CMX2_CODESIGN_IDENTITY` picks one, `-` keeps ad hoc). bun's ad-hoc signature changes with every build, and macos keeps folder access against it, so each upgrade lost the desktop, documents and full disk access grants and macos asked again; a daemon that hit the prompt with nobody at the mac waited on it. `cmx2 doctor` says how the installed copy is signed. the first signed install asks once more, then upgrades keep the grants.
+- a provider stream that fails after only thinking has streamed (a dropped connection 80 s into thinking, say) is retried like a failure before any content, with the same backoff and retry status. the failed attempt's thinking is thrown away and clients see the thinking part start again. once text or a tool call has streamed, the error still ends the turn, since a retry would replay them.
+- a failed helper's report says what its text is: what the failing message had written when it broke, or its last note from earlier in the turn. before, a progress line from mid-turn read like the report.
+- a `run` script that times out stops the call it was waiting on. before, a `shell.exec` past the script's 10 minutes kept its command running after `run` answered. a script that returns normally still leaves an unawaited call alone.
+- `agents` with `path_prefix: "/root/"` lists the same agents as `"/root"`; a trailing slash matched nothing, and `"/"` lists the whole tree.
+
+## 0.8.12 - 2026-10-14
+
+contract version 7. additive: `session.compacted` carries `cold`, and `compaction.prefire` may carry `refresh`.
+
+### added
+- the web tools have a choice of provider, set with `web` in `cmx2.jsonc`: tavily, exa, brave or a searxng instance for websearch, each one http call with no mcp server. with no `web` entry the first of `TAVILY_API_KEY`, `EXA_API_KEY` and `BRAVE_API_KEY` in the environment picks the provider; with none, websearch goes through [tavily](https://tavily.com)'s free keyless mode and falls back to keyless exa when tavily refuses (before, it always went to keyless exa). `web.search` adds request fields (tavily's `search_depth`); `web.url` moves the endpoint. opt-in, tavily only: `"fetch": "provider"` sends webfetch's public urls through tavily extract, which renders javascript (private addresses are always fetched locally), and `"crawl": true` adds a deferred `webcrawl` tool on tavily map and crawl, checked under the `webcrawl` permission. a repository's own config cannot set `web`. websearch details name the `provider` that answered and any `fallback`; webfetch details say `via` local or tavily; `cmx2 doctor` names the provider and where its key comes from.
+
+### changed
+- the shipped routing guide is haiku first, with opus as the step up. its first row names haiku high as the start for any bounded task whose brief pins down the behaviour and the checks; exploration, implementation that needs judgment, ui, docs and copy, terminal diagnosis, hard debugging and reviews start on opus medium. sonnet has no start row: it costs about what opus does per task on long contexts and sits behind it on the design and writing boards; it stays in the table for short tasks and for one long read that cannot be split. a spawn above haiku says in its brief, in one line, why haiku cannot do the task. the model notes carry measured price ratios instead of a warning about haiku's 100k tier (haiku about a seventeenth of a sonnet step under 100k tokens of context and about a third past it; sonnet per task about what opus costs on long contexts, since it writes more per step and takes more steps). the rules now ask briefs to make the task's decisions and state its targets, send haiku's code to review when no test or reference pins it down, and keep the driver's own context small. why: left to choose, a driver picked haiku 0 times in 43 unsteered spawns; sonnet high and opus cost about the same per matched review in practice. `docs/routing.md` has the evidence and an end-of-session debrief prompt for revising the guide from sessions.
+- explore and review agents see an mcp tool only when its server marks it `readOnlyHint: true`; general agents and the root see every mcp tool as before. a server you configured is trusted, so its annotation stands. why: a read-only agent could write through an mcp tool it was never meant to have.
+- a session whose background summary is ready compacts at the first request after its prompt cache went cold (more than the cache ttl plus 30 s since its last request, or a model switch), even under `compaction.at`. that request rewrites the cache either way, and the summary makes the rewrite small. only the ready summary is used; when it no longer fits the context, nothing compacts and the request goes on. `session.compacted` says `cold: true`, the transcript's compaction line carries `cold`, and the trigger stays `auto`. a session kept warm by cache warming is not cold.
+- a ready background summary is made again over the current messages once the messages after it pass max(`keep` × `at`, 20k tokens), so the tail a compaction keeps verbatim stays short. the old summary stays in use until the new one is ready; a failed refresh keeps the old one and is not retried before the next compaction. its `compaction.prefire` events carry `refresh: true`.
+
+## 0.8.11 - 2026-10-10
 
 contract version 7. additive: completed tool states may carry `attachments` and `attachmentsDropped`.
 
@@ -11,6 +51,22 @@ contract version 7. additive: completed tool states may carry `attachments` and 
 
 ### changed
 - a helper's `question` tool asks the agent that started it, not the user. the question arrives as a message with a `correlation_id`, the spawner's reply is the answer, and the spawner asks further up with its own `question` tool when it cannot answer, so the user only hears questions from the root. while a helper waits its agent `cause` is `asking` and its running-turn slot goes to others. before, a helper's question went straight to the user, and its spawner sat parked without knowing.
+
+## 0.8.10 - 2026-10-10
+
+contract version 7. no contract change.
+
+### fixed
+- an mcp server whose connection closes is dialled again, after 1 s, then 2, 5, 10, 30 and 60 s, up to 12 tries; one that held for 30 s starts the waits over. before, it stayed failed until a reload or a restart (xcode's `mcpbridge` exits whenever xcode's own service quits). `/mcp` shows `reconnecting in N s` while it waits. a server that fails its first dial still stays failed, since that is a config problem.
+- a session whose transcript holds more than 384 tool additions sends its requests with each removal that a later addition undoes taken out, together with that addition, when the tool was not called in between. the provider refuses more than 512, so such a session failed every request; the session that hit it goes from 547 to 70. under the limit, requests are unchanged.
+- a revert leaves loaded exactly the tools the remaining context declares, as a resume would. before, a tool loaded in the reverted turns stayed loaded and the next turn declared it again.
+
+## 0.8.9 - 2026-10-10
+
+contract version 7. no contract change.
+
+### fixed
+- a session whose mcp server dropped no longer adds that server's tools back and removes them again on every turn. each round sent tens of thousands of uncached tokens and wrote as many to the cache, and after enough turns the provider refused every request with "total resolved tool_addition definitions across the request exceed 512". now a server that goes away costs one removal, and one addition if it comes back.
 
 ## 0.8.8 - 2026-10-10
 

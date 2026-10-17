@@ -299,4 +299,7 @@ export const MIGRATIONS: readonly string[] = [
 		insert into recall_fts (recall_fts, rowid, text) values ('delete', old.rowid, old.text);
 		insert into recall_fts (rowid, text) values (new.rowid, new.text);
 	 end`,
+	// 12 · putRecall deletes a message's rows before it writes them again; without this index that is a scan of
+	// the whole recall table, on the main thread, for every message projected
+	`create index recall_doc_message_idx on recall_doc (message_id)`,
 ];

@@ -25,6 +25,8 @@ export type SessionStatusBusy = {
 	queued?: number;
 	/** when the turn began (ms) */
 	since?: number;
+	/** why the turn has not started yet, short and lowercase, shown as is: the session's directory has not answered (a macos privacy prompt, a hung mount) */
+	waiting?: string;
 };
 
 /** a turn is waiting out a transient provider failure */
@@ -316,6 +318,8 @@ export type SessionInfo = {
 		queued?: number;
 		/** when the turn began (ms) */
 		since?: number;
+		/** why the turn has not started yet, short and lowercase, shown as is: the session's directory has not answered (a macos privacy prompt, a hung mount) */
+		waiting?: string;
 	} | {
 		type: "retry";
 		attempt: number;
@@ -634,6 +638,8 @@ export interface EventMap {
 				queued?: number;
 				/** when the turn began (ms) */
 				since?: number;
+				/** why the turn has not started yet, short and lowercase, shown as is: the session's directory has not answered (a macos privacy prompt, a hung mount) */
+				waiting?: string;
 			} | {
 				type: "retry";
 				attempt: number;
@@ -750,6 +756,8 @@ export interface EventMap {
 		summaryChars: number;
 		/** the summary was made in the background before the threshold */
 		prefire: boolean;
+		/** compacted under the threshold because the prompt cache had gone cold (past its ttl, or a model switch) and a background summary was ready */
+		cold: boolean;
 		tailFrom: number;
 		tailStartID?: string;
 		/** tool outputs the kept tail carries cleared (recall reads them) */
@@ -771,6 +779,8 @@ export interface EventMap {
 		chars?: number;
 		message?: string;
 		cacheReadPct?: number;
+		/** a newer summary over the grown context, made while the ready one stays in use; stale here means a compaction or a revert came first and it was dropped */
+		refresh?: boolean;
 	};
 	/** a compaction did not happen; sticky ones are not tried again on this model until a manual compact or a model switch (v1) */
 	"compaction.failed": {

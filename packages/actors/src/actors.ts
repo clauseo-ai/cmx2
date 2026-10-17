@@ -8,7 +8,7 @@ import type { AgentAnswer, QuestionPrompt } from "@cmx2/tools";
 import { computeViolations, resolveContract } from "./contracts.ts";
 import { childPath, isAncestor, nameFrom, ROOT_PATH, validName } from "./paths.ts";
 import { attemptAttachment, helperFragment, taskEnvelope } from "./prompt.ts";
-import { capBody, extractDeliverable, filesTouched, looksLikeMissingDeliverable, parseAbort, reportBody } from "./report.ts";
+import { capBody, extractDeliverable, failedTurnBody, filesTouched, looksLikeMissingDeliverable, parseAbort, reportBody } from "./report.ts";
 
 /**
  * the agent runtime: a port of cmx's `AgentControl` onto cmx2's sessions. an agent is a session with
@@ -368,13 +368,15 @@ export class Actors {
 	/** the whole tree the session belongs to: live agents, then the newest closed ones */
 	roster(sessionID: string, pathPrefix?: string): { root: string; self: string; agents: AgentInfo[] } {
 		const me = this.rowOf(sessionID);
-		const all = this.rows.tree(me.root_id).filter((a) => !pathPrefix || a.path === pathPrefix || a.path.startsWith(`${pathPrefix}/`));
+		// "/root/" means the same part of the tree as "/root"; "/" alone means all of it
+		const prefix = pathPrefix?.replace(/\/+$/, "") || undefined;
+		const all = this.rows.tree(me.root_id).filter((a) => !prefix || a.path === prefix || a.path.startsWith(`${prefix}/`));
 		const live = all.filter((a) => a.state !== "closed");
 		const closed = all
 			.filter((a) => a.state === "closed")
 			.sort((x, y) => (y.closed_at ?? 0) - (x.closed_at ?? 0))
 			.slice(0, TOMBSTONES);
-		if (!live.some((a) => a.depth === 0) && !pathPrefix) live.unshift(this.ensureRoot(me.root_id));
+		if (!live.some((a) => a.depth === 0) && !prefix) live.unshift(this.ensureRoot(me.root_id));
 		return { root: me.root_id, self: me.path, agents: [...live, ...closed].map((a) => this.info(a)) };
 	}
 
@@ -1143,7 +1145,8 @@ export class Actors {
 		const abort = overrideAbort ?? parseAbort(raw);
 		const contract = resolveContract(a.agent_type ?? undefined, opts.behavior_version);
 		const violations = computeViolations(contract, { delivered: explicit || substantive, ...(abort ? { abort } : {}) });
-		const body = capBody(raw, a.id);
+		const shown = failed ? failedTurnBody(turn, raw) : raw;
+		const body = capBody(shown, a.id);
 		const content = reportBody({ header: lines.join("\n"), body, warn, childID: a.id });
 		const meta: Record<string, unknown> = {
 			label,
@@ -1151,13 +1154,13 @@ export class Actors {
 			...(abort ? { abort_reason: abort } : {}),
 			...(contract && violations.length ? { behavior_violation: { contract_version: contract.version, violations } } : {}),
 		};
-		this.rows.update(a.id, { last_report: (raw || lines.join("\n")).slice(0, 4000), files: JSON.stringify(files), delivered: 0 });
+		this.rows.update(a.id, { last_report: (failed ? `${lines.join("\n")}${shown ? `\n\n${shown}` : ""}` : raw || lines.join("\n")).slice(0, 4000), files: JSON.stringify(files), delivered: 0 });
 		const source = explicit ? "explicit_send" : warn ? "safety_net" : "extracted";
 		this.metric(parent, "deliverable_arrived", a, { source, body_length: raw.length, child_path: a.path });
 		if (warn) this.metric(parent, "safety_net_fired", a, { child_path: a.path });
 		this.host.publish(a.root_id, "agent.report", { sessionID: parent.id, from: a.path, childID: a.id, label, body_length: raw.length, ...(abort ? { abort_reason: abort } : {}), ...(meta.behavior_violation ? { behavior_violation: meta.behavior_violation } : {}) });
 		if (opts.pool) {
-			this.poolReport(a, parent, opts.pool, { label, body: capBody(raw, a.id, 4000), failed });
+			this.poolReport(a, parent, opts.pool, { label, body: capBody(shown, a.id, 4000), failed });
 			return;
 		}
 		this.post(parent, { kind: "report", from: a, body: content, wake: true, system: true, meta });

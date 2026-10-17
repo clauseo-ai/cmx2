@@ -63,6 +63,10 @@
 					"since": {
 						"type": "number",
 						"description": "when the turn began (ms)"
+					},
+					"waiting": {
+						"type": "string",
+						"description": "why the turn has not started yet, short and lowercase, shown as is: the session's directory has not answered (a macos privacy prompt, a hung mount)"
 					}
 				},
 				"description": "a turn is running"
@@ -1017,6 +1021,10 @@
 									"since": {
 										"type": "number",
 										"description": "when the turn began (ms)"
+									},
+									"waiting": {
+										"type": "string",
+										"description": "why the turn has not started yet, short and lowercase, shown as is: the session's directory has not answered (a macos privacy prompt, a hung mount)"
 									}
 								},
 								"description": "a turn is running"
@@ -2441,6 +2449,10 @@
 													"since": {
 														"type": "number",
 														"description": "when the turn began (ms)"
+													},
+													"waiting": {
+														"type": "string",
+														"description": "why the turn has not started yet, short and lowercase, shown as is: the session's directory has not answered (a macos privacy prompt, a hung mount)"
 													}
 												},
 												"description": "a turn is running"
@@ -3049,6 +3061,7 @@
 							"summaryMs",
 							"summaryChars",
 							"prefire",
+							"cold",
 							"tailFrom",
 							"cleared",
 							"cacheRead",
@@ -3103,6 +3116,10 @@
 							"prefire": {
 								"type": "boolean",
 								"description": "the summary was made in the background before the threshold"
+							},
+							"cold": {
+								"type": "boolean",
+								"description": "compacted under the threshold because the prompt cache had gone cold (past its ttl, or a model switch) and a background summary was ready"
 							},
 							"tailFrom": {
 								"type": "number"
@@ -3207,6 +3224,10 @@
 							},
 							"cacheReadPct": {
 								"type": "number"
+							},
+							"refresh": {
+								"type": "boolean",
+								"description": "a newer summary over the grown context, made while the ready one stays in use; stale here means a compaction or a revert came first and it was dropped"
 							}
 						}
 					},
@@ -7113,6 +7134,227 @@
 				}
 			}
 		},
+		"/global/system": {
+			"get": {
+				"operationId": "system",
+				"summary": "the machine the daemon runs on: os, model, cpu and live load, memory, the data volume's disk space and uptimes. static fields are read once; live ones on each request without spawning a process",
+				"responses": {
+					"200": {
+						"description": "ok",
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "object",
+									"required": [
+										"os",
+										"machine",
+										"cpu",
+										"memory",
+										"disk",
+										"uptime",
+										"daemon",
+										"at"
+									],
+									"properties": {
+										"os": {
+											"type": "object",
+											"required": [
+												"platform",
+												"name",
+												"version",
+												"kernel",
+												"arch"
+											],
+											"properties": {
+												"platform": {
+													"type": "string",
+													"description": "process.platform: darwin, linux, win32, ..."
+												},
+												"name": {
+													"type": "string",
+													"description": "macOS, Ubuntu, Debian, ..."
+												},
+												"version": {
+													"type": "string",
+													"description": "the os version (26.1, 24.04); empty when unknown"
+												},
+												"kernel": {
+													"type": "string"
+												},
+												"arch": {
+													"type": "string",
+													"description": "arm64, x64, ..."
+												}
+											}
+										},
+										"machine": {
+											"type": "object",
+											"required": [
+												"model",
+												"identifier",
+												"virtual"
+											],
+											"properties": {
+												"model": {
+													"anyOf": [
+														{
+															"type": "string"
+														},
+														{
+															"type": "null"
+														}
+													],
+													"description": "a mac's family (Mac mini, MacBook Pro), else the dmi product name (Google Compute Engine)"
+												},
+												"identifier": {
+													"anyOf": [
+														{
+															"type": "string"
+														},
+														{
+															"type": "null"
+														}
+													],
+													"description": "a mac's model identifier (Mac16,11); null elsewhere"
+												},
+												"virtual": {
+													"type": "boolean",
+													"description": "a vm or cloud instance"
+												}
+											}
+										},
+										"cpu": {
+											"type": "object",
+											"required": [
+												"model",
+												"cores",
+												"load"
+											],
+											"properties": {
+												"model": {
+													"type": "string"
+												},
+												"cores": {
+													"type": "integer",
+													"description": "logical cores"
+												},
+												"load": {
+													"type": "array",
+													"items": {
+														"type": "number"
+													},
+													"description": "load average over 1, 5 and 15 minutes"
+												}
+											}
+										},
+										"memory": {
+											"type": "object",
+											"required": [
+												"total",
+												"available"
+											],
+											"properties": {
+												"total": {
+													"type": "number",
+													"description": "bytes"
+												},
+												"available": {
+													"type": "number",
+													"description": "bytes usable without swapping: MemAvailable on linux; on macos physical memory less app, wired and compressed memory, as activity monitor counts it"
+												}
+											}
+										},
+										"disk": {
+											"anyOf": [
+												{
+													"type": "object",
+													"required": [
+														"path",
+														"total",
+														"available"
+													],
+													"properties": {
+														"path": {
+															"type": "string",
+															"description": "mount point of the volume holding the daemon's data"
+														},
+														"total": {
+															"type": "number"
+														},
+														"available": {
+															"type": "number",
+															"description": "bytes free to an unprivileged user"
+														}
+													}
+												},
+												{
+													"type": "null"
+												}
+											]
+										},
+										"uptime": {
+											"type": "integer",
+											"description": "host uptime in seconds"
+										},
+										"daemon": {
+											"type": "object",
+											"required": [
+												"rss",
+												"uptime"
+											],
+											"properties": {
+												"rss": {
+													"type": "number",
+													"description": "bytes"
+												},
+												"uptime": {
+													"type": "integer",
+													"description": "seconds"
+												}
+											}
+										},
+										"at": {
+											"type": "number",
+											"description": "epoch ms the live fields were read"
+										}
+									}
+								}
+							}
+						}
+					},
+					"400": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"401": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"404": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					}
+				}
+			}
+		},
 		"/project": {
 			"get": {
 				"operationId": "projects",
@@ -8494,6 +8736,10 @@
 														"since": {
 															"type": "number",
 															"description": "when the turn began (ms)"
+														},
+														"waiting": {
+															"type": "string",
+															"description": "why the turn has not started yet, short and lowercase, shown as is: the session's directory has not answered (a macos privacy prompt, a hung mount)"
 														}
 													},
 													"description": "a turn is running"

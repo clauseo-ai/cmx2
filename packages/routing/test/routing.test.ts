@@ -34,31 +34,36 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 const SHIPPED_TEXT = [
 	"models for helpers. spawn names one; your own model is the user's choice and is not in this table.",
-	"- haiku: claude-haiku-5-5, high by default. cheapest and fastest; bounded work; costs 5× once a request reaches 100k tokens.",
-	"- sonnet: claude-sonnet-5-5, high by default. routine and terminal-heavy implementation, ui, docs.",
-	"- opus: claude-opus-5-5, medium by default. hard implementation, debugging, review of risky changes.",
+	"- haiku: claude-haiku-5-5, high by default. where bounded work starts; about a seventeenth of a sonnet step under 100k tokens of context and about a third past it, so split at 100k when the work splits.",
+	"- sonnet: claude-sonnet-5-5, high by default. about 17× a haiku step under 100k tokens of context and about opus medium per task on long contexts, since it writes more per step and takes more steps; a little behind opus on the design and writing boards, so the pick when per-step price matters: short tasks, or one long read that cannot be split.",
+	"- opus: claude-opus-5-5, high by default. exploration that shapes a plan, implementation that needs judgment, ui, docs and copy, debugging, code review; about 36× a haiku step under 100k tokens of context, and per task about what sonnet high costs; medium for applying a given defect list or re-checking a delta, since on open work it stops short of the checks.",
 	"- fable: claude-fable-5-1, medium by default. second opinion on plans and designs; about 4× opus per task.",
 	"off limits: claude-haiku-5-5 never runs at xhigh or max.",
 	"where to start, and where to step up when the output falls short (defaults, not limits):",
-	"- lookups: finding files and usages, reading logs and docs, summarising output: haiku medium (low only for one-shot text such as a commit message); then sonnet high.",
-	"- exploration whose answer shapes a plan: sonnet high; then opus medium.",
-	"- mechanical work: renames, codemods, formatting, commit messages, changelogs, pr text: haiku (low for text, medium for code); then sonnet high.",
-	"- a small coding task with a test to pass, under about 100k tokens of context: haiku high; then sonnet high, then opus medium.",
-	"- the same kind of task when it is larger: sonnet high; then opus medium.",
-	"- routine implementation with lots of terminal work: build and test loops, scripts, ci: sonnet medium; then sonnet high, then opus high, then opus xhigh; sonnet max only after opus xhigh fails.",
+	"- any bounded task whose brief pins down the behaviour and the checks; the rows below are the exceptions: haiku high; then opus medium.",
+	"- lookups: finding files and usages, reading logs and docs, summarising output: haiku medium (low only for one-shot text such as a commit message); then opus medium.",
+	"- exploration whose answer shapes a plan: opus medium; then opus high.",
+	"- mechanical work: renames, codemods, formatting, commit messages, changelogs, pr text, applying a given list of fixes, merge conflicts where the brief says which side wins (stop and report when claims contradict): haiku (low for text, high for code); then opus medium.",
+	"- coding whose behaviour a test or a reference implementation pins down, porting included, split so each helper stays under about 100k tokens of context (haiku stays coherent to about 250k): haiku high; then opus medium.",
+	"- coding that needs a decision the brief cannot make: opus medium; then opus high.",
+	"- scripted terminal work: fixed steps, known commands, simulator, screenshot and browser checks (one command is a background job, not a helper): haiku high; then opus medium.",
+	"- terminal work that may need diagnosis: environments, builds, setup, test loops, ci: opus medium, high for debug-heavy work; then opus xhigh; sonnet max only after opus xhigh fails.",
 	"- hard implementation and debugging: unclear cause, races, performance, migrations: opus medium; then opus high, then opus xhigh; fable medium as a second opinion.",
-	"- ui and frontend: sonnet high; then opus medium.",
-	"- docs and user-facing copy: sonnet high; then opus medium.",
-	"- review of risky changes: security, concurrency, migrations, public api: opus medium, high for security and concurrency; then opus xhigh or fable medium.",
+	"- ui, frontend and design systems: opus medium; then opus high.",
+	"- docs and user-facing copy: opus medium; then opus high.",
+	"- review: correctness, performance against a stated target, fidelity to a reference, and risky changes (security, concurrency, persistence, migrations, public api, anything that sends a user's action to a server): opus medium, high for security, concurrency and persistence; then opus xhigh or fable medium.",
 	"- a second opinion on a plan or design: opus high or fable medium, whichever is not running your session.",
-	"- reading more than 100k tokens: sonnet high.",
+	"- reading more than 100k tokens: split it across haiku helpers by file or topic; one sonnet high when it cannot be split.",
 	"how to use it:",
-	"- small work (under about 10 tool calls) stays with you; a helper starts with none of your context.",
-	"- start with the cheapest option that can do the task, and judge the output, not the price.",
-	"- when a helper's output falls short: retry once with a sharper brief, then spawn one step up with after, then do it yourself. no helper is retried more than twice.",
-	"- difficulty or file count alone is no reason to start higher; a missing tool or permission gets fixed, not escalated.",
-	"- tests and typecheck run before any review; only risky changes get a review.",
+	"- haiku is where a task starts unless a row above says otherwise. a spawn above haiku says in its brief, in one line, why haiku cannot do it; those lines are how the guide gets revised.",
+	"- small work that needs your context stays with you; small work that does not goes to haiku, since one step of yours costs tens of haiku steps. a helper starts with none of your context.",
+	"- a brief makes the decisions the task contains (rename or reuse, which pattern to follow) and states the targets the result is measured against (frame time, latency, size). a decision the brief cannot make is a reason to start above haiku; difficulty and file count are not, and a missing tool or permission gets fixed, not escalated.",
+	"- judge the output when it is back, not the price before. when a helper's output falls short: retry once with a sharper brief, then spawn one step up with after, then do it yourself. no helper is retried more than twice.",
+	"- tests and typecheck run before any review. a review goes to risky changes, and to haiku's code when no test or reference pins it down; otherwise the tests and your read of the diff are the check. the defect list goes back to the same writer before anyone steps up.",
 	"- a helper past about 250k tokens of context costs about twice as much per step; give the next task to a fresh helper.",
+	"- a brief names the files the task touches and attaches the digests it needs with files, not a reading list; a task that needs more than about 150k of context is split or gets its own compaction point.",
+	"- your own context is the most expensive in the tree: delegate reading and ask for digests.",
+	"- a brief asks for a report under about 300 words, with the detail in a file the report names, and every claim in it naming the check behind it; a claim without a check is not done.",
 	"- disjoint work runs in parallel, one writer per area, each writer in its own worktree.",
 	"- long watches (builds, test suites, dev servers) are background jobs with notify, not helpers.",
 	"- when only helpers or jobs remain, end your turn; their reports wake you.",
@@ -100,11 +105,11 @@ describe("routing", () => {
 	});
 
 	test("editing routing.jsonc changes resolve on the same instance without a flush", () => {
-		expect(routing.resolve("opus").effort).toBe("medium");
-		write("routing.jsonc", { models: { opus: { effort: "high" } } });
-		expect(routing.resolve("opus")).toMatchObject({ model: "anthropic/claude-opus-5-5", effort: "high" });
+		expect(routing.resolve("opus").effort).toBe("high");
+		write("routing.jsonc", { models: { opus: { effort: "medium" } } });
+		expect(routing.resolve("opus")).toMatchObject({ model: "anthropic/claude-opus-5-5", effort: "medium" });
 		write("routing.jsonc", { models: { opus: { ref: "vertex/claude-opus-5-5" } } }, 1);
-		expect(routing.resolve("opus")).toMatchObject({ model: "vertex/claude-opus-5-5", effort: "medium" });
+		expect(routing.resolve("opus")).toMatchObject({ model: "vertex/claude-opus-5-5", effort: "high" });
 		expect(routing.version).toBe(3);
 	});
 

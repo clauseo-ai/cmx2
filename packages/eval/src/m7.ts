@@ -130,10 +130,10 @@ function watch(d: Daemon, id: string, t0: number, into: string[]) {
 						into.push(`${at}s  step ${String(s.seq).padStart(3)}  ${s.tool_names || "(text)"}  in ${s.input} + read ${s.cache_read} + write ${s.cache_write} = ${s.input + s.cache_read + s.cache_write} tokens, cache read ${s.cache_read_pct}%, ${s.duration_ms} ms`);
 					} else if (e.type === "compaction.prefire") {
 						const p = e.properties;
-						into.push(`${at}s  prefire ${p.state} at ${p.tokens} tokens${p.ms ? `: summary in ${p.ms} ms, ${p.chars} chars, cache read ${p.cacheRead} of ${p.cacheRead + p.cacheWrite + p.input} (${p.cacheReadPct}%)` : ""}${p.message ? `: ${p.message}` : ""}`);
+						into.push(`${at}s  ${p.refresh ? "refresh" : "prefire"} ${p.state} at ${p.tokens} tokens${p.ms ? `: summary in ${p.ms} ms, ${p.chars} chars, cache read ${p.cacheRead} of ${p.cacheRead + p.cacheWrite + p.input} (${p.cacheReadPct}%)` : ""}${p.message ? `: ${p.message}` : ""}`);
 					} else if (e.type === "session.compacted") {
 						const c = e.properties;
-						into.push(`${at}s  COMPACTED (${c.trigger}${c.prefire ? ", from the prefire" : ""}): ${c.tokensBefore} -> ~${c.tokensAfter} tokens; the turn waited ${c.durationMs} ms (${c.waitedMs} ms of it on the background summary); summary request ${c.summaryMs} ms, cache read ${c.cacheRead} of ${c.cacheRead + c.cacheWrite + c.input} (${c.cacheReadPct}%), $${c.cost.toFixed(4)}; ${c.cleared} outputs cleared`);
+						into.push(`${at}s  COMPACTED (${c.trigger}${c.prefire ? ", from the prefire" : ""}${c.cold ? ", on a cold cache" : ""}): ${c.tokensBefore} -> ~${c.tokensAfter} tokens; the turn waited ${c.durationMs} ms (${c.waitedMs} ms of it on the background summary); summary request ${c.summaryMs} ms, cache read ${c.cacheRead} of ${c.cacheRead + c.cacheWrite + c.input} (${c.cacheReadPct}%), $${c.cost.toFixed(4)}; ${c.cleared} outputs cleared`);
 					} else if (e.type === "compaction.failed" || e.type === "session.error") into.push(`${at}s  ${e.type} ${JSON.stringify(e.properties).slice(0, 300)}`);
 				}
 			}

@@ -23,6 +23,11 @@ export interface Tool<P extends TSchema = TSchema, D = unknown> {
 	parameters: P;
 	execute: (toolCallId: string, params: Static<P>, signal?: AbortSignal, onUpdate?: (partial: ToolResult<D>) => void) => Promise<ToolResult<D>>;
 	executionMode?: "sequential" | "parallel";
+	/**
+	 * what the tool's source says about side effects, for tools cmx2 does not write (an mcp server's `readOnlyHint`).
+	 * false keeps it from read-only agents (a session that does not get `edit`); unset leaves it to the exclusion list
+	 */
+	readOnly?: boolean;
 }
 
 /** what an afterWrite hook hands back: its notes, and the call's diff when it could take one (without it the tool takes none) */

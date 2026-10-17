@@ -123,7 +123,10 @@ export interface RunDetails {
 	error?: string;
 }
 
-export function runTool(call: NestedCall): Tool {
+/** how long one script may run */
+export const RUN_TIMEOUT_MS = 10 * 60_000;
+
+export function runTool(call: NestedCall, opts: { timeoutMs?: number } = {}): Tool {
 	return defineTool({
 		name: "run",
 		label: "run",
@@ -135,6 +138,11 @@ export function runTool(call: NestedCall): Tool {
 			const nested: NestedCallRecord[] = [];
 			// images from helpers stay on the host and ride the result; the script sees their captions
 			const attachments: Array<TextPart | ImagePart> = [];
+			// a script that times out returns while its calls may still be running; this tells them to stop,
+			// so a shell.exec past the deadline does not keep its command going after run has answered.
+			// a script that ends normally leaves an unawaited call alone, as before
+			const stop = new AbortController();
+			const callSignal = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
 			// codemode only counts `tools`, not `globals`; helpers are globals so dotted names become frozen
 			// namespace objects inside the vm, so the count is kept here, one record per helper call
 			const globals: CodemodeTool[] = HELPERS.map((h) => ({
@@ -146,7 +154,7 @@ export function runTool(call: NestedCall): Tool {
 					try {
 						const input = h.extra ? { ...((args ?? {}) as object), ...h.extra } : (args ?? {});
 						record.title = titleLine(toolTitle(h.tool, input));
-						const { result, isError, decision } = await call(h.tool, input, signal);
+						const { result, isError, decision } = await call(h.tool, input, callSignal);
 						record.ok = !isError;
 						record.title = titleLine(toolTitle(h.tool, input, result.details));
 						const answer = nestedDetails(h.tool, result.details, NESTED_DETAILS_CAP);
@@ -179,9 +187,10 @@ export function runTool(call: NestedCall): Tool {
 					}
 				},
 			}));
-			const sandbox = new CodemodeSandbox({ tools: [], globals, timeoutMs: 10 * 60_000, wasm: loadQuickJSWasm(quickjsWasm), workerUrl: WORKER });
+			const sandbox = new CodemodeSandbox({ tools: [], globals, timeoutMs: opts.timeoutMs ?? RUN_TIMEOUT_MS, wasm: loadQuickJSWasm(quickjsWasm), workerUrl: WORKER });
 			try {
 				const result = await sandbox.execute(params.code, { signal });
+				if (!result.ok && result.error.kind === "timeout") stop.abort(new Error(result.error.message));
 				const content: ToolResult["content"] = [];
 				let fromScript = 0;
 				for (const item of result.output) {

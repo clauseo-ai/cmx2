@@ -120,6 +120,8 @@ bun run dev                     # or run the daemon straight from source on 127.
 
 `cmx2 --help` lists every command. config lives in `~/.config/cmx2/cmx2.jsonc` and sessions in `~/.local/share/cmx2/`. [examples/](examples/) has sample config: another provider, a routing table, a permission preset and service files.
 
+web search works with no setup through [tavily](https://tavily.com)'s free keyless mode, which is rate limited. for more, get a free tavily key (1,000 credits a month, no card) at [app.tavily.com](https://app.tavily.com) and `export TAVILY_API_KEY=...`. exa, brave and a self-hosted searxng work too: see [web search](docs/quickstart.md#web-search).
+
 ## docs
 
 - [docs/quickstart.md](docs/quickstart.md): install, pick a model, a first session, a service and pairing.
@@ -132,6 +134,8 @@ bun run dev                     # or run the daemon straight from source on 127.
 - [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), [CHANGELOG.md](CHANGELOG.md).
 
 the daemon's http contract is [packages/client/openapi.json](packages/client/openapi.json). both it and the typed client `@cmx2/client` in `packages/client` are generated from `packages/contract/src/manifest.ts`. `@cmx2/client` is a workspace package you use from a checkout. it is not published to npm.
+
+`GET /global/system` says what machine a daemon runs on (os name and version, model, cpu) and how it is doing (load, memory, the data volume's disk space, host and daemon uptime). it needs the same credential as every other route and is cheap enough to poll: the static fields are read once, the live ones without starting a process.
 
 ## related projects
 

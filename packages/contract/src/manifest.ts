@@ -36,6 +36,7 @@ export const SessionStatusBusy = Type.Object(
 		type: Type.Literal("busy"),
 		queued: Type.Optional(Type.Integer({ description: "steers and queued prompts admitted but not yet sent to the model" })),
 		since: Type.Optional(Type.Number({ description: "when the turn began (ms)" })),
+		waiting: Type.Optional(Type.String({ description: "why the turn has not started yet, short and lowercase, shown as is: the session's directory has not answered (a macos privacy prompt, a hung mount)" })),
 	},
 	{ description: "a turn is running" },
 );
@@ -461,6 +462,7 @@ export const EVENTS = {
 		summaryMs: Type.Number({ description: "the summary request's own wall time" }),
 		summaryChars: Type.Number(),
 		prefire: Type.Boolean({ description: "the summary was made in the background before the threshold" }),
+		cold: Type.Boolean({ description: "compacted under the threshold because the prompt cache had gone cold (past its ttl, or a model switch) and a background summary was ready" }),
 		tailFrom: Type.Number(),
 		tailStartID: Type.Optional(Type.String()),
 		cleared: Type.Number({ description: "tool outputs the kept tail carries cleared (recall reads them)" }),
@@ -479,6 +481,7 @@ export const EVENTS = {
 		chars: Type.Optional(Type.Number()),
 		message: Type.Optional(Type.String()),
 		cacheReadPct: Type.Optional(Type.Number()),
+		refresh: Type.Optional(Type.Boolean({ description: "a newer summary over the grown context, made while the ready one stays in use; stale here means a compaction or a revert came first and it was dropped" })),
 	}),
 	"compaction.failed": event("a compaction did not happen; sticky ones are not tried again on this model until a manual compact or a model switch", {
 		...sid,
@@ -710,6 +713,35 @@ export const ROUTES: RouteDef[] = [
 		summary: "resident memory and live sessions, for the budget check",
 		query: Type.Object({ gc: Type.Optional(Type.Union([Type.Literal("true"), Type.Literal("false")], { description: "run a full garbage collection before measuring" })) }),
 		response: Type.Object({ rss: Type.Number(), heapUsed: Type.Number(), heapTotal: Type.Number(), external: Type.Number(), live_sessions: Type.Integer(), uptime_s: Type.Integer(), contract_violations: Type.Integer({ description: "published events that failed their manifest schema (counted when the daemon runs with event checks on)" }) }),
+	},
+	{
+		method: "GET",
+		path: "/global/system",
+		operationId: "system",
+		summary: "the machine the daemon runs on: os, model, cpu and live load, memory, the data volume's disk space and uptimes. static fields are read once; live ones on each request without spawning a process",
+		response: Type.Object({
+			os: Type.Object({
+				platform: Type.String({ description: "process.platform: darwin, linux, win32, ..." }),
+				name: Type.String({ description: "macOS, Ubuntu, Debian, ..." }),
+				version: Type.String({ description: "the os version (26.1, 24.04); empty when unknown" }),
+				kernel: Type.String(),
+				arch: Type.String({ description: "arm64, x64, ..." }),
+			}),
+			machine: Type.Object({
+				model: Type.Union([Type.String(), Type.Null()], { description: "a mac's family (Mac mini, MacBook Pro), else the dmi product name (Google Compute Engine)" }),
+				identifier: Type.Union([Type.String(), Type.Null()], { description: "a mac's model identifier (Mac16,11); null elsewhere" }),
+				virtual: Type.Boolean({ description: "a vm or cloud instance" }),
+			}),
+			cpu: Type.Object({ model: Type.String(), cores: Type.Integer({ description: "logical cores" }), load: Type.Array(Type.Number(), { description: "load average over 1, 5 and 15 minutes" }) }),
+			memory: Type.Object({
+				total: Type.Number({ description: "bytes" }),
+				available: Type.Number({ description: "bytes usable without swapping: MemAvailable on linux; on macos physical memory less app, wired and compressed memory, as activity monitor counts it" }),
+			}),
+			disk: Type.Union([Type.Object({ path: Type.String({ description: "mount point of the volume holding the daemon's data" }), total: Type.Number(), available: Type.Number({ description: "bytes free to an unprivileged user" }) }), Type.Null()]),
+			uptime: Type.Integer({ description: "host uptime in seconds" }),
+			daemon: Type.Object({ rss: Type.Number({ description: "bytes" }), uptime: Type.Integer({ description: "seconds" }) }),
+			at: Type.Number({ description: "epoch ms the live fields were read" }),
+		}),
 	},
 	{
 		method: "GET",

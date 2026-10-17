@@ -57,6 +57,37 @@ for anything else, write `~/.config/cmx2/cmx2.jsonc`. here is a proxy that speak
 `examples/cmx2.jsonc` shows the other shapes: google and an openai-compatible server. `examples/cmx2.laptop.jsonc`
 is a per-machine overlay (`cmx2.<hostname>.jsonc`, read on top of the main file on that machine).
 
+### web search
+
+web search works with no setup: it goes through [tavily](https://tavily.com)'s free
+[keyless mode](https://docs.tavily.com/documentation/keyless), which is rate limited, and falls back to exa's
+keyless endpoint when tavily says no. for regular use, get a free tavily key (1,000 credits a month, no card) at
+[app.tavily.com](https://app.tavily.com):
+
+```sh
+export TAVILY_API_KEY=tvly-...
+```
+
+that is all it takes. without a `web` entry the first of `TAVILY_API_KEY`, `EXA_API_KEY` and `BRAVE_API_KEY`
+found in the environment picks the provider. to choose one outright, or to turn on the extras:
+
+```jsonc
+{
+  "web": {
+    "provider": "tavily",          // tavily, exa, brave, or searxng (with "url": your instance)
+    "apiKey": "$TAVILY_API_KEY",   // a literal, $NAME or !command; defaults to the provider's variable
+    "search": { "search_depth": "advanced", "chunks_per_source": 3 },  // extra request fields; advanced costs 2 credits a search, not 1
+    "fetch": "provider",           // webfetch reads public pages through tavily extract (renders javascript); default "local"
+    "crawl": true                  // adds webcrawl: list a site's pages or read many at once (needs a key)
+  }
+}
+```
+
+`fetch` and `crawl` are off by default and need `"provider": "tavily"`. with `fetch: "provider"` the urls the
+model reads go to tavily; localhost and private-network addresses are always fetched locally. a repository's
+`.cmx2/cmx2.jsonc` cannot set `web`. tavily's [credits](https://docs.tavily.com/documentation/api-credits)
+page has what each call costs.
+
 then check it:
 
 ```sh
@@ -100,6 +131,15 @@ cmx2 pair                       # a url and a one-time token for a client like b
 `cmx2 serve --install` copies the binary to `~/.local/share/cmx2/bin`, links it as `cmx2` in `~/.local/bin`
 and writes the service unit. it also saves provider keys from your current shell for the service, which does
 not inherit your shell's environment. export a key and run it again to change one.
+
+on macos the copy is signed with a code signing identity from your keychain when there is one (one named for
+cmx2 first, then developer id, then apple development; `CMX2_CODESIGN_IDENTITY` picks one by name or hash, `-`
+keeps the build's ad-hoc signature). macos remembers folder access (desktop, documents, full disk access)
+against the signature, and an ad-hoc one changes with every build, so without an identity macos asks again
+after each upgrade and a session in that folder waits until someone answers. `cmx2 serve --install` and
+`cmx2 upgrade` sign the copy they place, and `cmx2 doctor` says which signature the installed copy has. with no
+developer certificate, keychain access can make a self-signed one (certificate assistant, create a
+certificate, type code signing).
 
 boxbox is the web client (https://github.com/clauseo-ai/boxbox2). pairing connects a client to your daemon:
 `cmx2 pair` prints the daemon's url and a token that works once, for 10 minutes. the client trades it for

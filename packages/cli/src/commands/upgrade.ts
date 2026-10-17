@@ -5,6 +5,7 @@ import { parseArgs } from "node:util";
 import { VERSION } from "@cmx2/server";
 import { assetName, compareVersions, compiled, fetchBytes, installedBinary, releaseBase, sha256, sumFor } from "../release.ts";
 import { binaryVersion, keepLink, linkNotes, placeBinary, restartCommand, restartService, same, serviceState } from "../service.ts";
+import { signLine } from "../signing.ts";
 import { fail } from "../util.ts";
 
 export const help = `cmx2 upgrade: swap in the latest release
@@ -92,8 +93,10 @@ export async function main(args: string[]) {
 			return;
 		}
 		if (cmp < 0 && !values.force) fail(`the release is ${version}, older than the ${VERSION} you run. --force installs it anyway`);
-		placeBinary(fresh, target);
+		const signed = placeBinary(fresh, target);
 		console.log(`replaced ${target}: ${VERSION} -> ${version}`);
+		const signNote = signLine(signed);
+		if (signNote) console.log(signNote);
 		relink(target, installed, { already: false });
 	} finally {
 		rmSync(dir, { recursive: true, force: true });

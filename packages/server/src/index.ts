@@ -1,9 +1,10 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
+import { readdir, realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { CONTRACT_VERSION, EVENTS, type EventType } from "@cmx2/contract";
 import { ActorError, Actors, agentTools, type Host, type SpawnInput } from "@cmx2/actors";
-import { type Config, ConfigError, configDir, dataDir as defaultDataDir, type Effort, loadConfig, machineName } from "@cmx2/engine/config";
+import { type Config, ConfigError, configDir, dataDir as defaultDataDir, type Effort, loadConfig, loadConfigAsync, machineName } from "@cmx2/engine/config";
 import { Routing } from "@cmx2/routing";
 import type { RequestAsk } from "@cmx2/engine/gates";
 import { ModelError, resolveModel } from "@cmx2/engine/models";
@@ -18,7 +19,9 @@ import { Catalog, expandTemplate, providersJson } from "./catalog.ts";
 import { CONTENT_MAX, readContent } from "./content.ts";
 import { findFiles, findText } from "./find.ts";
 import { fileStatus, VcsCache } from "./vcs.ts";
-import { browse, projectOf } from "./fs.ts";
+import { browse, knownProject, projectOf, projectOfAsync } from "./fs.ts";
+import { Reach, waitingText } from "./reach.ts";
+import { systemInfo } from "./system.ts";
 import { blocksOf, type PartInput, type Resize } from "./parts.ts";
 import { ptyJson, shells, type TermSocketData, Terminals } from "./pty.ts";
 import { type ProcEvent, type ProcInfo, Procs, type SweepResult } from "@cmx2/procs";
@@ -190,6 +193,15 @@ function real(p: string): string {
 	}
 }
 
+/** `real` with the lookup on bun's threadpool, for a path no one has touched yet */
+async function realAsync(p: string): Promise<string> {
+	try {
+		return await realpath(p);
+	} catch {
+		return p;
+	}
+}
+
 export function serve(opts: ServeOptions) {
 	const data = opts.dataDir ?? defaultDataDir();
 	const store = new Store(join(data, "cmx2.db"));
@@ -222,6 +234,7 @@ export function serve(opts: ServeOptions) {
 	 */
 	const inflight = new Map<string, Inflight>();
 
+	const machine = systemInfo(data);
 	const procs = new Procs({ dataDir: data, onEvent: (e) => onProc(e) });
 	/** running background jobs that will notify this session (ptys and jobs without notify do not count) */
 	const liveJobsOf = (id: string) => procs.list({ sessionID: id }).filter((p) => p.status === "running" && !p.tty && p.notify && Object.keys(p.notify).length > 0).length;
@@ -461,6 +474,8 @@ export function serve(opts: ServeOptions) {
 	function statusOf(id: string) {
 		const live = sessions.get(id);
 		if (live?.state === "busy") return { type: "busy" as const, queued: live.queued, since: live.stateSince };
+		const w = reaching.get(id);
+		if (w && reach.slow(w.directory)) return { type: "busy" as const, since: w.since, waiting: waitingText(w.directory) };
 		const parked = actors.parkedOf(id);
 		// an abort leaves prompts waiting: an idle session says how many (a19)
 		const queued = live?.queued ? { queued: live.queued } : {};
@@ -475,6 +490,65 @@ export function serve(opts: ServeOptions) {
 	const orphaned = store.expireOrphanedAsks();
 	if (orphaned.permissions || orphaned.questions) {
 		console.error(`cmx2: ${orphaned.permissions} permission and ${orphaned.questions} question asks from a previous run expired (their turns ended with that process)`);
+	}
+
+	/** bumped whenever `instances` is cleared, so a probe that read a config before a reload does not put it back */
+	let instancesGen = 0;
+	const reloadAsync = opts.reload ? async (cwd: string) => opts.reload!(cwd) : (cwd: string) => loadConfigAsync({ cwd });
+	/** sessions waiting for their directory's first access, by id, and since when */
+	const reaching = new Map<string, { directory: string; since: number; shown?: boolean }>();
+	const reach = new Reach({
+		// what the sync paths read first: the directory, its listing, the project config, the git root
+		probe: async (dir) => {
+			await stat(dir).catch(() => undefined);
+			await readdir(dir).catch(() => undefined);
+			const gen = instancesGen;
+			// a config error is left for configFor's own read, which turns it into the 400 a client sees
+			const c = await reloadAsync(dir).catch(() => undefined);
+			if (c && gen === instancesGen && !instances.has(dir)) instances.set(dir, c);
+			await projectOfAsync(dir);
+		},
+		onSlow: (dir) => {
+			const ids = [...reaching].filter(([, w]) => w.directory === dir).map(([id]) => id);
+			console.error(`cmx2: ${waitingText(dir)}${ids.length ? ` (${ids.join(", ")} waiting)` : ""}; other sessions go on`);
+			for (const id of ids) {
+				reaching.get(id)!.shown = true;
+				publishStatus(id);
+			}
+		},
+		onSettled: (dir, ms, slow) => {
+			if (slow) console.error(`cmx2: ${dir} answered after ${Math.round(ms / 1000)} s`);
+		},
+	});
+
+	/**
+	 * waits for a directory's first access to settle without holding the main thread. a session that waits
+	 * past the slow mark shows why in its status (busy, with `waiting`) until it goes on.
+	 */
+	async function reachFor(directory: string, sessionID?: string): Promise<void> {
+		if (reach.ready(directory)) return;
+		if (!sessionID) return reach.wait(directory);
+		const w: { directory: string; since: number; shown?: boolean } = { directory, since: Date.now() };
+		reaching.set(sessionID, w);
+		if (reach.slow(directory)) {
+			w.shown = true;
+			publishStatus(sessionID);
+		}
+		try {
+			await reach.wait(directory);
+		} finally {
+			if (reaching.get(sessionID) === w) reaching.delete(sessionID);
+			// the waiting status is replaced by what the session is doing now (the turn's own busy follows when it starts)
+			if (w.shown && store.session(sessionID)) publishStatus(sessionID);
+		}
+	}
+
+	/** the project of a directory, without running git in one that has not been reached: the store's answer or the directory stands in */
+	function projectFor(directory: string): string {
+		if (reach.ready(directory)) return projectOf(directory);
+		const known = knownProject(directory) ?? (store.db.query("select project_id from session where directory = ? and project_id is not null limit 1").get(directory) as { project_id: string } | null)?.project_id;
+		if (!known) void reach.wait(directory);
+		return known ?? directory;
 	}
 
 	function configFor(directory: string): Config {
@@ -521,7 +595,7 @@ export function serve(opts: ServeOptions) {
 
 	function unloggedFrame(sub: Subscriber, type: string, properties: Record<string, unknown>, directory: string | null, id?: string): string {
 		const p = unloggedPayload(type, properties);
-		const body = sub.directory ? p : envelope(SERVER_EVENTS.has(type) ? null : directory, directory && directory !== "global" && !SERVER_EVENTS.has(type) ? projectOf(directory) : null, p);
+		const body = sub.directory ? p : envelope(SERVER_EVENTS.has(type) ? null : directory, directory && directory !== "global" && !SERVER_EVENTS.has(type) ? projectFor(directory) : null, p);
 		return `${id ? `id: ${id}\n` : ""}data: ${body}\n\n`;
 	}
 
@@ -550,21 +624,31 @@ export function serve(opts: ServeOptions) {
 		}
 		flushBurst();
 		// the log write and the fan-out happen in one synchronous step: a read (a2) or a replay's seam sees both or neither
-		const e: Logged = { seq: 0, directory, project: directory === "global" ? null : projectOf(directory), type, properties: JSON.stringify(properties) };
+		const e: Logged = { seq: 0, directory, project: directory === "global" ? null : projectFor(directory), type, properties: JSON.stringify(properties) };
 		e.seq = store.appendEvent({ at: Date.now(), directory: e.directory, project: e.project, type: e.type, properties: e.properties });
 		head = e.seq;
 		for (const s of subscribers) if (s.live && reaches(s, directory, type)) send(s, loggedFrame(s, e), e.seq);
 		notifier.onEvent(type, properties);
 	}
 
-	function directoryOf(req: Request, url: URL): string | undefined {
+	/**
+	 * the directory a request names, symlinks resolved. the lookup is async: realpath lstats inside the
+	 * folder, and a folder behind a privacy prompt or on a hung mount would hold the main thread
+	 */
+	async function directoryOf(req: Request, url: URL): Promise<string | undefined> {
+		const d = rawDirectoryOf(req, url);
+		return d === undefined ? undefined : realAsync(d);
+	}
+
+	/** the directory a request names, absolute, symlinks not yet resolved */
+	function rawDirectoryOf(req: Request, url: URL): string | undefined {
 		const d = url.searchParams.get("directory") ?? req.headers.get("x-cmx2-directory") ?? req.headers.get("x-opencode-directory");
 		if (!d) return undefined;
 		let decoded = d;
 		try {
 			decoded = decodeURIComponent(d);
 		} catch {}
-		return real(resolve(decoded));
+		return resolve(decoded);
 	}
 
 	/**
@@ -947,7 +1031,19 @@ export function serve(opts: ServeOptions) {
 	function streamRequest(req: Request, res: StreamResponse): boolean {
 		const url = new URL(req.url);
 		if (req.method !== "GET" || (url.pathname !== "/event" && url.pathname !== "/global/event") || refuse(req) || !authorized(req)) return false;
-		const directory = url.pathname === "/event" ? (directoryOf(req, url) ?? real(process.cwd())) : undefined;
+		const named = url.pathname === "/event" ? rawDirectoryOf(req, url) : undefined;
+		if (named === undefined) attach(url.pathname === "/event" ? real(process.cwd()) : undefined);
+		else {
+			// a stream that names a directory opens once its path is resolved (async), so a slow folder holds only this stream
+			let gone = false;
+			res.on("close", () => (gone = true));
+			void realAsync(named).then((directory) => {
+				if (!gone) attach(directory);
+			});
+		}
+		return true;
+
+		function attach(directory: string | undefined) {
 		res.writeHead(200, SSE_HEADERS);
 		const sub = openStream(directory, req.headers.get("last-event-id") ?? url.searchParams.get("after") ?? undefined, {
 			write: (t) => void res.write(t),
@@ -961,7 +1057,7 @@ export function serve(opts: ServeOptions) {
 			},
 		});
 		res.on("close", () => sub.close());
-		return true;
+		}
 	}
 
 	/** the same stream for an in-process caller (tests pass the handler as fetch); there is no socket to measure */
@@ -1089,7 +1185,8 @@ export function serve(opts: ServeOptions) {
 			...(effort ? { effort } : {}),
 			...(() => {
 				// imported history is a record, not a work tree; its directory may be gone or on another branch
-				const v = row.source === "cmx" ? undefined : vcs.of(row.directory);
+				// git in a directory not reached yet would hold the main thread on its prompt; the probe runs instead and the next read has it
+				const v = row.source === "cmx" ? undefined : reach.ready(row.directory) ? vcs.of(row.directory) : void reach.wait(row.directory);
 				return v ? { vcs: v } : {};
 			})(),
 			cost: row.cost ?? 0,
@@ -1330,7 +1427,7 @@ export function serve(opts: ServeOptions) {
 			nudge: stored.nudge ?? null,
 			turn_mode: stored.turn_mode ?? null,
 			cache_ttl: stored.cache_ttl ?? null,
-			project_id: stored.project_id ?? projectOf(stored.directory),
+			project_id: stored.project_id ?? projectFor(stored.directory),
 			version: VERSION,
 		});
 		const pre = store.prefix(id);
@@ -1619,7 +1716,9 @@ export function serve(opts: ServeOptions) {
 		if (pending) return pending;
 		const r = row(id);
 		if (r.source === "cmx") throw new HttpError(409, "ConflictError", `session ${id} is history imported from cmx; it is browse only. start a new session to continue the work`);
-		const p = EngineSession.create({
+		const p = reachFor(r.directory, id)
+			.then(() =>
+				EngineSession.create({
 			id,
 			cwd: r.directory,
 			config: configFor(r.directory),
@@ -1632,7 +1731,8 @@ export function serve(opts: ServeOptions) {
 			cacheTtl: (r.cache_ttl as "5m" | "1h" | null) ?? undefined,
 			resume: { recordedPrefix: store.prefix(id)?.bytes },
 			...hooks(id, r.directory),
-		})
+				}),
+			)
 			.then((s) => {
 				sessions.set(id, s);
 				lastUsed.set(id, Date.now());
@@ -1683,6 +1783,7 @@ export function serve(opts: ServeOptions) {
 
 	/** a subagent's session: a real session with its parent, created idle; its first turn starts from the mailbox */
 	async function createChild(spec: Parameters<Host["createSession"]>[0]) {
+		await reachFor(spec.directory);
 		let s: EngineSession;
 		try {
 			s = await EngineSession.create({
@@ -1778,7 +1879,9 @@ export function serve(opts: ServeOptions) {
 	}
 	let queuedSeq = 0;
 
-	function blocks(b: { text?: string; parts?: PartInput[] }, directory: string): Promise<UserBlock[]> {
+	/** a prompt's parts read from disk; the session's directory is reached first, so a file part never reads it before that */
+	async function blocks(b: { text?: string; parts?: PartInput[] }, directory: string, sessionID?: string): Promise<UserBlock[]> {
+		await reachFor(directory, sessionID);
 		return blocksOf(b, directory, resize);
 	}
 
@@ -1824,6 +1927,50 @@ export function serve(opts: ServeOptions) {
 		const { info, parts } = provisional(sessionID, q);
 		publish(directory, "message.updated", { sessionID, info });
 		for (const part of parts) publish(directory, "message.part.updated", { sessionID, part });
+	}
+
+	/**
+	 * prompts accepted while their session's directory has not answered (a privacy prompt, a hung mount): the
+	 * send answers 202 at once as a queued prompt, and the prompt runs once the directory is reached, in the
+	 * order sent. until then it can be read back and taken back like any queued prompt.
+	 */
+	const deferred = new Map<string, { chain: Promise<void>; waiting: Array<ReturnType<EngineSession["queuedPrompts"]>[number]> }>();
+
+	function deferPrompt(id: string, directory: string, q: ReturnType<EngineSession["queuedPrompts"]>[number], run: () => Promise<unknown>) {
+		const d = deferred.get(id) ?? { chain: Promise.resolve(), waiting: [] };
+		d.waiting.push(q);
+		deferred.set(id, d);
+		publishQueued(directory, id, q);
+		const step = d.chain.then(async () => {
+			await reachFor(directory, id);
+			const at = d.waiting.indexOf(q);
+			// taken back while it waited
+			if (at < 0) return;
+			d.waiting.splice(at, 1);
+			try {
+				await run();
+			} catch (e) {
+				// the send was answered already: the failure goes out as a turn's does
+				const err = e instanceof HttpError ? e : e instanceof ActorError ? new HttpError(e.status, e.name, e.message) : new HttpError(500, "EngineError", e instanceof Error ? e.message : String(e));
+				console.error(`cmx2: a prompt for ${id} that waited for ${directory} failed: ${err.message}`);
+				publish(directory, "message.removed", { sessionID: id, messageID: q.id });
+				publish(directory, "session.error", { sessionID: id, error: { name: err.name, data: { message: err.message } } });
+				publishStatus(id);
+			}
+		});
+		d.chain = step;
+		void step.finally(() => {
+			if (deferred.get(id)?.chain === step) deferred.delete(id);
+		});
+	}
+
+	/** a deferred prompt taken back before it ran */
+	function undefer(id: string, messageID: string): boolean {
+		const d = deferred.get(id);
+		const at = d?.waiting.findIndex((q) => q.id === messageID) ?? -1;
+		if (!d || at < 0) return false;
+		d.waiting.splice(at, 1);
+		return true;
 	}
 
 	/**
@@ -1915,9 +2062,10 @@ export function serve(opts: ServeOptions) {
 		id: string,
 		content: UserBlock[],
 		b: { model?: { providerID: string; modelID: string }; variant?: string; effort?: Effort; agent?: string },
-		opts: { ask?: RequestAsk; clientID?: string; busy?: "queue" | "steer" } = {},
+		opts: { ask?: RequestAsk; clientID?: string; busy?: "queue" | "steer"; messageID?: string } = {},
 	) {
 		const stored = row(id);
+		await reachFor(stored.directory, id);
 		const agentDef = b.agent ? catalog.agent(stored.directory, b.agent) : undefined;
 		if (b.agent && !agentDef) throw badRequest(`no agent named ${b.agent} in ${stored.directory}; GET /agent lists them`);
 		const modelRef = b.model ? `${b.model.providerID}/${b.model.modelID}` : agentDef?.model;
@@ -1942,7 +2090,7 @@ export function serve(opts: ServeOptions) {
 						throw e;
 					}
 				}
-				const qid = queuedId(id);
+				const qid = opts.messageID ?? queuedId(id);
 				const pick = { ...(b.agent ? { agent: b.agent } : {}), ...(effort ? { effort } : {}) };
 				const result = opts.busy === "steer" ? await s.steer(content, { id: qid, clientID, ...pick }) : await s.queue(content, { id: qid, clientID, ...pick, ...(modelRef ? { model: modelRef } : {}) });
 				const waiting = s.queuedPrompts().find((x) => x.id === qid);
@@ -1957,7 +2105,8 @@ export function serve(opts: ServeOptions) {
 					throw e;
 				}
 			}
-			const turn = s.prompt(content, { effort, ask: opts.ask, ...(b.agent ? { agent: b.agent } : {}), ...(clientID ? { clientID } : {}) });
+			// a prompt that waited for its directory under a provisional id lands with it, so the id is swapped the way a queued one's is
+			const turn = s.prompt(content, { effort, ask: opts.ask, ...(b.agent ? { agent: b.agent } : {}), ...(clientID ? { clientID } : {}), ...(opts.messageID ? { id: opts.messageID } : {}) });
 			// the first message names an unnamed session; the request runs beside the turn, never in it
 			void titles.maybe(
 				id,
@@ -2105,10 +2254,10 @@ export function serve(opts: ServeOptions) {
 
 		if (p === "/global/health") return json({ healthy: true, version: VERSION, name: "cmx2", contract: CONTRACT_VERSION, pid: process.pid });
 		if (p === "/global/event") return sse(req, url, undefined);
-		if (p === "/event") return sse(req, url, directoryOf(req, url) ?? real(process.cwd()));
+		if (p === "/event") return sse(req, url, (await directoryOf(req, url)) ?? real(process.cwd()));
 		if (p === "/global/fs" && method === "GET") {
 			const q = queryOf(url, "browse");
-			return json(browse(q.path, q.hidden === "true"));
+			return json(await browse(q.path, q.hidden === "true"));
 		}
 		if (p === "/global/reload" && method === "POST") return json(await doReload());
 		if (p === "/mcp" && method === "GET") return json(mcp.status().map((st) => (st.error ? { ...st, error: scrubText(st.error) } : st)));
@@ -2125,8 +2274,10 @@ export function serve(opts: ServeOptions) {
 			const mu = process.memoryUsage();
 			return json({ rss: mu.rss, heapUsed: mu.heapUsed, heapTotal: mu.heapTotal, external: mu.external, live_sessions: sessions.size, uptime_s: Math.round(process.uptime()), contract_violations: violations });
 		}
+		if (p === "/global/system" && method === "GET") return json(await machine());
 		if (p === "/command" && method === "GET") {
-			const dir = directoryOf(req, url) ?? real(process.cwd());
+			const dir = (await directoryOf(req, url)) ?? real(process.cwd());
+			await reachFor(dir);
 			const cmds = catalog.commandsFor(dir).map((c) => ({
 				name: c.name,
 				...(c.description ? { description: c.description } : {}),
@@ -2144,7 +2295,7 @@ export function serve(opts: ServeOptions) {
 		}
 		if (p === "/find/file" && method === "GET") {
 			const q = queryOf(url, "findFile");
-			const dir = directoryOf(req, url) ?? real(process.cwd());
+			const dir = (await directoryOf(req, url)) ?? real(process.cwd());
 			const limit = intParam(q.limit, "limit", { min: 1, max: 200, fallback: 10 });
 			const found = await findFiles(dir, { query: q.query ?? "", limit, ...(q.type ? { type: q.type as "file" | "directory" } : {}), ...(q.dirs === "false" ? { dirs: false } : {}) });
 			return json(found.paths, 200, found.truncated ? { "x-truncated": "true" } : undefined);
@@ -2152,7 +2303,7 @@ export function serve(opts: ServeOptions) {
 		if (p === "/find/text" && method === "GET") {
 			const q = queryOf(url, "findText");
 			if (!q.pattern) throw badRequest("pattern is required: a ripgrep regex, or a plain string with literal=true");
-			const dir = directoryOf(req, url) ?? real(process.cwd());
+			const dir = (await directoryOf(req, url)) ?? real(process.cwd());
 			const limit = intParam(q.limit, "limit", { min: 1, max: 1000, fallback: 100 });
 			try {
 				const r = await findText(dir, { pattern: q.pattern, limit, ...(q.literal === "true" ? { literal: true } : {}), ...(q.glob ? { glob: q.glob } : {}) });
@@ -2164,7 +2315,7 @@ export function serve(opts: ServeOptions) {
 		if (p === "/file/content" && (method === "GET" || method === "HEAD")) {
 			const q = queryOf(url, "fileContent");
 			// no instance is made for the directory: a read of a path never loads a project's config
-			const dir = directoryOf(req, url) ?? real(process.cwd());
+			const dir = (await directoryOf(req, url)) ?? real(process.cwd());
 			const max = intParam(q.max, "max", { min: 1, max: CONTENT_MAX, fallback: CONTENT_MAX });
 			const f = await readContent(dir, q.path ?? "", max, req.headers.get("if-none-match"));
 			const headers = { etag: f.etag, "cache-control": "private, no-cache", "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox" };
@@ -2173,13 +2324,15 @@ export function serve(opts: ServeOptions) {
 			return new Response(method === "HEAD" ? null : f.bytes, { headers: { ...headers, "content-type": f.type, "content-length": String(f.bytes.length) } });
 		}
 		if (p === "/file/status" && method === "GET") {
-			const dir = directoryOf(req, url) ?? real(process.cwd());
+			const dir = (await directoryOf(req, url)) ?? real(process.cwd());
+			await reachFor(dir);
 			const st = fileStatus(dir);
 			if (!st) throw badRequest(`${dir} is not in a git work tree`);
 			return json(st);
 		}
 		if (p === "/agent" && method === "GET") {
-			const dir = directoryOf(req, url) ?? real(process.cwd());
+			const dir = (await directoryOf(req, url)) ?? real(process.cwd());
+			await reachFor(dir);
 			return json(
 				catalog.agentsFor(dir).map((a) => {
 					const slash = a.model?.indexOf("/") ?? -1;
@@ -2197,13 +2350,15 @@ export function serve(opts: ServeOptions) {
 			);
 		}
 		if (p === "/config/providers" && method === "GET") {
-			const dir = directoryOf(req, url);
+			const dir = await directoryOf(req, url);
+			if (dir) await reachFor(dir);
 			const c = dir ? configFor(dir) : config;
 			const models = (await catalog.modelsFor(c)).filter((m) => !blacklisted(c, `${m.provider}/${m.id}`));
 			return json(providersJson(models, c, (ref) => variantsFor(c, ref), (ref, effort) => routing.allowed(ref, effort as Effort)));
 		}
 		if (p === "/config" && method === "GET") {
-			const dir = directoryOf(req, url);
+			const dir = await directoryOf(req, url);
+			if (dir) await reachFor(dir);
 			return json(redactConfig(dir ? configFor(dir) : config));
 		}
 		if (p === "/config" && method === "PATCH") {
@@ -2223,8 +2378,9 @@ export function serve(opts: ServeOptions) {
 		if (p === "/pty/shells" && method === "GET") return json(shells());
 		if (p === "/pty" && method === "POST") {
 			const b = await bodyOf<{ command?: string; args?: string[]; cwd?: string; title?: string; env?: Record<string, string>; origin?: "tui" | "model" }>(req, "createPty");
-			const cwd = b.cwd ? real(resolve(b.cwd)) : (directoryOf(req, url) ?? real(process.env.HOME ?? process.cwd()));
-			if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw badRequest(`directory ${cwd} does not exist`);
+			const cwd = b.cwd ? await realAsync(resolve(b.cwd)) : ((await directoryOf(req, url)) ?? real(process.env.HOME ?? process.cwd()));
+			await reachFor(cwd);
+			if (!(await stat(cwd).catch(() => undefined))?.isDirectory()) throw badRequest(`directory ${cwd} does not exist`);
 			const command = b.command ? [b.command, ...(b.args ?? []).map((a) => `'${a.replace(/'/g, "'\\''")}'`)].join(" ") : "";
 			const info = procs.spawn({
 				command,
@@ -2288,34 +2444,44 @@ export function serve(opts: ServeOptions) {
 		}
 		if (p === "/experimental/worktree" && method === "POST") {
 			const b = await bodyOf<{ name?: string; from?: string; startCommand?: string; wait?: boolean }>(req, "createWorktree");
-			const dir = directoryOf(req, url) ?? real(process.cwd());
+			const dir = (await directoryOf(req, url)) ?? real(process.cwd());
+			await reachFor(dir);
 			return json(await createWorktree(dir, b, b.wait === true));
 		}
-		if (p === "/experimental/worktree" && method === "GET") return json(worktrees.list(directoryOf(req, url) ?? real(process.cwd())));
+		if (p === "/experimental/worktree" && method === "GET") {
+			const dir = (await directoryOf(req, url)) ?? real(process.cwd());
+			await reachFor(dir);
+			return json(worktrees.list(dir));
+		}
 		if (p === "/experimental/worktree/diff" && method === "GET") {
 			const q = queryOf(url, "worktreeDiff");
-			const dir = q.directory ? real(resolve(q.directory)) : directoryOf(req, url);
+			const dir = q.directory ? await realAsync(resolve(q.directory)) : (await directoryOf(req, url));
 			if (!dir) throw badRequest("directory is required: the checkout to diff");
+			await reachFor(dir);
 			return json(worktrees.diff(dir));
 		}
 		if (p === "/experimental/worktree/merge" && method === "POST") {
 			const b = await bodyOf<{ directory?: string; message?: string }>(req, "mergeWorktree");
-			const dir = b.directory ? real(resolve(b.directory)) : directoryOf(req, url);
+			const dir = b.directory ? await realAsync(resolve(b.directory)) : (await directoryOf(req, url));
 			if (!dir) throw badRequest("directory is required: the checkout to merge");
+			await reachFor(dir);
 			return json(await mergeWorktree(dir, b.message));
 		}
 		if (p === "/experimental/worktree/discard" && method === "POST") {
 			const b = await bodyOf<{ directory?: string }>(req, "discardWorktree");
-			const dir = b.directory ? real(resolve(b.directory)) : directoryOf(req, url);
+			const dir = b.directory ? await realAsync(resolve(b.directory)) : (await directoryOf(req, url));
 			if (!dir) throw badRequest("directory is required: the checkout to discard");
+			await reachFor(dir);
 			return json(await discardWorktree(dir));
 		}
 
 
 		if (p === "/session/status" && method === "GET") {
-			const directory = directoryOf(req, url);
+			const directory = await directoryOf(req, url);
 			const out: Record<string, unknown> = {};
 			for (const s of sessions.values()) if (s.state === "busy" && (!directory || s.cwd === directory)) out[s.id] = s.retryStatus ? { ...s.retryStatus, since: s.stateSince } : { type: "busy", queued: s.queued, since: s.stateSince };
+			// a session whose turn waits for its directory to answer reads as busy, with why
+			for (const [id, w] of reaching) if (!out[id] && reach.slow(w.directory) && (!directory || w.directory === directory)) out[id] = statusOf(id);
 			// parked sessions, and idle ones with prompts an abort left waiting, only on request: boxbox v1 reads any entry in this map as busy (and may flush it)
 			if (queryOf(url, "sessionStatus").parked === "true") {
 				const idleQueued = [...sessions.values()].filter((s) => s.state !== "busy" && s.queued > 0).map((s) => s.id);
@@ -2333,8 +2499,9 @@ export function serve(opts: ServeOptions) {
 			// `<updated_at>:<id>` continues exactly after a row; a bare `<updated_at>` (version 5) pages strictly older than it
 			const keyed = q.before?.match(/^(\d+):(.+)$/);
 			const before = keyed ? { time: Number(keyed[1]), id: keyed[2]! } : q.before ? intParam(q.before, "before", { min: 0, fallback: 0 }) : undefined;
-			const dir = directoryOf(req, url);
+			const dir = await directoryOf(req, url);
 			// a project-scoped list for a directory is how a client opens a repository (boxbox v1's "open a repo"); it stays a project
+			if (dir && q.scope === "project") await reachFor(dir);
 			if (dir && q.scope === "project" && existsSync(dir) && store.openProject(projectOf(dir))) publishProject(projectOf(dir));
 			const rows = store.sessionsByUpdated({ limit, before, ...listQuery(url, dir, q) });
 			const last = rows.at(-1);
@@ -2349,7 +2516,7 @@ export function serve(opts: ServeOptions) {
 			let direction: "next" | "previous" = "next";
 			if (q.cursor) {
 				const extra = Object.keys(q).filter((k) => k !== "cursor" && k !== "limit");
-				if (extra.length || directoryOf(req, url)) throw badRequest(`a cursor carries its own filters; send only cursor and limit (got ${extra.join(", ") || "a directory"})`);
+				if (extra.length || rawDirectoryOf(req, url)) throw badRequest(`a cursor carries its own filters; send only cursor and limit (got ${extra.join(", ") || "a directory"})`);
 				const c = decodeCursor(q.cursor);
 				if (!c) throw badRequest("that cursor is not one this daemon issued");
 				({ order, direction } = c);
@@ -2357,7 +2524,9 @@ export function serve(opts: ServeOptions) {
 				filters = { directory: c.directory, project: c.project, roots: c.roots, search: c.search, start: c.start };
 			} else {
 				order = q.order === "asc" ? "asc" : "desc";
-				filters = listQuery(url, directoryOf(req, url), q);
+				const dir = await directoryOf(req, url);
+				if (dir && q.scope === "project") await reachFor(dir);
+				filters = listQuery(url, dir, q);
 			}
 			const rows = store.sessionsByCreated({ limit, ...filters, order, after, direction });
 			const clean = Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined));
@@ -2373,8 +2542,11 @@ export function serve(opts: ServeOptions) {
 		}
 		if (p === "/session" && method === "POST") {
 			const b = await bodyOf<any>(req, "createSession");
-			const directory = b.directory ? real(resolve(b.directory)) : (directoryOf(req, url) ?? real(process.cwd()));
-			if (!existsSync(directory) || !statSync(directory).isDirectory()) throw badRequest(`directory ${directory} does not exist`);
+			// the directory may sit behind a privacy prompt or on a hung mount: its first touch is async, and this request waits for it alone
+			const given = b.directory ? resolve(b.directory) : rawDirectoryOf(req, url);
+			const directory = given ? await realAsync(given) : real(process.cwd());
+			await reachFor(directory);
+			if (!(await stat(directory).catch(() => undefined))?.isDirectory()) throw badRequest(`directory ${directory} does not exist`);
 			const id = `ses_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
 			if (b.model && blacklisted(configFor(directory), b.model)) throw badRequest(`${b.model} is on the blacklist in your profile (providers.<id>.blacklist); pick another model`);
 			if (b.effort) {
@@ -2442,7 +2614,22 @@ export function serve(opts: ServeOptions) {
 			const [id, kind] = [r[1]!, r[2]!];
 			const b = await bodyOf<any>(req, kind === "prompt" ? "prompt" : "promptAsync");
 			return once(b.clientID, kind, id, async () => {
-				const content = await blocks(b, row(id).directory);
+				const stored = row(id);
+				if (stored.source !== "cmx" && (!reach.ready(stored.directory) || deferred.has(id))) {
+					// the directory has not answered: the prompt is accepted now and runs once it does (the status says why it waits)
+					const messageID = queuedId(id);
+					const text = (b.parts as PartInput[] | undefined)?.filter((x) => x.type === "text" && typeof x.text === "string").map((x) => ({ type: "text" as const, text: x.text!, ...(x.synthetic ? { synthetic: true } : {}) })) ?? (typeof b.text === "string" ? [{ type: "text" as const, text: b.text }] : []);
+					const effort = effortOf(b);
+					const model = b.model ? `${b.model.providerID}/${b.model.modelID}` : undefined;
+					deferPrompt(id, stored.directory, { id: messageID, content: text, created: Date.now(), ...(b.clientID ? { clientID: b.clientID } : {}), ...(b.agent ? { agent: b.agent } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}) }, async () => {
+						const content = await blocks(b, stored.directory, id);
+						const t = await promptTurn(id, content, b, { ask: askOf(b), clientID: b.clientID, messageID });
+						store.setSessionEffort(id, t.s.standingEffort);
+					});
+					if (kind === "prompt_async") return json({ messageID, queued: true }, 202);
+					return json({ accepted: true, effort: effort ?? stored.effort ?? config.effort, messageID, queued: messageID }, 202);
+				}
+				const content = await blocks(b, stored.directory, id);
 				const t = await promptTurn(id, content, b, { ask: askOf(b), clientID: b.clientID });
 				store.setSessionEffort(id, t.s.standingEffort);
 				if (kind === "prompt_async") return json({ messageID: t.messageID, queued: !t.started }, 202);
@@ -2454,7 +2641,7 @@ export function serve(opts: ServeOptions) {
 			const id = r[1]!;
 			const b = await bodyOf<any>(req, "sendMessage");
 			return once(b.clientID, "message", id, async () => {
-				const content = await blocks(b, row(id).directory);
+				const content = await blocks(b, row(id).directory, id);
 				const t = await promptTurn(id, content, b, { clientID: b.clientID });
 				store.setSessionEffort(id, t.s.standingEffort);
 				if (!t.started) return json({ queued: true, messageID: t.messageID }, 202);
@@ -2465,7 +2652,7 @@ export function serve(opts: ServeOptions) {
 			const [id, kind] = [r[1]!, r[2]! as "steer" | "queue"];
 			const b = await bodyOf<any>(req, kind);
 			return once(b.clientID, kind, id, async () => {
-				const content = await blocks(b, row(id).directory);
+				const content = await blocks(b, row(id).directory, id);
 				const t = await promptTurn(id, content, b, { clientID: b.clientID, busy: kind });
 				const kept = t as { model?: string; effort?: string; agent?: string };
 				return json({ result: t.result, messageID: t.messageID, ...(kept.model ? { model: kept.model } : {}), ...(kept.effort ? { effort: kept.effort } : {}), ...(kept.agent ? { agent: kept.agent } : {}) }, 202);
@@ -2478,6 +2665,7 @@ export function serve(opts: ServeOptions) {
 			return once(b.clientID, "shell", id, async () => {
 				const stored = row(id);
 				if (stored.source === "cmx") throw new HttpError(409, "ConflictError", `session ${id} is history imported from cmx; it is browse only`);
+				await reachFor(stored.directory, id);
 				await commitRevert(id);
 				const startedAt = Date.now();
 				const out = await runCommand({ cwd: stored.directory, spillDir: join(data, "tool-output") }, b.command, SHELL_LINE_TIMEOUT_S);
@@ -2493,6 +2681,7 @@ export function serve(opts: ServeOptions) {
 			const b = await bodyOf<{ command: string; arguments?: string; agent?: string; model?: string; variant?: string; parts?: PartInput[]; clientID?: string }>(req, "runCommand");
 			return once(b.clientID, "command", id, async () => {
 				const stored = row(id);
+				await reachFor(stored.directory, id);
 				const name = b.command.replace(/^\//, "");
 				const args = b.arguments ?? "";
 				const cmd = catalog.commandsFor(stored.directory).find((c) => c.name === name);
@@ -2524,14 +2713,14 @@ export function serve(opts: ServeOptions) {
 			const id = r[1]!;
 			row(id);
 			const live = sessions.get(id);
-			return json((live?.queuedPrompts() ?? []).map((q) => provisional(id, q)));
+			return json([...(live?.queuedPrompts() ?? []), ...(deferred.get(id)?.waiting ?? [])].map((q) => provisional(id, q)));
 		}
 		if ((r = m(/^\/session\/([^/]+)\/message\/([^/]+)$/)) && method === "DELETE") {
 			// unsend: only a prompt still waiting behind the running turn can be taken back
 			const [id, msg] = [r[1]!, r[2]!];
 			const stored = row(id);
 			const live = sessions.get(id);
-			if (live?.unqueue(msg)) {
+			if (live?.unqueue(msg) || undefer(id, msg)) {
 				publish(stored.directory, "message.removed", { sessionID: id, messageID: msg });
 				return json(true);
 			}
@@ -2704,7 +2893,7 @@ export function serve(opts: ServeOptions) {
 			return json(pre);
 		}
 
-		if (p === "/permission" && method === "GET") return json(store.pendingPermissions({ directory: directoryOf(req, url) }).map(permissionJson));
+		if (p === "/permission" && method === "GET") return json(store.pendingPermissions({ directory: (await directoryOf(req, url)) }).map(permissionJson));
 		if ((r = m(/^\/permission\/([^/]+)\/reply$/)) && method === "POST") {
 			const rid = r[1]!;
 			const b = await bodyOf<{ reply: "once" | "always" | "reject"; message?: string; cascade?: boolean; by?: string; clientID?: string }>(req, "replyPermission");
@@ -2722,7 +2911,7 @@ export function serve(opts: ServeOptions) {
 				return json(true);
 			});
 		}
-		if (p === "/question" && method === "GET") return json(store.pendingQuestions({ directory: directoryOf(req, url) }).map(questionJson));
+		if (p === "/question" && method === "GET") return json(store.pendingQuestions({ directory: (await directoryOf(req, url)) }).map(questionJson));
 		if ((r = m(/^\/question\/([^/]+)\/reply$/)) && method === "POST") {
 			const rid = r[1]!;
 			const b = await bodyOf<{ answers: string[][]; by?: string; clientID?: string }>(req, "replyQuestion");

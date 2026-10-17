@@ -91,15 +91,20 @@ export async function resolveModel(config: Config, ref: string): Promise<Model<A
 	return { ...known, ...(o.baseUrl ? { baseUrl: o.baseUrl } : {}), ...(o.headers ? { headers: { ...known.headers, ...o.headers } } : {}) };
 }
 
-/** the key for a provider: config literal, `$ENV`, `!command`, then the provider's usual env var */
-export function resolveApiKey(config: Config, provider: string): string | undefined {
-	const v = config.providers[provider]?.apiKey;
+/** a key as the profile writes it: a literal, `$ENV` or `!command` whose stdout is the key */
+export function resolveSecret(v: string | undefined): string | undefined {
 	if (v?.startsWith("$")) return process.env[v.slice(1).replace(/^\{|\}$/g, "")];
 	if (v?.startsWith("!")) {
 		const r = spawnSync("sh", ["-c", v.slice(1)], { encoding: "utf8", timeout: 10_000 });
 		return r.status === 0 ? r.stdout.trim() || undefined : undefined;
 	}
-	if (v) return v;
+	return v || undefined;
+}
+
+/** the key for a provider: config literal, `$ENV`, `!command`, then the provider's usual env var */
+export function resolveApiKey(config: Config, provider: string): string | undefined {
+	const v = config.providers[provider]?.apiKey;
+	if (v) return resolveSecret(v);
 	const env = ENV_KEYS[provider];
 	return env ? process.env[env] : undefined;
 }

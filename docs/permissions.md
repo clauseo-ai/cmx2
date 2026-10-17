@@ -61,6 +61,7 @@ put it in `~/.config/cmx2/cmx2.jsonc` for every project or in a project's `.cmx2
 | shell, and background jobs | `shell` | the command line |
 | terminals the model drives (`pty.*` in `run`) | `shell` | the command it starts, and each line typed into it |
 | webfetch | `webfetch` | the url |
+| webcrawl | `webcrawl` | the start url |
 | websearch | `websearch` | the query |
 | skill | `skill` | the skill's name |
 | lsp | `lsp` | the file |

@@ -193,6 +193,59 @@ export function createClient(opts: ClientOptions) {
 				/** published events that failed their manifest schema (counted when the daemon runs with event checks on) */
 				contract_violations: number;
 			}>("GET", "/global/memory", query, undefined, o),
+		/** the machine the daemon runs on: os, model, cpu and live load, memory, the data volume's disk space and uptimes. static fields are read once; live ones on each request without spawning a process */
+		system: (o?: CallOptions) =>
+			call<{
+				os: {
+					/** process.platform: darwin, linux, win32, ... */
+					platform: string;
+					/** macOS, Ubuntu, Debian, ... */
+					name: string;
+					/** the os version (26.1, 24.04); empty when unknown */
+					version: string;
+					kernel: string;
+					/** arm64, x64, ... */
+					arch: string;
+				};
+				machine: {
+					/** a mac's family (Mac mini, MacBook Pro), else the dmi product name (Google Compute Engine) */
+					model: string | null;
+					/** a mac's model identifier (Mac16,11); null elsewhere */
+					identifier: string | null;
+					/** a vm or cloud instance */
+					virtual: boolean;
+				};
+				cpu: {
+					model: string;
+					/** logical cores */
+					cores: number;
+					/** load average over 1, 5 and 15 minutes */
+					load: Array<number>;
+				};
+				memory: {
+					/** bytes */
+					total: number;
+					/** bytes usable without swapping: MemAvailable on linux; on macos physical memory less app, wired and compressed memory, as activity monitor counts it */
+					available: number;
+				};
+				disk: {
+					/** mount point of the volume holding the daemon's data */
+					path: string;
+					total: number;
+					/** bytes free to an unprivileged user */
+					available: number;
+				} | null;
+				/** host uptime in seconds */
+				uptime: number;
+				daemon: {
+					/** bytes */
+					rss: number;
+					/** seconds */
+					uptime: number;
+				};
+				/** epoch ms the live fields were read */
+				at: number;
+			}>("GET", "/global/system", undefined, undefined, o),
 		/** projects that have sessions or checkouts, newest activity first; worktrees=true adds each project's checkouts */
 		projects: (query: {
 			worktrees?: "true" | "false";
@@ -398,6 +451,8 @@ export function createClient(opts: ClientOptions) {
 				queued?: number;
 				/** when the turn began (ms) */
 				since?: number;
+				/** why the turn has not started yet, short and lowercase, shown as is: the session's directory has not answered (a macos privacy prompt, a hung mount) */
+				waiting?: string;
 			} | {
 				type: "retry";
 				attempt: number;

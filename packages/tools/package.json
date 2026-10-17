@@ -12,7 +12,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./record": "./src/record.ts"
+    "./record": "./src/record.ts",
+    "./web": "./src/web.ts"
   },
   "dependencies": {
     "@earendil-works/pi-codemode": "0.99.1",

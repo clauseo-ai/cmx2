@@ -59,6 +59,18 @@ export function extractDeliverable(turn: any[]): string {
 	return texts.find((t) => !looksLikeMissingDeliverable(t)) ?? texts[0] ?? "";
 }
 
+/**
+ * a failed turn's text, said for what it is. the turn ended on an error, so the newest text is either what
+ * the failing message had streamed before it broke, or a note from earlier in the turn; neither is a report,
+ * and a spawner reading it as one takes a progress line for the outcome
+ */
+export function failedTurnBody(turn: any[], body: string): string {
+	if (!body) return body;
+	const last = [...turn].reverse().find((m) => m?.role === "assistant");
+	const label = last && textOf(last) === body ? "it failed while writing this; the text stops where the turn did:" : "it had not written a report. its last text, from earlier in the turn:";
+	return `${label}\n\n${body}`;
+}
+
 /** the cap: head of the body and where the rest is */
 export function capBody(body: string, sessionID: string, max = REPORT_MAX_CHARS): string {
 	if (body.length <= max) return body;

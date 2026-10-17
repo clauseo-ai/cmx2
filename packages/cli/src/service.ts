@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { dataDir, loadConfig } from "@cmx2/engine/config";
 import { compareVersions, compiled, installedBinary } from "./release.ts";
+import { type SignResult, signatureOf, signBinary, signLine } from "./signing.ts";
 import { fail } from "./util.ts";
 
 /**
@@ -221,13 +222,19 @@ export function restartService(): { ok: boolean; out: string } {
 	return run(restartCommand().split(" "));
 }
 
-/** copies over atomically: a running daemon keeps its open file, the next start gets the new one */
-export function placeBinary(from: string, to: string) {
+/**
+ * copies over atomically: a running daemon keeps its open file, the next start gets the new one. on macos
+ * the copy is signed with a keychain identity before it lands (signing.ts says why); the bytes a running
+ * daemon has mapped are never rewritten in place
+ */
+export function placeBinary(from: string, to: string): SignResult {
 	mkdirSync(dirname(to), { recursive: true });
 	const tmp = `${to}.new-${process.pid}`;
 	copyFileSync(from, tmp);
 	chmodSync(tmp, 0o755);
+	const signed = signBinary(tmp);
 	renameSync(tmp, to);
+	return signed;
 }
 
 /** where the `cmx2` on your PATH lives: $CMX2_INSTALL_DIR (made absolute), else ~/.local/bin, the same place scripts/install.sh uses */
@@ -396,7 +403,8 @@ export async function install(opts: { port?: string; hostname?: string }) {
 	const binary = installedBinary();
 	const logDir = join(data, "log");
 	mkdirSync(logDir, { recursive: true });
-	if (!same(process.execPath, binary)) placeBinary(process.execPath, binary);
+	// a copy install.sh placed, or one an older version left ad hoc, is signed by placing it over itself
+	const signed = !same(process.execPath, binary) ? placeBinary(process.execPath, binary) : signatureOf(binary)?.adhoc ? placeBinary(binary, binary) : undefined;
 	const linked = keepLink(binary, { install: true });
 
 	// keys from this shell go to the 0600 env file, merged over what an earlier install left
@@ -452,6 +460,8 @@ export async function install(opts: { port?: string; hostname?: string }) {
 	}
 	console.log(`installed ${unit}`);
 	console.log(`binary     ${binary}`);
+	const signNote = signed && signLine(signed);
+	if (signNote) console.log(signNote);
 	for (const line of linkNotes(linked, binary)) console.log(line);
 	console.log(`logs       ${join(logDir, "serve.log")}`);
 	if (Object.keys(fromShell).length) console.log(`keys       ${Object.keys(fromShell).join(", ")} from this shell, kept in ${envFile} (mode 600)`);

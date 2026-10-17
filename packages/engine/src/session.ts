@@ -33,6 +33,7 @@ import {
 	type Tool,
 	type ToolResult,
 	toolSearchTool,
+	type WebOptions,
 } from "@cmx2/tools";
 import { type GateOptions, gateCall, nestedCall } from "./calls.ts";
 import { Value } from "typebox/value";
@@ -52,11 +53,12 @@ import {
 	refusalFromEvent,
 	rejectsForcedToolUse,
 } from "./gates.ts";
-import { resolveApiKey, resolveModel, streamFn } from "./models.ts";
+import { resolveApiKey, resolveModel, resolveSecret, streamFn } from "./models.ts";
 import { PERMISSION_REJECTED, type PermissionCheck, type PermissionReply, type PermissionRule, rulesFromConfig, SUBAGENT_RULES, subagentEnv } from "./permission.ts";
 import { configDir } from "./config.ts";
 import { type PollCall, pollOnly } from "./poll.ts";
 import { Transcript } from "./transcript.ts";
+import { collapseToolChurn } from "./tool-churn.ts";
 import { classifyProviderError, type MediaRefusal, mediaRefusal, type TypedProviderError } from "./errors.ts";
 import {
 	checkedImages,
@@ -81,6 +83,7 @@ import { prefixGate } from "./prefix-gate.ts";
 import {
 	type CompactionRecord,
 	clearedResult,
+	coldFloorOf,
 	compactionText,
 	contextUsed,
 	contextWithSeq,
@@ -119,6 +122,21 @@ export function shellWrites(command: string): string[] {
 	for (const m of command.matchAll(/\bsed\s+(?:-[a-zA-Z]*\s+)*-i(?:\s*''|\s*"")?\s+(?:'[^']*'|"[^"]*"|\S+)\s+([^\s;&|<>()]+)/g)) out.add(m[1]!.replace(/^["']|["']$/g, ""));
 	out.delete("/dev/null");
 	return [...out];
+}
+
+/** the profile's web provider for the web tools; a `!command` key runs once, at the first call that needs it, and is kept */
+function webOptions(config: Config): WebOptions {
+	const w = config.web;
+	if (!w || w.provider === "auto") return {};
+	let key: { v: string | undefined } | undefined;
+	return {
+		provider: w.provider,
+		key: () => (key ??= { v: resolveSecret(w.apiKey) }).v,
+		...(w.url ? { url: w.url } : {}),
+		...(w.search ? { search: w.search } : {}),
+		fetch: w.fetch,
+		crawl: w.crawl,
+	};
 }
 
 /** a check's own words for failing: test runners' counts, a FAIL banner, compiler errors */
@@ -261,7 +279,8 @@ export type TurnEvent =
  * given (the api reads documents), else its fallback text
  */
 export function toLlm(messages: AgentMessage[], documents?: Map<string, DocumentData>): AgentMessage[] {
-	return messages.map((stored: any) => {
+	// a transcript near the provider's cap on tool additions goes out without the withdraw-and-restore churn
+	return collapseToolChurn(messages).map((stored: any) => {
 		// an image whose bytes are not an image never goes out: one would fail every request from here on
 		const m = checkedImages(stored) as any;
 		if (m.role === "shell") {
@@ -400,6 +419,11 @@ function sha(s: string): string {
 	return createHash("sha256").update(s).digest("hex").slice(0, 16);
 }
 
+/** the same tools by name, in the same order (a count alone misses one tool gone and another come) */
+function sameToolNames(a: ReadonlyArray<{ name: string }>, b: ReadonlyArray<{ name: string }>): boolean {
+	return a.length === b.length && a.every((t, i) => t.name === b[i]!.name);
+}
+
 function firstDiff(a: string, b: string): number | null {
 	if (a === b) return null;
 	const n = Math.min(a.length, b.length);
@@ -520,6 +544,12 @@ export class EngineSession {
 	private warmTimer: ReturnType<typeof setTimeout> | undefined;
 	private warmUntil = 0;
 	private warmed = false;
+	/** a warm refresh is on the wire */
+	private warmBusy = false;
+	/** the idle summary waits for the cache's last minutes (compaction.cold) */
+	private idleTimer: ReturnType<typeof setTimeout> | undefined;
+	/** the idle summary is on the wire */
+	private idleBusy = false;
 	/** a test hook: the next turn fails before any request, as a provider failure would */
 	private fault: string | undefined;
 	/** a transient provider failure is being waited out; the status clients see while it lasts */
@@ -540,6 +570,16 @@ export class EngineSession {
 	private prefire: Prefire | undefined;
 	/** a prefire that failed does not fire again before the next compaction */
 	private prefireBlocked = false;
+	/**
+	 * a newer summary being made while the ready prefire's tail grows; it replaces the prefire when it lands,
+	 * unless a compaction or a revert dropped the prefire meanwhile (they clear this too)
+	 */
+	private refresh: Prefire | undefined;
+	/** a refresh that failed does not run again before the next compaction; the old summary stays usable */
+	private refreshBlocked = false;
+	/** when and on which model this session last sent a request that read or wrote its prompt cache; 0 is never */
+	private lastCacheUseAt = 0;
+	private lastCacheModel: string | undefined;
 	/** a transient failure waits this long before the next automatic attempt */
 	private compactRetryAt = 0;
 	private compacting: Promise<AgentMessage[] | undefined> | undefined;
@@ -588,7 +628,7 @@ export class EngineSession {
 		const lsp = this.opts.lsp ?? new LspPool();
 		const env = { cwd, spillDir: join(dataDir, "tool-output"), ...(this.opts.procs ? { procs: this.opts.procs } : {}), afterWrite: (abs: string, before?: Before) => this.afterWrite(abs, lsp, before), ...(this.opts.child ? { env: subagentEnv() } : {}) };
 		const skills = this.opts.skills ?? new Skills(() => defaultSkillDirs(cwd, configDir()));
-		for (const t of deferredTools(env, { skills, lsp })) this.deferred.set(t.name, t);
+		for (const t of deferredTools(env, { skills, lsp, web: webOptions(config) })) this.deferred.set(t.name, t);
 		for (const t of runOnlyTools(env)) this.runOnly.set(t.name, t);
 		const search = toolSearchTool(
 			() => [...this.deferredAll().values()].filter((t) => !this.loaded.has(t.name)).map((t) => ({ name: t.name, description: t.description })),
@@ -622,6 +662,7 @@ export class EngineSession {
 			}
 			this.stepSeq = t.messages.filter((m: any) => m.role === "assistant").length;
 			this.lastAssistantSeq = t.messages.findLastIndex((m: any) => m.role === "assistant") + 1;
+			this.pickUp(messages);
 		} else {
 			this.profile = profileFor(this.model.api, this.model.id);
 		}
@@ -635,7 +676,7 @@ export class EngineSession {
 			},
 			streamFn: (model, context, options) => {
 				this.lastCall = { model, context: { ...context, messages: [...context.messages] }, options };
-				// transient failures (429, 529, overloaded, 5xx) before any content are retried with backoff; clients see a retry status
+				// transient failures (429, 529, overloaded, 5xx, a dropped connection) before text or a tool call are retried with backoff; clients see a retry status
 				// one value for the whole request: a retry after a switch mid-wait must not mark half of it differently
 				const retention = (this.requestRetention = this.cacheRetention());
 				return withRetry(() => streamFn(model, context, { ...options, cacheRetention: retention }), {
@@ -651,6 +692,12 @@ export class EngineSession {
 						onResume: () => {
 							this.retry = undefined;
 							if (this.state === "busy") this.emit("session.status", { status: { type: "busy", queued: this.waiting.length } });
+						},
+						// the failed attempt's thinking is thrown away: its parts and first token no longer describe the message. the retry's
+						// request clears them too (onPayload); clearing here keeps an abort during the wait from timing parts it does not have
+						onDiscard: () => {
+							this.streamParts.clear();
+							this.firstTokenAt = null;
 						},
 					},
 				});
@@ -670,10 +717,12 @@ export class EngineSession {
 				const next = await this.beforeRequest(context.messages, signal);
 				return next ? { context: { ...context, messages: next } } : undefined;
 			},
-			// a tool loaded mid-run (tool_search) is declared before the next request of the same run
+			// a tool loaded mid-run (tool_search) is declared before the next request of the same run, and one whose
+			// mcp server went away is withdrawn. the agent's own list is updated too: the next prompt declares from it,
+			// and a stale one would re-add what this just removed (53 tool_additions every turn, until the api refuses)
 			prepareNextTurnWithContext: (turn) => {
-				const tools = this.agentTools();
-				if ((turn.context.tools ?? []).length === tools.length) return undefined;
+				const tools = this.syncTools();
+				if (sameToolNames(turn.context.tools ?? [], tools)) return undefined;
 				return { context: { ...turn.context, tools } };
 			},
 			// sequential tools are gated here; the rest in their execution (agentTools), so a response's asks are all open at once
@@ -763,6 +812,14 @@ export class EngineSession {
 		) as unknown as AgentTool[];
 	}
 
+	/** the agent's tool list brought up to date when its names changed; the current list either way */
+	private syncTools(): AgentTool[] {
+		const tools = this.agentTools();
+		if (sameToolNames(this.agent.state.tools ?? [], tools)) return this.agent.state.tools as AgentTool[];
+		this.agent.state.tools = tools;
+		return tools;
+	}
+
 	/** tools this session never has (a read-only agent's), declared, deferred or dynamic */
 	private get exclude(): Set<string> {
 		return new Set(this.opts.excludeTools ?? []);
@@ -774,7 +831,9 @@ export class EngineSession {
 		const exclude = this.exclude;
 		if (!dynamic.length && !exclude.size) return this.deferred;
 		const all = new Map(this.deferred);
-		for (const t of dynamic) if (!all.has(t.name)) all.set(t.name, t);
+		// a read-only agent (explore, review: no edit) gets an mcp tool only when its server marks it readOnlyHint
+		const readOnly = exclude.has("edit");
+		for (const t of dynamic) if (!all.has(t.name) && !(readOnly && t.readOnly === false)) all.set(t.name, t);
 		for (const name of exclude) all.delete(name);
 		return all;
 	}
@@ -875,6 +934,7 @@ export class EngineSession {
 	}
 
 	private async onPayload(payload: Record<string, any>, model: Model<Api>): Promise<Record<string, any> | undefined> {
+		this.cacheUsed(model);
 		this.finalizeStep();
 		this.releasePrefix(false);
 		this.reqSeq++;
@@ -1094,7 +1154,10 @@ export class EngineSession {
 				// recoveries count until a prompt from the user or a turn that finished: a recovery turn whose model
 				// fetches the same unreadable image again cannot go round for ever
 				if (outcome === "completed") this.sizeRecoveries = 0;
-				if (outcome !== "aborted" && !media && last?.errorType?.kind !== "context_overflow") this.scheduleWarm();
+				if (outcome !== "aborted" && !media && last?.errorType?.kind !== "context_overflow") {
+					this.scheduleWarm();
+					this.scheduleIdleSummary();
+				}
 				// a turn the provider refused for its media (size, image count, an image it cannot read) learns the
 				// limit it showed now, before anything else can send, and drops images; one refused for length compacts
 				// and goes on; one that ended near the threshold summarises ahead
@@ -1456,6 +1519,7 @@ export class EngineSession {
 	private startTurn(batch: AgentMessage[], opts: { effort?: Effort; effortAt?: number; ask?: RequestAsk; context?: boolean; prompt?: AgentMessage } = {}): Promise<void> {
 		this.opts.beforeTurn?.();
 		this.cancelWarm();
+		this.cancelIdleSummary();
 		if (opts.effort) {
 			// an explicit effort, applied now: a steer waiting from before it does not move the dial when it lands
 			const before = this.baseEffort;
@@ -1486,6 +1550,8 @@ export class EngineSession {
 		this.setState("busy");
 		this.opts.onTurn?.({ type: "start", from: this.turnFrom });
 		if (this.fault) return this.failTurn(full, this.fault);
+		// the tools as of now (an mcp server may have come or gone since the last turn), declared once at the turn's start
+		this.syncTools();
 		return this.agent.prompt(full).catch((err: unknown) => {
 			const message = err instanceof Error ? err.message : String(err);
 			this.emit("session.error", { error: { name: "EngineError", data: { message } } });
@@ -1651,9 +1717,12 @@ export class EngineSession {
 		this.warmTimer = undefined;
 	}
 
-	/** a refresh is scheduled; the residency cache keeps a warming session loaded */
+	/**
+	 * a refresh is scheduled, or an idle summary is scheduled or on the wire; the residency cache keeps a warming
+	 * session loaded, so neither is lost to an eviction
+	 */
 	get warming(): boolean {
-		return this.warmTimer !== undefined;
+		return this.warmTimer !== undefined || this.idleTimer !== undefined || this.idleBusy;
 	}
 
 	private async warmOnce(delay: number) {
@@ -1661,6 +1730,7 @@ export class EngineSession {
 		const call = this.lastCall;
 		if (this.state !== "idle" || !call || Date.now() > this.warmUntil) return;
 		const t0 = performance.now();
+		this.warmBusy = true;
 		try {
 			// the same request byte for byte (a smaller max_tokens changes thinking parameters, which the message
 			// cache is keyed on); the prompt is processed, and the cache refreshed, before the first event, so
@@ -1686,13 +1756,82 @@ export class EngineSession {
 				}
 			}
 			if (!u) throw new Error("the refresh ended before the provider reported usage");
+			this.cacheUsed(call.model);
 			this.warmed = true;
 			this.emit("session.warmed", { cache_read: u.cacheRead ?? 0, cache_write: u.cacheWrite ?? 0, input: u.input ?? 0, output: u.output ?? 0, cost: u.cost?.total ?? 0, ms: Math.round(performance.now() - t0) });
 		} catch (e) {
 			this.emit("session.warning", { message: `cache warming stopped: ${e instanceof Error ? e.message : String(e)}` });
 			return;
+		} finally {
+			this.warmBusy = false;
 		}
 		if (this.state === "idle" && Date.now() + delay <= this.warmUntil) this.warmTimer = setTimeout(() => void this.warmOnce(delay), delay);
+	}
+
+	/** the cache's ttl in force, in ms */
+	private ttlMs(): number {
+		return this.cacheRetention() === "long" ? 3_600_000 : 300_000;
+	}
+
+	/** how long after the last cache use an idle summary goes: 90% of the ttl, as a warm refresh. CMX2_IDLE_SUMMARY_MS shortens it for tests */
+	private idleSummaryDelay(): number {
+		const ttl = this.ttlMs();
+		return Number(process.env.CMX2_IDLE_SUMMARY_MS) || Math.max(1, Math.min(ttl * 0.9, ttl - 10_000));
+	}
+
+	/** the context is at or past the cold floor and auto compaction may run */
+	private pastColdFloor(messages: AgentMessage[] = this.agent.state.messages): boolean {
+		const s = this.opts.config.compaction;
+		const floor = coldFloorOf(s, this.model.contextWindow);
+		return s.auto && floor !== undefined && !this.suppressedNow() && contextUsed(messages) >= floor;
+	}
+
+	/**
+	 * a turn settled at or past the cold floor: shortly before the cache expires, the summary is made from it
+	 * (a cache read), so a return after the expiry compacts without paying for the whole context again. a
+	 * session that never comes back pays for that summary only
+	 */
+	private scheduleIdleSummary() {
+		this.cancelIdleSummary();
+		if (this.disposed || !this.pastColdFloor()) return;
+		// the ttl runs from the last request's start, not from the turn's end
+		const since = this.lastCacheUseAt ? Date.now() - this.lastCacheUseAt : 0;
+		this.idleTimer = setTimeout(() => this.idleSummary(), Math.max(1, this.idleSummaryDelay() - since));
+	}
+
+	private cancelIdleSummary() {
+		if (this.idleTimer) clearTimeout(this.idleTimer);
+		this.idleTimer = undefined;
+	}
+
+	private idleSummary() {
+		this.idleTimer = undefined;
+		if (this.disposed || this.state !== "idle" || !this.lastCacheUseAt) return;
+		const delay = this.idleSummaryDelay();
+		// a warm refresh still to come, or on the wire, moves the expiry: the summary waits for the last one
+		if (this.warmTimer || this.warmBusy) {
+			this.idleTimer = setTimeout(() => this.idleSummary(), delay);
+			return;
+		}
+		const wait = this.lastCacheUseAt + delay - Date.now();
+		if (wait > 1000) {
+			this.idleTimer = setTimeout(() => this.idleSummary(), wait);
+			return;
+		}
+		// the entry expired already (the machine slept through the timer): a summary now would pay for the whole
+		// context, so it waits for the session to come back, and is made then only if it does
+		if (Date.now() - this.lastCacheUseAt >= this.ttlMs() || this.lastCacheModel !== this.modelRef) return;
+		const messages = this.agent.state.messages;
+		if (!this.pastColdFloor(messages)) return;
+		// a ready summary whose tail is still short is left as it is; startPrefire makes the first or the refresh
+		const before = { prefire: this.prefire, refresh: this.refresh };
+		this.startPrefire(messages, contextUsed(messages));
+		const started = this.prefire !== before.prefire ? this.prefire : this.refresh !== before.refresh ? this.refresh : undefined;
+		if (!started) return;
+		this.idleBusy = true;
+		void started.promise.finally(() => {
+			this.idleBusy = false;
+		});
 	}
 
 
@@ -1703,6 +1842,22 @@ export class EngineSession {
 		return { used: contextUsed(this.agent.state.messages), limit: this.model.contextWindow, compactAt: thresholdOf(this.opts.config.compaction, this.model.contextWindow) };
 	}
 
+	private cacheUsed(model: Model<Api>) {
+		this.lastCacheUseAt = Date.now();
+		this.lastCacheModel = `${model.provider}/${model.id}`;
+	}
+
+	/**
+	 * the next request would rewrite the whole prompt cache: the entry outlived its ttl (with a grace for the
+	 * provider's clock), or the model changed. a session that never used its cache is not cold; it has no prefire
+	 */
+	private cacheCold(): boolean {
+		if (!this.lastCacheUseAt) return false;
+		if (this.lastCacheModel !== this.modelRef) return true;
+		const ttl = this.cacheRetention() === "long" ? 3_600_000 : 300_000;
+		return Date.now() - this.lastCacheUseAt > ttl + 30_000;
+	}
+
 	private suppressedNow(): boolean {
 		if (this.suppressed && this.suppressed.model !== this.modelRef) this.suppressed = undefined;
 		return this.suppressed !== undefined;
@@ -1711,7 +1866,10 @@ export class EngineSession {
 	/**
 	 * before every request: images past the budget or the provider's limit leave the context, then a context
 	 * past the threshold compacts, or the summary starts in the background as it nears. images go first so a
-	 * summary request never carries more than the provider takes
+	 * summary request never carries more than the provider takes. under the threshold, a cold cache with a
+	 * summary ready compacts too: the request rewrites the cache anyway, and the summary makes that rewrite small.
+	 * at or past the cold floor (compaction.cold), a cold cache compacts whether a summary is ready or not; one
+	 * asked for then skips the cache write, since the prefix it would write is about to be replaced
 	 */
 	private async beforeRequest(messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[] | undefined> {
 		const dropped = this.dropImages(messages, this.turnRequests === 0 ? "turn" : "budget");
@@ -1722,9 +1880,17 @@ export class EngineSession {
 			// the last reply's usage still counts the dropped images; take them off at the flat estimate
 			const used = Math.max(0, contextUsed(out) - (dropped?.tokens ?? 0));
 			const limit = thresholdOf(s, this.model.contextWindow);
-			if (used >= limit && !this.suppressedNow() && Date.now() >= this.compactRetryAt) {
+			const may = !this.suppressedNow() && Date.now() >= this.compactRetryAt;
+			const floor = coldFloorOf(s, this.model.contextWindow);
+			const expired = may && this.cacheCold();
+			// past the floor the summary is worth asking for now: it reads the context once without caching it,
+			// where the request would write all of it
+			const pastFloor = expired && floor !== undefined && used >= floor && used < limit;
+			// under it only with the ready summary: one asked for now would itself rewrite the cold cache
+			const aheadOnly = !pastFloor && used < limit && expired && this.prefire?.result !== undefined;
+			if ((used >= limit && may) || pastFloor || aheadOnly) {
 				// a compaction drops what is over the keep line itself, while it rewrites the prompt anyway
-				const next = await this.compactNow(out, "auto", used, signal);
+				const next = await this.compactNow(out, "auto", used, signal, { aheadOnly, cold: pastFloor || aheadOnly, noCache: expired && floor !== undefined });
 				if (next) {
 					out = next;
 					changed = true;
@@ -1822,33 +1988,70 @@ export class EngineSession {
 		if (used >= thresholdOf(s, this.model.contextWindow) * s.prefire) this.startPrefire(messages, used);
 	}
 
+	/**
+	 * the background summary: a first one near the threshold, then, once it is ready and the messages after it
+	 * pass max(keep, 20k tokens), a refresh over the current messages. one summary request runs at a time, and
+	 * the ready one stays usable until a refresh replaces it, so a compaction never waits on a refresh
+	 */
 	private startPrefire(messages: AgentMessage[], used: number) {
-		if (this.disposed || this.prefire || this.prefireBlocked || this.compacting || this.suppressedNow()) return;
+		if (this.disposed || this.compacting || this.suppressedNow()) return;
+		const old = this.prefire;
+		if (!old) {
+			if (!this.prefireBlocked) this.prefire = this.summaryAhead(messages, used, false);
+			return;
+		}
+		if (!old.result || this.refresh || this.refreshBlocked) return;
+		const s = this.opts.config.compaction;
+		const refreshAt = Math.max(s.keep * thresholdOf(s, this.model.contextWindow), 20_000);
+		const tail = messages.slice(old.at).reduce((n, m) => n + estimateTokens(m), 0);
+		if (tail > refreshAt) this.refresh = this.summaryAhead(messages, used, true);
+	}
+
+	private summaryAhead(messages: AgentMessage[], used: number, refresh: boolean): Prefire {
 		const snapshot = messages.slice();
 		const p: Prefire = { at: snapshot.length, last: snapshot[snapshot.length - 1]!, startedAt: Date.now(), promise: Promise.resolve(undefined) };
-		this.emit("compaction.prefire", { state: "started", tokens: used });
+		const mark = refresh ? { refresh: true } : {};
+		this.emit("compaction.prefire", { state: "started", tokens: used, ...mark });
 		p.promise = this.summarize(snapshot).then(
 			(r) => {
 				p.result = r;
-				this.emit("compaction.prefire", { state: "ready", tokens: used, ms: r.ms, chars: r.text.length, ...usageOf(r) });
+				if (!refresh) this.emit("compaction.prefire", { state: "ready", tokens: used, ms: r.ms, chars: r.text.length, ...usageOf(r) });
+				else if (this.refresh === p) {
+					// still current: nothing consumed or dropped the summary it refreshes since it started
+					this.refresh = undefined;
+					this.prefire = p;
+					this.emit("compaction.prefire", { state: "ready", tokens: used, ms: r.ms, chars: r.text.length, refresh: true, ...usageOf(r) });
+				} else this.emit("compaction.prefire", { state: "stale", tokens: used, ms: r.ms, chars: r.text.length, refresh: true, ...usageOf(r) });
 				return r;
 			},
 			(e: unknown) => {
+				const message = e instanceof Error ? e.message : String(e);
+				if (refresh) {
+					// the old summary stays; only refreshing stops until the next compaction
+					if (this.refresh === p) {
+						this.refresh = undefined;
+						this.refreshBlocked = true;
+					}
+					this.emit("compaction.prefire", { state: "failed", tokens: used, message, refresh: true });
+					return undefined;
+				}
 				if (this.prefire === p) this.prefire = undefined;
 				this.prefireBlocked = true;
-				this.emit("compaction.prefire", { state: "failed", tokens: used, message: e instanceof Error ? e.message : String(e) });
+				this.emit("compaction.prefire", { state: "failed", tokens: used, message });
 				return undefined;
 			},
 		);
-		this.prefire = p;
+		return p;
 	}
 
 	/**
 	 * the summary request: the session's own request (system prompt, tools, history, all as the next step
 	 * would send them) with the instruction as the last user message, so the provider reads the prefix from
 	 * cache. models that take effort per message answer it at low effort without touching the cached prefix.
+	 * with `noCache` (the cache is cold and the context is about to be compacted) it carries no cache marks:
+	 * nothing is read, nothing written, and it does not count as cache use.
 	 */
-	private async summaryRequest(messages: AgentMessage[], clearAll: boolean): Promise<Summary> {
+	private async summaryRequest(messages: AgentMessage[], clearAll: boolean, noCache = false): Promise<Summary> {
 		const model = this.model;
 		const source = clearAll ? messages.map((m) => ((m as { role?: string }).role === "toolResult" && estimateTokens(m) > 500 ? clearedResult(m) : m)) : messages;
 		const llm = toLlm(source, DOCUMENT_APIS.has(model.api) ? this.documents : undefined).filter((m: any) => m.role === "system" || m.role === "user" || m.role === "assistant" || m.role === "toolResult");
@@ -1857,6 +2060,12 @@ export class EngineSession {
 		const perMessageEffort = (model.compat as { supportsMidConvoEffort?: boolean } | undefined)?.supportsMidConvoEffort === true;
 		const onPayload = (payload: unknown) => {
 			const notes: GateNotes = { applied: [] };
+			if (noCache) {
+				this.putDocuments(model.api, payload as Record<string, any>, notes);
+				stripCacheMarks(payload as Record<string, any>);
+				return payload;
+			}
+			this.cacheUsed(model);
 			this.putDocuments(model.api, payload as Record<string, any>, notes);
 			moveTrailingSystemBreakpoint(model.api, payload as Record<string, any>, notes);
 			rollingBreakpoint(model.api, payload as Record<string, any>, notes);
@@ -1871,7 +2080,7 @@ export class EngineSession {
 					sessionId: this.id,
 					apiKey: (base.apiKey as string | undefined) ?? resolveApiKey(this.opts.config, model.provider),
 					reasoning: perMessageEffort ? "low" : ((base.reasoning as never) ?? (this.effort as never)),
-					cacheRetention: this.cacheRetention(),
+					cacheRetention: noCache ? "none" : this.cacheRetention(),
 					onPayload,
 				} as never),
 			{ ...(this.opts.retry ? { policy: this.opts.retry } : {}) },
@@ -1888,13 +2097,13 @@ export class EngineSession {
 	}
 
 	/** a summary that passes the sanity checks, in at most two tries; a context too long even for that is tried once more with tool output cleared */
-	private async summarize(messages: AgentMessage[], clearAll = false): Promise<Summary> {
+	private async summarize(messages: AgentMessage[], clearAll = false, noCache = false): Promise<Summary> {
 		const head = messages.filter((m: any) => m.role !== "system").length;
 		let why: string | undefined;
 		for (let attempt = 0; attempt < 2; attempt++) {
 			let r: Summary;
 			try {
-				r = await this.summaryRequest(messages, clearAll);
+				r = await this.summaryRequest(messages, clearAll, noCache);
 			} catch (e) {
 				if (e instanceof SummaryError && e.reason === "too_large" && !clearAll) {
 					clearAll = true;
@@ -1911,18 +2120,20 @@ export class EngineSession {
 	/**
 	 * replaces the context with the summary, the post-compaction state block and the recent messages. a
 	 * summary made ahead (prefire) is used when it still describes the context's head, so the turn does not
-	 * wait on the model; otherwise the summary is asked for now. the transcript gets one more line.
+	 * wait on the model; otherwise the summary is asked for now. the transcript gets one more line. with
+	 * `aheadOnly` (a cold cache under the floor) only the ready summary is used: when it no longer fits, nothing
+	 * compacts. `cold` marks the record; `noCache` asks for a summary made now without writing the cache.
 	 */
-	private compactNow(messages: AgentMessage[], trigger: CompactionRecord["trigger"], used: number, signal?: AbortSignal): Promise<AgentMessage[] | undefined> {
+	private compactNow(messages: AgentMessage[], trigger: CompactionRecord["trigger"], used: number, signal?: AbortSignal, opts: CompactOpts = {}): Promise<AgentMessage[] | undefined> {
 		if (this.compacting) return this.compacting;
-		const run = this.runCompaction(messages, trigger, used, signal).finally(() => {
+		const run = this.runCompaction(messages, trigger, used, signal, opts).finally(() => {
 			this.compacting = undefined;
 		});
 		this.compacting = run;
 		return run;
 	}
 
-	private async runCompaction(messages: AgentMessage[], trigger: CompactionRecord["trigger"], used: number, _signal?: AbortSignal): Promise<AgentMessage[] | undefined> {
+	private async runCompaction(messages: AgentMessage[], trigger: CompactionRecord["trigger"], used: number, _signal?: AbortSignal, opts: CompactOpts = {}): Promise<AgentMessage[] | undefined> {
 		const t0 = performance.now();
 		const s = this.opts.config.compaction;
 		const limit = thresholdOf(s, this.model.contextWindow);
@@ -1938,6 +2149,9 @@ export class EngineSession {
 		let waitedMs = 0;
 		const p = this.prefire;
 		this.prefire = undefined;
+		// a refresh in flight describes this context; once it is compacted (or the attempt drops p) it describes nothing
+		this.refresh = undefined;
+		const cold = opts.cold === true || opts.aheadOnly === true;
 		if (p && trigger !== "overflow" && p.at >= floor && p.at <= messages.length && this.sameMessage(messages[p.at - 1], p.last)) {
 			if (!p.result) {
 				const w0 = performance.now();
@@ -1951,10 +2165,11 @@ export class EngineSession {
 				tailIdx = tailStart(messages.slice(0, messages.length), p.at, Number.POSITIVE_INFINITY);
 			} else if (p.result) this.emit("compaction.prefire", { state: "stale", tokens: used, tail: tailTokens });
 		} else if (p) this.emit("compaction.prefire", { state: "stale", tokens: used });
+		if (!summary && opts.aheadOnly) return undefined;
 		if (!summary) {
 			tailIdx = tailStart(messages, floor, s.keep * limit);
 			try {
-				summary = await this.summarize(messages, trigger === "overflow");
+				summary = await this.summarize(messages, trigger === "overflow", opts.noCache === true);
 			} catch (e) {
 				const err = e instanceof SummaryError ? e : new SummaryError("transient", e instanceof Error ? e.message : String(e));
 				const sticky = err.reason !== "transient" && trigger !== "manual";
@@ -1981,6 +2196,7 @@ export class EngineSession {
 			model: this.modelRef,
 			summaryMs: summary.ms,
 			prefire: ahead,
+			...(cold ? { cold: true as const } : {}),
 			timestamp: Date.now(),
 		};
 		const seq = this.transcript.append(rec);
@@ -1997,6 +2213,7 @@ export class EngineSession {
 		this.agent.state.messages = next;
 		this.suppressed = undefined;
 		this.prefireBlocked = false;
+		this.refreshBlocked = false;
 		const after = next.reduce((n, m) => n + estimateTokens(m), 0);
 		const blockedMs = Math.round(performance.now() - t0);
 		this.emit("session.compacted", {
@@ -2008,6 +2225,7 @@ export class EngineSession {
 			summaryMs: summary.ms,
 			summaryChars: summary.text.length,
 			prefire: ahead,
+			cold,
 			tailFrom: rec.tailFrom,
 			cleared: cleared.length,
 			...usageOf(summary),
@@ -2132,8 +2350,14 @@ export class EngineSession {
 		this.opts.onMessage?.(seq, rec as unknown as AgentMessage);
 		const t = this.transcript.load();
 		this.agent.state.messages = this.adopt(t.messages);
+		// the loaded tools are what the remaining context declares, as on a resume: one loaded in the reverted
+		// range is no longer loaded, and the next turn declares what changed
+		const hot = new Set(this.hot.map((x) => x.name));
+		this.loaded = new Set(getCurrentTools(this.agent.state.messages as never).map((d) => d.name).filter((n) => !hot.has(n)));
 		this.prefire = undefined;
 		this.prefireBlocked = false;
+		this.refresh = undefined;
+		this.refreshBlocked = false;
 		this.lastAssistantSeq = t.messages.findLastIndex((m: any, i: number) => m.role === "assistant" && i + 1 < from) + 1;
 	}
 
@@ -2344,12 +2568,72 @@ export class EngineSession {
 		await this.agent.waitForIdle();
 	}
 
+	/**
+	 * an evicted session leaves its ready summary and its last cache use behind, so a reload can still compact
+	 * from that summary when its cache went cold (compaction.cold)
+	 */
+	private leaveBehind() {
+		if (!this.lastCacheUseAt || !this.agent) return;
+		const p = this.prefire?.result ? this.prefire : undefined;
+		const lastSeq = p ? this.seqOf.get(p.last as object) : undefined;
+		leftBehind.delete(this.id);
+		leftBehind.set(this.id, { at: this.lastCacheUseAt, model: this.lastCacheModel, ...(p && lastSeq !== undefined ? { summary: { at: p.at, lastSeq, result: p.result! } } : {}) });
+		for (const id of leftBehind.keys()) {
+			if (leftBehind.size <= LEFT_BEHIND_MAX) break;
+			leftBehind.delete(id);
+		}
+	}
+
+	/**
+	 * on a reload, when the cache was last used and the summary made ahead: what the evicted session left, else
+	 * the last reply's time and model from the transcript. off with compaction.cold false, as before it existed
+	 */
+	private pickUp(messages: AgentMessage[]) {
+		const left = leftBehind.get(this.id);
+		leftBehind.delete(this.id);
+		if (this.opts.config.compaction.cold === false) return;
+		if (left) {
+			this.lastCacheUseAt = left.at;
+			this.lastCacheModel = left.model;
+			const sum = left.summary;
+			const last = sum ? messages[sum.at - 1] : undefined;
+			if (sum && last && this.seqOf.get(last as object) === sum.lastSeq) this.prefire = { at: sum.at, last, startedAt: 0, promise: Promise.resolve(sum.result), result: sum.result };
+			return;
+		}
+		const a = messages.findLast((m: any) => m.role === "assistant" && typeof m.timestamp === "number" && m.stopReason !== "error" && m.stopReason !== "aborted") as { timestamp: number; provider?: string; model?: string } | undefined;
+		if (!a?.provider || !a.model) return;
+		this.lastCacheUseAt = a.timestamp;
+		this.lastCacheModel = `${a.provider}/${a.model}`;
+	}
+
 	dispose() {
 		this.disposed = true;
 		this.cancelWarm();
+		this.cancelIdleSummary();
+		this.leaveBehind();
 		this.finalizeStep();
 		this.agent.abort();
 	}
+}
+
+/** what evicted sessions left behind, by id, oldest first: a ready summary (a few kb) and when the cache was last used */
+const leftBehind = new Map<string, { at: number; model: string | undefined; summary?: { at: number; lastSeq: number; result: Summary } }>();
+const LEFT_BEHIND_MAX = 64;
+
+interface CompactOpts {
+	aheadOnly?: boolean;
+	cold?: boolean;
+	noCache?: boolean;
+}
+
+/** cache marks off every block of an anthropic payload: pi leaves them off for "none", the breakpoint gates and document blocks may not */
+function stripCacheMarks(payload: Record<string, any>) {
+	const strip = (blocks: unknown) => {
+		if (Array.isArray(blocks)) for (const b of blocks) if (b && typeof b === "object") delete (b as { cache_control?: unknown }).cache_control;
+	};
+	strip(payload.system);
+	strip(payload.tools);
+	if (Array.isArray(payload.messages)) for (const m of payload.messages) strip(m?.content);
 }
 
 /** a summary made in the background, for the context as it was `at` messages long */

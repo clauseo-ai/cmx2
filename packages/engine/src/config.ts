@@ -1,10 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { type ParseError, parse, printParseErrorCode } from "jsonc-parser";
 import { COMPACTION_DEFAULTS, type CompactionSettings } from "./compaction.ts";
 import { IMAGE_DEFAULTS, type ImageSettings } from "./images.ts";
 import { DEFAULT_PERMISSION, PERMISSION_ACTIONS, type PermissionConfig } from "./permission.ts";
+import { SEARCH_PROVIDERS, type SearchProviderName } from "@cmx2/tools/web";
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 export const EFFORTS: readonly Effort[] = ["low", "medium", "high", "xhigh", "max"];
@@ -76,7 +78,11 @@ export interface Config {
 	/**
 	 * when and how a long context is compacted: `at` in tokens (or a fraction of the window when at most 1),
 	 * `prefire` the fraction of `at` where the summary starts in the background, `keep` the fraction of `at`
-	 * kept verbatim after the summary, `protect` the newest tool output in tokens that tail keeps whole
+	 * kept verbatim after the summary, `protect` the newest tool output in tokens that tail keeps whole. a ready
+	 * background summary is also used before `at` when the prompt cache has gone cold (past its ttl, or a model
+	 * switch), and is made again once the messages after it pass max(`keep` × `at`, 20k tokens). `cold` is a floor read
+	 * like `at` (false turns it off): a session idle at or past it makes its summary shortly before the cache
+	 * expires, and the first request after the cache expired compacts, with that summary or one made then
 	 */
 	compaction: CompactionSettings;
 	/**
@@ -85,6 +91,8 @@ export interface Config {
 	 * request bytes long before they cost compaction tokens
 	 */
 	images: ImageSettings;
+	/** the web provider for websearch, webfetch and webcrawl (tavily, exa, brave, searxng); `auto` takes the first key in the environment, else keyless tavily */
+	web: WebConfig;
 	/** where the profile was read from, for diagnostics */
 	sources: string[];
 }
@@ -102,6 +110,22 @@ export interface WorktreeConfig {
 	minFreeRatio: number;
 	clone: boolean;
 	setup: string | string[];
+}
+
+/**
+ * the web provider. `apiKey` is a literal, `$ENV_NAME` or `!command`, and defaults to the provider's usual
+ * variable (TAVILY_API_KEY, EXA_API_KEY, BRAVE_API_KEY). `url` moves the endpoint (a searxng instance needs
+ * it); `search` holds extra search request fields, such as tavily's `{"search_depth": "advanced"}`. `fetch:
+ * "provider"` reads public pages through tavily extract, and `crawl: true` adds webcrawl (tavily map and
+ * crawl, with a key); both need `provider: "tavily"` and are off by default.
+ */
+export interface WebConfig {
+	provider: "auto" | SearchProviderName;
+	apiKey?: string;
+	url?: string;
+	search?: Record<string, unknown>;
+	fetch: "local" | "provider";
+	crawl: boolean;
 }
 
 /** one mcp server as the profile names it; the tools package reads the rest of the fields */
@@ -127,6 +151,7 @@ export const DEFAULTS: Omit<Config, "sources"> = {
 	worktree: { carry: [".env", ".env.*", ".envrc", ".dev.vars", "localhost*.pem"], cap: 15, minFreeGB: 5, minFreeRatio: 0.1, clone: true, setup: [] },
 	compaction: COMPACTION_DEFAULTS,
 	images: IMAGE_DEFAULTS,
+	web: { provider: "auto", fetch: "local", crawl: false },
 };
 
 export function configDir(env = process.env): string {
@@ -144,9 +169,9 @@ export function machineName(): string {
 
 export class ConfigError extends Error {}
 
-function readJsonc(path: string): Record<string, unknown> {
+function readJsonc(path: string, text = readFileSync(path, "utf8")): Record<string, unknown> {
 	const errors: ParseError[] = [];
-	const value = parse(readFileSync(path, "utf8"), errors, { allowTrailingComma: true });
+	const value = parse(text, errors, { allowTrailingComma: true });
 	if (errors.length > 0) {
 		const first = errors[0]!;
 		throw new ConfigError(`${path} is not valid jsonc (${printParseErrorCode(first.error)} at offset ${first.offset}); fix it or move it aside`);
@@ -218,10 +243,25 @@ function validate(c: Config): Config {
 	if (k.prefire !== false && (typeof k.prefire !== "number" || !(k.prefire > 0 && k.prefire < 1))) throw new ConfigError(`compaction.prefire must be a fraction between 0 and 1, or false; got ${JSON.stringify(k.prefire)}`);
 	if (typeof k.keep !== "number" || !(k.keep >= 0 && k.keep < 1)) throw new ConfigError(`compaction.keep must be a fraction from 0 up to 1, got ${JSON.stringify(k.keep)}`);
 	if (typeof k.protect !== "number" || !(k.protect >= 0)) throw new ConfigError(`compaction.protect must be a token count, got ${JSON.stringify(k.protect)}`);
+	if (k.cold !== false && (typeof k.cold !== "number" || !(k.cold > 0))) throw new ConfigError(`compaction.cold must be a token count, a fraction of the window up to 1, or false; got ${JSON.stringify(k.cold)}`);
 	const im = c.images;
 	if (!isObject(im)) throw new ConfigError(`images must be an object like {"budget": 12000000, "keep": 0.4}, got ${JSON.stringify(im)}`);
 	if (im.budget !== false && (typeof im.budget !== "number" || !(im.budget > 0))) throw new ConfigError(`images.budget must be a number of bytes, or false; got ${JSON.stringify(im.budget)}`);
 	if (typeof im.keep !== "number" || !(im.keep > 0 && im.keep < 0.75)) throw new ConfigError(`images.keep must be a fraction between 0 and 0.75 (a turn's first request drops at 75% of the budget), got ${JSON.stringify(im.keep)}`);
+	const w2 = c.web;
+	if (!isObject(w2)) throw new ConfigError(`web must be an object like {"provider": "tavily"}, got ${JSON.stringify(w2)}`);
+	if (w2.provider !== "auto" && !SEARCH_PROVIDERS.includes(w2.provider)) throw new ConfigError(`web.provider must be auto or one of ${SEARCH_PROVIDERS.join(", ")}, got ${JSON.stringify(w2.provider)}`);
+	for (const k of ["apiKey", "url"] as const) {
+		if (w2[k] !== undefined && typeof w2[k] !== "string") throw new ConfigError(`web.${k} must be a string, got ${JSON.stringify(w2[k])}`);
+	}
+	if (w2.search !== undefined && !isObject(w2.search)) throw new ConfigError(`web.search must be an object of extra search request fields, got ${JSON.stringify(w2.search)}`);
+	for (const k of ["apiKey", "url", "search"] as const) {
+		if (w2[k] !== undefined && w2.provider === "auto") throw new ConfigError(`web.${k} belongs to one provider; set web.provider (one of ${SEARCH_PROVIDERS.join(", ")})`);
+	}
+	if (w2.provider === "searxng" && !w2.url) throw new ConfigError(`web.provider searxng needs web.url, the base url of your instance`);
+	if (w2.fetch !== "local" && w2.fetch !== "provider") throw new ConfigError(`web.fetch must be local or provider, got ${JSON.stringify(w2.fetch)}`);
+	if (typeof w2.crawl !== "boolean") throw new ConfigError(`web.crawl must be true or false, got ${JSON.stringify(w2.crawl)}`);
+	if ((w2.fetch === "provider" || w2.crawl) && w2.provider !== "tavily") throw new ConfigError(`web.${w2.fetch === "provider" ? 'fetch "provider"' : "crawl"} needs web.provider "tavily", the only provider with page reading and crawling`);
 	for (const [name, p] of Object.entries(c.providers)) {
 		if (p.maxRequestBytes !== undefined && (typeof p.maxRequestBytes !== "number" || !(p.maxRequestBytes > 0))) {
 			throw new ConfigError(`providers.${name}.maxRequestBytes must be a number of bytes, got ${JSON.stringify(p.maxRequestBytes)}`);
@@ -236,13 +276,13 @@ function validate(c: Config): Config {
 	return c;
 }
 
-/** keys a repository's `.cmx2/cmx2.jsonc` cannot set: where keys go, the key commands, the listener, the mcp commands */
-const PROFILE_ONLY = ["providers", "server", "mcp"] as const;
+/** keys a repository's `.cmx2/cmx2.jsonc` cannot set: where keys go, the key commands, the listener, the mcp commands, where searches go */
+const PROFILE_ONLY = ["providers", "server", "mcp", "web"] as const;
 const warned = new Set<string>();
 
 /**
  * the project layer comes with whatever repository was cloned, so it can say how to work in it but not
- * widen what the agent may do or where the keys go: `providers`, `server` and `mcp` are dropped, and its
+ * widen what the agent may do or where the keys go: `providers`, `server`, `mcp` and `web` are dropped, and its
  * permission rules may ask or deny but not allow. what it tried is listed for the log line.
  */
 export function projectLayer(layer: Record<string, any>): { layer: Record<string, any>; ignored: string[] } {
@@ -277,14 +317,49 @@ export function projectLayer(layer: Record<string, any>): { layer: Record<string
  */
 export function loadConfig(opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Config {
 	const env = opts.env ?? process.env;
+	const { layers, project } = layerPaths(env, opts.cwd);
+	return assemble(
+		env,
+		layers.filter((path) => existsSync(path)).map((path) => ({ path, text: readFileSync(path, "utf8") })),
+		project,
+	);
+}
+
+/**
+ * `loadConfig` with every file read on bun's threadpool, so a read that waits (a privacy prompt for a
+ * protected folder, a hung network mount) holds this promise and not the thread that serves everyone else
+ */
+export async function loadConfigAsync(opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<Config> {
+	const env = opts.env ?? process.env;
+	const { layers, project } = layerPaths(env, opts.cwd);
+	const read = await Promise.all(
+		layers.map((path) =>
+			readFile(path, "utf8").then(
+				(text) => ({ path, text }),
+				(e: NodeJS.ErrnoException) => {
+					// a missing layer is skipped, as `existsSync` skips it; anything else is the same error the sync read throws
+					if (e.code === "ENOENT" || e.code === "ENOTDIR") return undefined;
+					throw e;
+				},
+			),
+		),
+	);
+	return assemble(env, read.filter((r): r is { path: string; text: string } => !!r), project);
+}
+
+function layerPaths(env: NodeJS.ProcessEnv, cwd: string | undefined): { layers: string[]; project?: string } {
 	const dir = configDir(env);
 	const layers = [join(dir, "cmx2.jsonc"), join(dir, `cmx2.${machineName()}.jsonc`)];
-	const project = opts.cwd ? join(opts.cwd, ".cmx2", "cmx2.jsonc") : undefined;
+	const project = cwd ? join(cwd, ".cmx2", "cmx2.jsonc") : undefined;
 	if (project) layers.push(project);
+	return { layers, ...(project ? { project } : {}) };
+}
+
+function assemble(env: NodeJS.ProcessEnv, files: Array<{ path: string; text: string }>, project: string | undefined): Config {
+	const dir = configDir(env);
 	let config: Config = { ...structuredClone(DEFAULTS), sources: [] };
-	for (const path of layers) {
-		if (!existsSync(path)) continue;
-		let layer = readJsonc(path);
+	for (const { path, text } of files) {
+		let layer = readJsonc(path, text);
 		// `permissions` reads as `permission` (the preset files use the plural)
 		if (layer.permissions !== undefined) {
 			layer.permission = layer.permission === undefined ? layer.permissions : merge(layer.permissions, layer.permission);

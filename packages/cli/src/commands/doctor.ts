@@ -9,6 +9,7 @@ import { authHeaders } from "../daemon.ts";
 import { redact } from "../redact.ts";
 import { compiled, installedBinary } from "../release.ts";
 import { serviceState } from "../service.ts";
+import { ADHOC_NOTE, certificateKind, signatureOf } from "../signing.ts";
 
 export const help = `cmx2 doctor: what is wrong on this machine, in plain words
 
@@ -82,6 +83,28 @@ async function probe(config: Config): Promise<Check> {
 	}
 }
 
+/** which provider the web tools use and where its key comes from, never the key */
+async function webCheck(config: Config): Promise<Check> {
+	const { pickSearch, SEARCH_ENV_KEYS } = await import("@cmx2/tools/web");
+	const w = config.web;
+	const extras = [w.fetch === "provider" ? "webfetch through tavily extract" : "", w.crawl ? "webcrawl on" : ""].filter(Boolean).join(", ");
+	const tail = extras ? `; ${extras}` : "";
+	if (w.provider === "auto") {
+		const { provider, key } = pickSearch();
+		if (!key) return { level: "ok", what: "web", detail: "search through tavily's free keyless mode (rate limited), keyless exa when that fails", fix: "for higher limits, a free tavily key (1,000 credits a month) from https://app.tavily.com: export TAVILY_API_KEY" };
+		return { level: "ok", what: "web", detail: `search through ${provider}, key from $${SEARCH_ENV_KEYS[provider]}` };
+	}
+	const envName = SEARCH_ENV_KEYS[w.provider];
+	const src = w.apiKey?.startsWith("$") ? w.apiKey : w.apiKey?.startsWith("!") ? "the command in web.apiKey" : w.apiKey ? "web.apiKey in the profile" : envName ? `$${envName}` : undefined;
+	const { resolveSecret } = await import("@cmx2/engine/models");
+	const has = !!(resolveSecret(w.apiKey) || (envName && process.env[envName]));
+	if (w.provider === "searxng") return { level: "ok", what: "web", detail: `search through searxng at ${w.url}${has ? ", with a key" : ""}` };
+	if (has) return { level: "ok", what: "web", detail: `${w.provider}, key from ${src}${tail}` };
+	if (w.provider === "tavily" && w.crawl) return { level: "warn", what: "web", detail: `tavily without a key (looked at ${src}): search and extract run keyless, but webcrawl fails`, fix: "a free key from https://app.tavily.com: export TAVILY_API_KEY or set web.apiKey" };
+	if (w.provider === "tavily" || w.provider === "exa") return { level: "ok", what: "web", detail: `${w.provider} without a key: its free keyless mode, rate limited${tail}`, fix: `export ${envName} or set web.apiKey for higher limits` };
+	return { level: "warn", what: "web", detail: `${w.provider} has no key (looked at ${src}), so every search fails`, fix: `export ${envName} or set web.apiKey to a $NAME, a !command or a literal` };
+}
+
 export async function main(args: string[]) {
 	const { values } = parseArgs({ args, options: { redact: { type: "boolean" }, offline: { type: "boolean" }, json: { type: "boolean" }, port: { type: "string" } } });
 	const checks: Check[] = [];
@@ -91,6 +114,11 @@ export async function main(args: string[]) {
 	if (compiled() && process.execPath.startsWith(join(homedir(), "Documents"))) {
 		add({ level: "warn", what: "binary location", detail: "this binary sits under ~/Documents; launchd stalls for minutes on a privacy prompt when it starts binaries from there", fix: "cmx2 serve --install runs a copy from ~/.local/share/cmx2/bin, so install the service instead of pointing a unit at this file" });
 	}
+	// the copy the service runs is the one macos keeps grants for
+	const signedPath = existsSync(installedBinary()) ? installedBinary() : compiled() ? process.execPath : undefined;
+	const sig = signedPath ? signatureOf(signedPath) : undefined;
+	if (sig?.adhoc) add({ level: "warn", what: "signature", detail: `${signedPath} is signed ad hoc. ${ADHOC_NOTE}`, fix: "cmx2 serve --install from this build signs the installed copy with a keychain identity (security find-identity -v -p codesigning lists them; make one first if it lists none)" });
+	else if (sig?.authority) add({ level: "ok", what: "signature", detail: `${signedPath} is signed with a ${certificateKind(sig.authority)} certificate, so macos keeps its folder grants across upgrades` });
 
 	// the profile
 	let config: Config | undefined;
@@ -112,6 +140,7 @@ export async function main(args: string[]) {
 			else add({ level: p === main ? "fail" : "warn", what: `key for ${p}`, detail: `no key (looked at ${src})`, fix: p === "anthropic" ? "export ANTHROPIC_API_KEY=... in your shell (and run cmx2 serve --install again so the service gets it), or set providers.anthropic.apiKey to $NAME or !command" : `set providers.${p}.apiKey to a $NAME, a !command (a keychain lookup) or a literal` });
 		}
 		if (!values.offline) add(await probe(config));
+		add(await webCheck(config));
 	}
 
 	// the daemon
@@ -119,7 +148,11 @@ export async function main(args: string[]) {
 	const host = !config || config.server.hostname === "0.0.0.0" ? "127.0.0.1" : config.server.hostname;
 	const base = `http://${host}:${port}`;
 	const headers = authHeaders();
-	const health = await fetch(`${base}/global/health`, { headers, signal: AbortSignal.timeout(2000) }).catch(() => undefined);
+	let timedOut = false;
+	const health = await fetch(`${base}/global/health`, { headers, signal: AbortSignal.timeout(2000) }).catch((e: unknown) => {
+		timedOut = e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
+		return undefined;
+	});
 	if (health?.status === 401) {
 		add({ level: "warn", what: "daemon", detail: `something on ${base} wants credentials this shell does not have`, fix: "set CMX2_SERVER_PASSWORD, or run cmx2 pair on this machine once so local commands get a credential" });
 	} else if (health?.ok) {
@@ -135,6 +168,8 @@ export async function main(args: string[]) {
 				add({ level: mb <= IDLE_BUDGET_MB ? "ok" : "warn", what: "daemon memory", detail: `${mb.toFixed(1)} MB resident, ${m.live_sessions} live sessions, up ${m.uptime_s} s (idle budget ${IDLE_BUDGET_MB} MB)`, ...(mb <= IDLE_BUDGET_MB ? {} : { fix: "a busy daemon runs above the budget for a while; if it stays there idle, report it with this output" }) });
 			}
 		}
+	} else if (timedOut) {
+		add({ level: "fail", what: "daemon", detail: `${base} did not answer /global/health within 2 s`, fix: `lsof -iTCP:${port} -sTCP:LISTEN names the process; if it is cmx2 its main thread is busy or the machine is swapping (sample <pid> 3 shows where), and the log is ~/.local/share/cmx2/log/serve.log` });
 	} else if (await portTaken(host, port)) {
 		add({ level: "fail", what: "daemon", detail: `something that is not cmx2 holds port ${port} on ${host}`, fix: `stop it, or pick another port with server.port in cmx2.jsonc (lsof -iTCP:${port} -sTCP:LISTEN names it)` });
 	} else {
