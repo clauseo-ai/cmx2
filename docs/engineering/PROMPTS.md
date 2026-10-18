@@ -141,9 +141,12 @@ you talk to, never the model).
 the system prompt depends on the agent type only (general, explore, review, or
 a custom type's body), never on the model, name or task, so helpers of one type
 on one model share a byte-identical prefix. identity and the task ride the first
-message: `you are <path> (session <id>), on <model> at <effort> effort, started
-by <spawner> (session <id>).`, the brief, then attachments (files, `fork_turns`,
-and with `after` the earlier attempt's brief and last report).
+message: `you are <path> (session <id>), started by <spawner> (session <id>).`,
+the brief, then attachments (files, `fork_turns`, and with `after` the earlier
+attempt's brief and last report). the helper is not told its model or effort:
+escalation can change effort mid-session, and a stated effort invites the model
+to scale its work to the label. the spawner's reasoning for the choice goes in
+`why`, which the helper never sees.
 
 - a helper another agent started, how to report (end your turn with the
   deliverable; you may be messaged again; `message` for a partial finding).

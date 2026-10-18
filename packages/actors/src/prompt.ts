@@ -22,10 +22,13 @@ export function helperFragment(opts: { typeBody?: string; readOnly?: boolean; re
 	return lines.join("\n");
 }
 
-/** an earlier attempt at the same task, attached to the first message of the helper that takes it over */
-export function attemptAttachment(opts: { path: string; model: string; effort: string; brief: string; lastInstruction?: string; report: string | undefined }): string {
+/**
+ * an earlier attempt at the same task, attached to the first message of the helper that takes it over. it names the
+ * earlier helper by path and never its model or effort: a helper is not told what it runs on
+ */
+export function attemptAttachment(opts: { path: string; brief: string; lastInstruction?: string; report: string | undefined }): string {
 	return [
-		`an earlier attempt at this task, by ${opts.path} on ${opts.model} at ${opts.effort} effort.`,
+		`an earlier attempt at this task, by ${opts.path}.`,
 		"its brief:",
 		opts.brief.trim(),
 		...(opts.lastInstruction?.trim() ? ["its last instruction:", opts.lastInstruction.trim()] : []),
@@ -34,8 +37,12 @@ export function attemptAttachment(opts: { path: string; model: string; effort: s
 	].join("\n");
 }
 
-/** the first message a helper reads: who it is, who started it, then the brief and anything attached */
-export function taskEnvelope(opts: { path: string; id: string; model: string; effort: string; spawnerPath: string; spawnerID: string; brief: string; attachments?: string[] }): string {
-	const head = `you are ${opts.path} (session ${opts.id}), on ${opts.model} at ${opts.effort} effort, started by ${opts.spawnerPath} (session ${opts.spawnerID}).`;
+/**
+ * the first message a helper reads: who it is, who started it, then the brief and anything attached. it does not
+ * name the helper's model or effort (escalation can change effort mid-session, and a stated effort invites the
+ * model to scale its work to the label); the spawner's reasoning for the choice goes in `why`, which stays out of this
+ */
+export function taskEnvelope(opts: { path: string; id: string; spawnerPath: string; spawnerID: string; brief: string; attachments?: string[] }): string {
+	const head = `you are ${opts.path} (session ${opts.id}), started by ${opts.spawnerPath} (session ${opts.spawnerID}).`;
 	return [head, "", opts.brief.trim(), ...(opts.attachments?.length ? ["", ...opts.attachments] : [])].join("\n");
 }

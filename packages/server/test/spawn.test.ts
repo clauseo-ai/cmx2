@@ -45,7 +45,7 @@ function script(body: any): Block[] {
 		{ type: "tool_use", name: "spawn", input: { name: "blocked", model: "fable", brief: "a model the profile blacklists" } },
 		{ type: "tool_use", name: "spawn", input: { name: "first", model: "sonnet", brief: "first try" } },
 		{ type: "tool_use", name: "wait", input: { timeout_ms: 20000 } },
-		{ type: "tool_use", name: "spawn", input: { name: "second", model: "sonnet", after: idOf("first"), brief: "second try" } },
+		{ type: "tool_use", name: "spawn", input: { name: "second", model: "sonnet", after: idOf("first"), why: "needs judgment", brief: "second try" } },
 		{ type: "tool_use", name: "wait", input: { timeout_ms: 20000 } },
 		{ type: "tool_use", name: "spawn", input: { name: "third", model: "sonnet", after: "/root/second", brief: "third try" } },
 		{ type: "tool_use", name: "wait", input: { timeout_ms: 20000 } },
@@ -146,7 +146,7 @@ describe("the spawn verb takes a model", () => {
 		expect(out(spawns[4])).not.toContain("this is attempt");
 		expect(out(spawns[5])).toContain(note);
 		// an agent type that names a model needs none from the spawn; the label is the alias the type used
-		expect(out(spawns[6])).toMatch(/\/root\/pal1 \(id ses_[0-9a-f]+\): opus on claude-opus-5-5 at medium, /);
+		expect(out(spawns[6])).toMatch(/\/root\/pal1 \(id ses_[0-9a-f]+\): opus on claude-opus-5-5 at high, /);
 		// a review child and an effort that moves the alias's default
 		expect(out(spawns[7])).toMatch(/\/root\/rev \(id ses_[0-9a-f]+\): opus on claude-opus-5-5 at low, /);
 
@@ -169,8 +169,12 @@ describe("the spawn verb takes a model", () => {
 		const second = await api(`/session/${byPath("/root/second").id}/message`);
 		const task = second[0].parts[0].text as string;
 		expect(task).toContain("you are /root/second (session ");
-		expect(task).toContain("on anthropic/claude-sonnet-5-5 at high effort, started by /root (session ");
-		expect(task).toContain("second try\n\nan earlier attempt at this task, by /root/first on anthropic/claude-sonnet-5-5 at high effort.\nits brief:\nfirst try\nits last report:\nhi");
+		expect(task).toContain("started by /root (session ");
+		expect(task).toContain("second try\n\nan earlier attempt at this task, by /root/first.\nits brief:\nfirst try\nits last report:\nhi");
+		// the helper is told neither its model nor its effort, and never the spawner's why
+		expect(task).not.toMatch(/effort|anthropic\/claude|needs judgment/);
+		expect(byPath("/root/second").why).toBe("needs judgment");
+		expect(byPath("/root/first").why).toBeUndefined();
 		const metrics = await api(`/session/${id}/agents/metrics`);
 		// the same model at the same effort is a retry; another model or effort is a step up (after took an id, a path and a name here)
 		const attempts = metrics.events.filter((e: any) => e.kind === "step_up" || e.kind === "retry");
@@ -179,13 +183,15 @@ describe("the spawn verb takes a model", () => {
 			["retry", "sonnet", "sonnet"],
 			["step_up", "sonnet", "opus"],
 		]);
-		expect(attempts[0]).toMatchObject({ from_id: byPath("/root/first").id, child: byPath("/root/second").id, from_model: "anthropic/claude-sonnet-5-5", to_model: "anthropic/claude-sonnet-5-5", from_effort: "high", to_effort: "high" });
+		expect(attempts[0]).toMatchObject({ from_id: byPath("/root/first").id, child: byPath("/root/second").id, from_model: "anthropic/claude-sonnet-5-5", to_model: "anthropic/claude-sonnet-5-5", from_effort: "high", to_effort: "high", why: "needs judgment" });
+		expect(attempts[1]).not.toHaveProperty("why");
 
 		// the agents list: model label, model id, effort, state, context size and cost per step and in all
 		const list = out(toolParts(msgs, "agents")[0]);
 		const line = list.split("\n").find((l) => l.startsWith("- /root/first "))!;
 		expect(line).toMatch(/^- \/root\/first · sonnet · claude-sonnet-5-5 · high · parked · ctx \d+k · \$0\.\d+\/step · \$0\.\d+ total · last: hi · id ses_[0-9a-f]+$/);
-		expect(list).toContain("- /root/pal1 · opus · claude-opus-5-5 · medium · parked");
+		expect(list).toContain("- /root/pal1 · opus · claude-opus-5-5 · high · parked");
+		expect(list.split("\n").find((l) => l.startsWith("- /root/second "))).toContain(" · why: needs judgment · last: hi · id ses_");
 		// the root's row names the model it runs on and its standing effort, from its session (the row itself holds neither)
 		const rootRow = byPath("/root");
 		expect(rootRow.model).toBe("anthropic/claude-opus-5-5");

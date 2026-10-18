@@ -522,6 +522,8 @@ export function createClient(opts: ClientOptions) {
 					files: Array<string>;
 					lastTask?: string;
 					lastReport?: string;
+					/** why the spawner picked this model and effort; for people reading the tree, never sent to the helper */
+					why?: string;
 					/** mailbox items not yet in its transcript */
 					pending: number;
 					/** input, output and cache-write tokens it has spent */
@@ -574,6 +576,8 @@ export function createClient(opts: ClientOptions) {
 			budget_tokens?: number;
 			/** where the agent works instead of the spawner's directory, such as a checkout */
 			directory?: string;
+			/** why the spawner picked this model and effort; for people reading the tree, never sent to the helper */
+			why?: string;
 		}, o?: CallOptions) =>
 			call<{
 				agents: Array<{
@@ -599,6 +603,8 @@ export function createClient(opts: ClientOptions) {
 					files: Array<string>;
 					lastTask?: string;
 					lastReport?: string;
+					/** why the spawner picked this model and effort; for people reading the tree, never sent to the helper */
+					why?: string;
 					/** mailbox items not yet in its transcript */
 					pending: number;
 					/** input, output and cache-write tokens it has spent */

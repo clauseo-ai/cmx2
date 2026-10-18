@@ -137,6 +137,8 @@ export interface SpawnInput {
 	budget_tokens?: number;
 	/** where it works instead of the spawner's directory: a checkout from worktree_create, or any directory */
 	directory?: string;
+	/** why the spawner picked this model and effort, one line. it goes to the agent tree and the metrics, never to the helper */
+	why?: string;
 }
 
 interface AgentOptions {
@@ -155,6 +157,8 @@ interface AgentOptions {
 	exclude_tools?: string[];
 	/** the earlier helper whose attempt this one took over */
 	after?: string;
+	/** the spawner's reason for the model and effort; shown to people, never sent to the helper */
+	why?: string;
 	system_extra_hash?: string;
 }
 
@@ -175,6 +179,8 @@ export interface AgentInfo {
 	files: string[];
 	lastTask?: string;
 	lastReport?: string;
+	/** the spawner's reason for the model and effort; for people reading the tree, never sent to the helper */
+	why?: string;
 	pending: number;
 	tokens: number;
 	/** input, cache read and cache write of its last step: how big its context is now */
@@ -354,6 +360,7 @@ export class Actors {
 			files: json<string[]>(a.files, []),
 			...(a.last_task ? { lastTask: a.last_task.slice(0, 2000) } : {}),
 			...(a.last_report ? { lastReport: a.last_report.slice(0, 2000) } : {}),
+			...(opts.why ? { why: opts.why } : {}),
 			pending: this.rows.pending(a.id).length,
 			tokens: a.tokens,
 			...(last ? { contextTokens: last.input + last.cache_read + last.cache_write, lastStepCost: last.cost } : {}),
@@ -660,8 +667,10 @@ export class Actors {
 		const name = input.name ?? nameFrom(input.brief);
 		if (!validName(name)) throw new ActorError("BadRequestError", 400, `agent names are lowercase letters, digits and _ (up to 40), starting with a letter; got ${JSON.stringify(name)}`);
 		const prior = input.after ? this.priorAttempt(sender, input.after) : undefined;
+		const why = input.why?.trim() || undefined;
 		const base: AgentOptions = {
 			...(directory !== home ? { directory } : {}),
+			...(why ? { why } : {}),
 			...(input.on_failure ? { on_failure: input.on_failure } : {}),
 			...(input.cache_ttl ? { cache_ttl: input.cache_ttl } : {}),
 			...(input.warm !== undefined ? { warm: input.warm } : {}),
@@ -676,8 +685,6 @@ export class Actors {
 				? [
 						attemptAttachment({
 							path: prior.path,
-							model: prior.model ?? "?",
-							effort: prior.effort ?? "?",
 							brief: prior.brief ?? prior.last_task ?? "",
 							...(prior.last_task && prior.last_task !== prior.brief ? { lastInstruction: prior.last_task } : {}),
 							report: prior.last_report ?? undefined,
@@ -695,7 +702,7 @@ export class Actors {
 			if (!prior) return;
 			// a step up changes the model or the effort; the same model at the same effort is a retry
 			const kind = prior.model !== model || prior.effort !== effort ? "step_up" : "retry";
-			this.metric(sender, kind, a, { from_id: prior.id, from_model: prior.model, from_effort: prior.effort, to_model: model, to_effort: effort, from_label: prior.seat, to_label: label });
+			this.metric(sender, kind, a, { from_id: prior.id, from_model: prior.model, from_effort: prior.effort, to_model: model, to_effort: effort, from_label: prior.seat, to_label: label, ...(why ? { why } : {}) });
 		};
 		if (!input.pool) {
 			const a = await this.create({ ...common, name, brief: input.brief, options: base });
@@ -847,7 +854,7 @@ export class Actors {
 		this.rows.put(row);
 		this.host.publish(sender.id, "agent.spawned", { sessionID: sender.id, agent: this.info(row) });
 		if ((this.opts.faults ?? []).includes(spec.name) && !spec.respawns) this.host.failNextTurn(id, "injected fault (CMX2_FAULT)");
-		const envelope = taskEnvelope({ path, id, model: spec.model, effort: spec.effort, spawnerPath: sender.path, spawnerID: sender.id, brief: spec.brief, attachments: spec.attachments });
+		const envelope = taskEnvelope({ path, id, spawnerPath: sender.path, spawnerID: sender.id, brief: spec.brief, attachments: spec.attachments });
 		this.envelopes.set(id, envelope);
 		return this.rows.get(id)!;
 	}

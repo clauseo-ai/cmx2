@@ -78,7 +78,7 @@ export const DEFAULT_ROUTING: RoutingConfig = {
 		{ task: "reading more than 100k tokens", start: "split it across haiku helpers by file or topic; one sonnet high when it cannot be split" },
 	],
 	rules: [
-		"haiku is where a task starts unless a row above says otherwise. a spawn above haiku says in its brief, in one line, why haiku cannot do it; those lines are how the guide gets revised.",
+		"haiku is where a task starts unless a row above says otherwise. a spawn above haiku says in why, in one line, why haiku cannot do it; the helper never sees why, and those lines are how the guide gets revised.",
 		"small work that needs your context stays with you; small work that does not goes to haiku, since one step of yours costs tens of haiku steps. a helper starts with none of your context.",
 		"a brief makes the decisions the task contains (rename or reuse, which pattern to follow) and states the targets the result is measured against (frame time, latency, size). a decision the brief cannot make is a reason to start above haiku; difficulty and file count are not, and a missing tool or permission gets fixed, not escalated.",
 		"judge the output when it is back, not the price before. when a helper's output falls short: retry once with a sharper brief, then spawn one step up with after, then do it yourself. no helper is retried more than twice.",

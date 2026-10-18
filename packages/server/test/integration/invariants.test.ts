@@ -1013,7 +1013,7 @@ liveDescribe("the model table (R6, R7)", () => {
 		const second = await spawn(R.id, { name: "again", after: first.id, brief: quick(`second-${N}`) });
 		await settled(R.id, R.id, "/root/again");
 		const task = (await mailIn(second.id))[0]!.text;
-		expect(task).toContain("an earlier attempt at this task, by /root/memo on anthropic/claude-sonnet-5-5 at low effort.");
+		expect(task).toContain("an earlier attempt at this task, by /root/memo.");
 		expect(task).toContain(`its brief:\n${quick(`first-${N}`)}`);
 		expect(task).toContain(`its last report:\nfirst-${N}`);
 		const metrics = await d.api(`/session/${R.id}/agents/metrics`);

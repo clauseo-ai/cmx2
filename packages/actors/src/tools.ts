@@ -42,11 +42,22 @@ function dollars(n: number): string {
 }
 
 /** one agent in the list: who, what it runs on, how big its context is and what it costs, then what it did */
+/**
+ * a roster entry as the agent at `self` sees it. `why` is a spawner's reasoning about a helper's model and effort, so
+ * it shows only on agents below `self`, never on itself, its spawners or its siblings: a helper is not told why it
+ * runs on what it runs on (DECISIONS D27)
+ */
+export function rosterFor(self: string, a: AgentInfo): AgentInfo {
+	if (a.why === undefined || a.path.startsWith(`${self}/`)) return a;
+	const { why: _why, ...rest } = a;
+	return rest;
+}
+
 function rosterLine(a: AgentInfo): string {
 	const size = a.contextTokens !== undefined ? ` · ctx ${Math.round(a.contextTokens / 1000)}k` : "";
 	const step = a.lastStepCost !== undefined ? ` · $${dollars(a.lastStepCost)}/step` : "";
 	const total = a.cost !== undefined ? ` · $${dollars(a.cost)} total` : "";
-	return `- ${a.path} · ${a.seat ?? "agent"} · ${a.model?.split("/").pop() ?? "?"} · ${a.effort ?? "?"} · ${a.state}${a.cause ? ` (${a.cause})` : ""}${size}${step}${total}${a.files.length ? ` · files: ${a.files.slice(0, 5).join(", ")}` : ""}${a.lastReport ? ` · last: ${a.lastReport.split("\n")[0]!.slice(0, 120)}` : ""} · id ${a.id}`;
+	return `- ${a.path} · ${a.seat ?? "agent"} · ${a.model?.split("/").pop() ?? "?"} · ${a.effort ?? "?"} · ${a.state}${a.cause ? ` (${a.cause})` : ""}${size}${step}${total}${a.files.length ? ` · files: ${a.files.slice(0, 5).join(", ")}` : ""}${a.why ? ` · why: ${a.why.split("\n")[0]!.slice(0, 120)}` : ""}${a.lastReport ? ` · last: ${a.lastReport.split("\n")[0]!.slice(0, 120)}` : ""} · id ${a.id}`;
 }
 
 export function agentTools(actors: Actors, sessionID: string): Tool[] {
@@ -74,6 +85,7 @@ export function agentTools(actors: Actors, sessionID: string): Tool[] {
 				}),
 			),
 			cache_ttl: Type.Optional(Type.Union([Type.Literal("5m"), Type.Literal("1h")], { description: "1h for an agent you expect to come back to after a long while" })),
+			why: Type.Optional(Type.String({ description: "why this model and effort, in one line; it goes to the agent tree and the metrics, never to the helper" })),
 			directory: Type.Optional(Type.String({ description: "where it works instead of your directory, such as a checkout from worktree_create" })),
 		}),
 		async execute(_id, params) {
@@ -145,8 +157,9 @@ export function agentTools(actors: Actors, sessionID: string): Tool[] {
 				const action = params.action ?? "list";
 				if (action === "list") {
 					const r = actors.roster(sessionID, params.path_prefix);
-					const rows = r.agents.map(rosterLine);
-					return ok(`you are ${r.self}.\n${rows.join("\n")}`, r);
+					const seen = { ...r, agents: r.agents.map((a) => rosterFor(r.self, a)) };
+					const rows = seen.agents.map(rosterLine);
+					return ok(`you are ${r.self}.\n${rows.join("\n")}`, seen);
 				}
 				if (!params.target) return { content: [text(`${action} needs a target`)], details: { error: "BadRequestError" }, isError: true };
 				if (action === "close") {

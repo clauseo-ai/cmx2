@@ -2,6 +2,17 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
+## unreleased
+
+contract version 7. additive: `spawn` takes `why`, and `AgentInfo` and the `step_up` and `retry` metrics carry it.
+
+### added
+- `spawn` takes an optional `why`, one line on why the model and effort were picked. it is stored on the agent, returned in `AgentInfo`, written to the `step_up` and `retry` metrics, and shown by the `agents` tool on the agents below the caller. the helper never sees it.
+
+### changed
+- a helper's first message no longer names its model or effort. it reads `you are <path> (session <id>), started by <spawner> (session <id>).`, and an earlier attempt attached by `after` is named by path only. a stated effort invites the model to scale its work to the label, and escalation can change it mid-session.
+- the shipped routing rule asks a spawn above haiku for its one-line reason in `why` instead of in the brief, so the helper does not read the spawner's cost reasoning. a routing.jsonc of your own that copied the old rule keeps working; change "in its brief" to "in why" to move over.
+
 ## 0.8.14 - 2026-10-17
 
 contract version 7. additive: `GET /global/system`.

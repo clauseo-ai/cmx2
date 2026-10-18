@@ -4834,6 +4834,10 @@
 									"lastReport": {
 										"type": "string"
 									},
+									"why": {
+										"type": "string",
+										"description": "why the spawner picked this model and effort; for people reading the tree, never sent to the helper"
+									},
 									"pending": {
 										"type": "integer",
 										"description": "mailbox items not yet in its transcript"
@@ -5061,6 +5065,10 @@
 									},
 									"lastReport": {
 										"type": "string"
+									},
+									"why": {
+										"type": "string",
+										"description": "why the spawner picked this model and effort; for people reading the tree, never sent to the helper"
 									},
 									"pending": {
 										"type": "integer",
@@ -5290,6 +5298,10 @@
 									},
 									"lastReport": {
 										"type": "string"
+									},
+									"why": {
+										"type": "string",
+										"description": "why the spawner picked this model and effort; for people reading the tree, never sent to the helper"
 									},
 									"pending": {
 										"type": "integer",
@@ -5768,6 +5780,9 @@
 							},
 							"to_label": {
 								"type": "string"
+							},
+							"why": {
+								"type": "string"
 							}
 						}
 					},
@@ -5859,6 +5874,9 @@
 								"description": "the model label the earlier helper ran under"
 							},
 							"to_label": {
+								"type": "string"
+							},
+							"why": {
 								"type": "string"
 							}
 						}
@@ -9283,6 +9301,10 @@
 													"lastReport": {
 														"type": "string"
 													},
+													"why": {
+														"type": "string",
+														"description": "why the spawner picked this model and effort; for people reading the tree, never sent to the helper"
+													},
 													"pending": {
 														"type": "integer",
 														"description": "mailbox items not yet in its transcript"
@@ -9574,6 +9596,10 @@
 									"directory": {
 										"type": "string",
 										"description": "where the agent works instead of the spawner's directory, such as a checkout"
+									},
+									"why": {
+										"type": "string",
+										"description": "why the spawner picked this model and effort; for people reading the tree, never sent to the helper"
 									}
 								}
 							}
@@ -9726,6 +9752,10 @@
 													},
 													"lastReport": {
 														"type": "string"
+													},
+													"why": {
+														"type": "string",
+														"description": "why the spawner picked this model and effort; for people reading the tree, never sent to the helper"
 													},
 													"pending": {
 														"type": "integer",

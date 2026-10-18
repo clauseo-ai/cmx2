@@ -318,6 +318,7 @@ export const AgentInfo = Type.Object(
 		files: Type.Array(Type.String(), { description: "paths it wrote or edited" }),
 		lastTask: Type.Optional(Type.String()),
 		lastReport: Type.Optional(Type.String()),
+		why: Type.Optional(Type.String({ description: "why the spawner picked this model and effort; for people reading the tree, never sent to the helper" })),
 		pending: Type.Integer({ description: "mailbox items not yet in its transcript" }),
 		tokens: Type.Number({ description: "input, output and cache-write tokens it has spent" }),
 		contextTokens: Type.Optional(Type.Number({ description: "input, cache read and cache write of its last step: how big its context is now" })),
@@ -356,6 +357,7 @@ const attemptShape = {
 	to_effort: Type.String(),
 	from_label: Type.Union([Type.String(), Type.Null()], { description: "the model label the earlier helper ran under" }),
 	to_label: Type.String(),
+	why: Type.Optional(Type.String()),
 };
 
 export const WorktreeInfo = Type.Object(
@@ -898,6 +900,7 @@ export const ROUTES: RouteDef[] = [
 			behavior_version: Type.Optional(Type.Union([Type.Literal("subagent_v1"), Type.Literal("subagent_v2")])),
 			budget_tokens: Type.Optional(Type.Integer({ minimum: 1, description: "tokens one dispatch may spend before it stops with a partial report" })),
 			directory: Type.Optional(Type.String({ description: "where the agent works instead of the spawner's directory, such as a checkout" })),
+			why: Type.Optional(Type.String({ description: "why the spawner picked this model and effort; for people reading the tree, never sent to the helper" })),
 		}),
 		response: Type.Object({ agents: Type.Array(AgentInfo) }),
 		status: 201,

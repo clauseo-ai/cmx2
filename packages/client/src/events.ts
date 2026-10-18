@@ -1022,6 +1022,8 @@ export interface EventMap {
 			files: Array<string>;
 			lastTask?: string;
 			lastReport?: string;
+			/** why the spawner picked this model and effort; for people reading the tree, never sent to the helper */
+			why?: string;
 			/** mailbox items not yet in its transcript */
 			pending: number;
 			/** input, output and cache-write tokens it has spent */
@@ -1070,6 +1072,8 @@ export interface EventMap {
 			files: Array<string>;
 			lastTask?: string;
 			lastReport?: string;
+			/** why the spawner picked this model and effort; for people reading the tree, never sent to the helper */
+			why?: string;
 			/** mailbox items not yet in its transcript */
 			pending: number;
 			/** input, output and cache-write tokens it has spent */
@@ -1118,6 +1122,8 @@ export interface EventMap {
 			files: Array<string>;
 			lastTask?: string;
 			lastReport?: string;
+			/** why the spawner picked this model and effort; for people reading the tree, never sent to the helper */
+			why?: string;
 			/** mailbox items not yet in its transcript */
 			pending: number;
 			/** input, output and cache-write tokens it has spent */
@@ -1205,6 +1211,7 @@ export interface EventMap {
 		/** the model label the earlier helper ran under */
 		from_label: string | null;
 		to_label: string;
+		why?: string;
 	};
 	/** a helper took over an earlier attempt at a task on the same model at the same effort (v1) */
 	"agent.metric.retry": {
@@ -1219,6 +1226,7 @@ export interface EventMap {
 		/** the model label the earlier helper ran under */
 		from_label: string | null;
 		to_label: string;
+		why?: string;
 	};
 	/** an agent verb failed in a way the model can recover from (v1) */
 	"agent.metric.subagent_tool_error": {

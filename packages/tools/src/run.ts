@@ -68,7 +68,7 @@ const HELPERS: Helper[] = [
 	{ name: "pty.read", tool: "proc_read", returns: "structured", signature: "pty.read({ id, cursor?, limit?, wait_ms? }): Promise<{ data, cursor, dropped, status, exitCode }>" },
 	{ name: "pty.kill", tool: "proc_kill", returns: "structured", signature: "pty.kill({ id })" },
 	{ name: "pty.list", tool: "proc_list", returns: "structured", signature: "pty.list()" },
-	{ name: "agents.spawn", tool: "spawn", returns: "structured", signature: "agents.spawn({ brief, model, effort?, after?, name?, agent_type?, files?, pool? }): Promise<{ id, path, agents }>" },
+	{ name: "agents.spawn", tool: "spawn", returns: "structured", signature: "agents.spawn({ brief, model, effort?, why?, after?, name?, agent_type?, files?, pool? }): Promise<{ id, path, agents }>" },
 	{ name: "agents.message", tool: "message", returns: "structured", signature: "agents.message({ to, body, wake?, correlation_id? }): Promise<{ to, id, state, woke, pending }>" },
 	{ name: "agents.wait", tool: "wait", returns: "structured", signature: "agents.wait({ timeout_ms?, correlation_id? }): Promise<{ arrived, timed_out, items }>" },
 	{ name: "agents.list", tool: "agents", returns: "structured", extra: { action: "list" }, signature: "agents.list({ path_prefix? }): Promise<{ self, agents: [{ id, path, model, effort, state, files, lastReport }] }>" },
