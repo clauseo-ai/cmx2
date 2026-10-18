@@ -2,6 +2,13 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
+## unreleased
+
+contract version 7. no contract change.
+
+### changed
+- the anthropic 5 and default prompt profiles say how to reach a browser and how to leave the machine. a task that needs a browser uses agent-browser when `command -v agent-browser` finds it, in a session of its own (`--session <name>`) that it closes, and asks before installing playwright, puppeteer or another browser tool. when the work is done and checked, the agent stops the jobs, dev servers, ptys and browser sessions it started and removes the temporary files, scratch scripts, downloads and merged or dropped worktrees it created, leaving what was there before and what it was asked to keep. its report closes with one line on what it cleaned up and what it left running or on disk. why: agents installed playwright on a machine that already had agent-browser, and left processes, files and worktrees behind. the openai and gemini profiles are unchanged.
+
 ## 0.8.15 - 2026-10-18
 
 contract version 7. additive: `spawn` takes `why`, and `AgentInfo` and the `step_up` and `retry` metrics carry it.

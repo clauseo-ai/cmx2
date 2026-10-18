@@ -55,7 +55,20 @@ pi is the open source agent engine cmx2 builds on; cmx is its predecessor.
   `shell` for a single command; `pty` for repls; jobs and notifications;
   worktrees; the five agent verbs with the `agents` list semantics.
 - the batching nudge is not here; it is turn-scoped.
-- claims discipline and outcome-first reporting (short).
+- browsers: agent-browser when it is on the path, in a session of its own
+  that it closes; another browser tool only when it is missing and the user
+  agrees. the reason rides with the rule: it is installed, and a playwright
+  setup downloads browsers and leaves processes behind.
+- cleanup: once the work is done and checked, what the session started
+  (jobs, servers, ptys, browser sessions) is stopped and what it created
+  (temporary files, scratch scripts, downloads, worktrees once merged or
+  dropped) is removed; what existed before and what it was asked to keep
+  stays. the base is the best practices guide's sample ("if you create any
+  temporary new files, scripts, or helper files for iteration, clean up these
+  files by removing them at the end of the task").
+- claims discipline and outcome-first reporting (short), closing with one
+  line on what was cleaned up and what was left running or on disk, when the
+  task started or created anything.
 - the security floor (owasp classes, secrets in worktrees).
 - appended per turn: env block (hostname, cwd, date), the model table, guide
   and rules from `routing.jsonc`, a helpers line (`helpers: 2 working, 1 parked; agents lists
