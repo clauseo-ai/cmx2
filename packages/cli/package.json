@@ -1,6 +1,6 @@
 {
   "name": "@cmx2/cli",
-  "version": "0.8.14",
+  "version": "0.8.15",
   "description": "the cmx2 command: run, serve, pair, doctor, upgrade and the terminal client launcher",
   "license": "MIT",
   "repository": {

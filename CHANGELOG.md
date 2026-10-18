@@ -2,7 +2,7 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
-## unreleased
+## 0.8.15 - 2026-10-18
 
 contract version 7. additive: `spawn` takes `why`, and `AgentInfo` and the `step_up` and `retry` metrics carry it.
 
