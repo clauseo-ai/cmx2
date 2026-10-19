@@ -4,7 +4,7 @@ import { readdir, realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { CONTRACT_VERSION, EVENTS, type EventType } from "@cmx2/contract";
 import { ActorError, Actors, agentTools, type Host, type SpawnInput } from "@cmx2/actors";
-import { type Config, ConfigError, configDir, dataDir as defaultDataDir, type Effort, loadConfig, loadConfigAsync, machineName } from "@cmx2/engine/config";
+import { type Config, ConfigError, configDir, dataDir as defaultDataDir, type Effort, loadConfig, loadConfigAsync, machineName, userNotes } from "@cmx2/engine/config";
 import { Routing } from "@cmx2/routing";
 import type { RequestAsk } from "@cmx2/engine/gates";
 import { ModelError, resolveModel } from "@cmx2/engine/models";
@@ -2553,6 +2553,8 @@ export function serve(opts: ServeOptions) {
 				const model = b.model ?? configFor(directory).model;
 				if (!routing.allowed(model, b.effort)) throw effortRefused(model, b.effort);
 			}
+			// a session the user starts ends its system prompt with their notes; a helper's (createChild) does not
+			const notes = userNotes();
 			let s: EngineSession;
 			try {
 				s = await EngineSession.create({
@@ -2566,6 +2568,7 @@ export function serve(opts: ServeOptions) {
 					nudge: b.nudge,
 					turnMessages: b.turn_messages,
 					cacheTtl: b.cache_ttl,
+					...(notes ? { systemExtra: notes } : {}),
 					...hooks(id, directory),
 				});
 			} catch (e) {

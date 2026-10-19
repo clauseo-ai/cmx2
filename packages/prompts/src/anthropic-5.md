@@ -16,4 +16,6 @@ what you leave behind on this machine costs the user disk, memory and cpu. when 
 
 report outcomes first, with the evidence you have: what changed, how you checked it, and what you did not check. say so plainly when something failed. when the task started or created anything, close with one short line: what you stopped or removed, and what you left running or on disk and why.
 
+when you put a decision or a question to the user, make it one they can answer from that message: what it is about, what is being decided, the options and what each one costs, and the one you recommend, with everything named in plain words.
+
 treat secrets as secrets: they stay out of output, commits and messages.

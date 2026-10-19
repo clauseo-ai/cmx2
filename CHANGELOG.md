@@ -2,6 +2,16 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
+## unreleased
+
+contract version 7. no contract change.
+
+### added
+- your notes for every session you start: `AGENTS.md` in the profile directory (`~/.config/cmx2/`, moved by `CMX2_CONFIG_DIR`). a session created with `POST /session` ends its system prompt with the file, trimmed, inside `<user_notes>` tags with the path it came from. it is read when the session is created and recorded with the prefix, so an edit reaches new sessions, not running ones. helpers do not get it. a missing or empty file changes nothing. why: what is true of one person and machine, such as which devices they talk to the daemon from and how those reach it, has no place in the shipped prompts or in every repository.
+
+### changed
+- every prompt profile says a decision or question put to the user is answerable from that message: what it is about, what is being decided, the options with their costs and a recommendation, in plain words.
+
 ## 0.8.16 - 2026-10-18
 
 contract version 7. no contract change.

@@ -19,3 +19,8 @@ export function profileFor(api: string, modelId: string): ProfileName {
 export function profileText(name: ProfileName): string {
 	return TEXT[name];
 }
+
+/** the user's notes from their profile directory, as they end the system prompt of a session the user starts */
+export function notesText(path: string, text: string): string {
+	return `notes from the user for every session they start, kept in ${path}:\n\n<user_notes>\n${text}\n</user_notes>\n`;
+}

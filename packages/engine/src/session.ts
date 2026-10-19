@@ -376,7 +376,7 @@ export interface EngineSessionOptions {
 	skills?: Skills;
 	/** the daemon's language servers, shared across sessions; one is made when absent */
 	lsp?: LspPool;
-	/** text appended to the profile's system prompt when the session is created (a helper's prompt fragment); recorded with the prefix */
+	/** text appended to the profile's system prompt when the session is created (a helper's prompt fragment, or the user's notes for a session they start); recorded with the prefix */
 	systemExtra?: string;
 	/** tools bound to this session beyond the core set (the agent verbs); declared with the hot tools */
 	extraTools?: Tool[];

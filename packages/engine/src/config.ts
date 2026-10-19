@@ -7,6 +7,7 @@ import { COMPACTION_DEFAULTS, type CompactionSettings } from "./compaction.ts";
 import { IMAGE_DEFAULTS, type ImageSettings } from "./images.ts";
 import { DEFAULT_PERMISSION, PERMISSION_ACTIONS, type PermissionConfig } from "./permission.ts";
 import { SEARCH_PROVIDERS, type SearchProviderName } from "@cmx2/tools/web";
+import { notesText } from "@cmx2/prompts";
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 export const EFFORTS: readonly Effort[] = ["low", "medium", "high", "xhigh", "max"];
@@ -156,6 +157,22 @@ export const DEFAULTS: Omit<Config, "sources"> = {
 
 export function configDir(env = process.env): string {
 	return env.CMX2_CONFIG_DIR || join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "cmx2");
+}
+
+/**
+ * the user's notes for the sessions they start: AGENTS.md in the profile directory, wrapped to end the system
+ * prompt. read when such a session is created and recorded with its prefix, so an edit reaches new sessions
+ * only; helpers do not get it. undefined when the file is missing or empty.
+ */
+export function userNotes(env = process.env): string | undefined {
+	const path = join(configDir(env), "AGENTS.md");
+	let text: string;
+	try {
+		text = readFileSync(path, "utf8").trim();
+	} catch {
+		return undefined;
+	}
+	return text ? notesText(path, text) : undefined;
 }
 
 export function dataDir(env = process.env): string {

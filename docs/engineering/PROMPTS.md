@@ -69,7 +69,19 @@ pi is the open source agent engine cmx2 builds on; cmx is its predecessor.
 - claims discipline and outcome-first reporting (short), closing with one
   line on what was cleaned up and what was left running or on disk, when the
   task started or created anything.
+- decisions: a decision or question put to the user is answerable from that
+  message: what it is about, what is being decided, the options with their
+  costs and a recommendation, in plain words. the text describes the message,
+  never what the user has or has not seen, since that tells the model what
+  goes unchecked.
 - the security floor (owasp classes, secrets in worktrees).
+- the user's notes last: `AGENTS.md` in the profile directory, read when a
+  session the user starts is created (`POST /session`), wrapped in
+  `<user_notes>` with its path, and recorded with the prefix, so the prefix
+  stays byte-stable and an edit reaches new sessions only. helpers do not get
+  it: they report to their spawner, not to the user. anything about one person
+  or machine (devices, hosts, how they reach the daemon) lives there, never in
+  a shipped prompt profile.
 - appended per turn: env block (hostname, cwd, date), the model table, guide
   and rules from `routing.jsonc`, a helpers line (`helpers: 2 working, 1 parked; agents lists
   them.`, only when the counts change), ledger, mailbox digest. the roster is

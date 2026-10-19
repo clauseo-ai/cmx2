@@ -21,6 +21,9 @@ mkdirSync(join(WORK, ".cmx2", "agent"), { recursive: true });
 mkdirSync(CONFIG, { recursive: true });
 // a pal that runs on opus: the agent type names the model, so a spawn of it needs none
 writeFileSync(join(WORK, ".cmx2", "agent", "pal.md"), "---\ndescription: a pal on opus\nmodel: opus\n---\nyou are a pal\n");
+// the user's notes in the profile: a session they start gets them, a helper does not
+const NOTES = `notes-${nonce()}`;
+writeFileSync(join(CONFIG, "AGENTS.md"), `\n${NOTES}\n\n`);
 const CONFIG_DIR_BEFORE = process.env.CMX2_CONFIG_DIR;
 process.env.CMX2_CONFIG_DIR = CONFIG;
 const PORT = port(4835);
@@ -224,5 +227,9 @@ describe("the spawn verb takes a model", () => {
 		const prefix = await api(`/session/${rev.id}/prefix`);
 		expect(prefix.bytes).toContain("your tools read, search and run commands; you do not change files.");
 		expect(prefix.bytes).not.toContain("seat");
+		// the profile's AGENTS.md ends the prompt of the session the user started, trimmed and wrapped, and of no helper
+		const rootPrefix = (await api(`/session/${id}/prefix`)).bytes as string;
+		expect(rootPrefix).toContain(`notes from the user for every session they start, kept in ${join(CONFIG, "AGENTS.md")}:\\n\\n<user_notes>\\n${NOTES}\\n</user_notes>`);
+		for (const helper of [rev, look]) expect((await api(`/session/${helper.id}/prefix`)).bytes).not.toContain("user_notes");
 	}, 90_000);
 });

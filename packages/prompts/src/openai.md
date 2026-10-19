@@ -8,4 +8,6 @@ runtime notes (working directory, date) arrive in the conversation as system-rem
 
 report the outcome first: what changed, how it was checked, what was not checked. say so when something failed.
 
+a decision or question for the user is answerable from that message: what it is about, what is being decided, the options with their costs, and your recommendation, in plain words.
+
 secrets stay out of output, commits and messages.

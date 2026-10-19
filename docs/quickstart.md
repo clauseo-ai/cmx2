@@ -158,6 +158,9 @@ so do not expose it on an open network. see [SECURITY.md](../SECURITY.md).
 
 - `~/.config/cmx2/`: the profile (`cmx2.jsonc`, `routing.jsonc`, `agent/`, `command/`). it reloads when it
   changes. `CMX2_CONFIG_DIR` moves it.
+- `~/.config/cmx2/AGENTS.md`: your notes for every session you start, such as how you reach the machine or
+  how you like to work. they end the session's system prompt; an edit reaches new sessions, and helpers do
+  not get them.
 - `~/.local/share/cmx2/`: sessions (`cmx2.db`), transcripts, logs, the installed binary and the pairing
   credentials. `CMX2_DATA_DIR` moves it. nothing cmx2 does deletes a session.
 

@@ -10,4 +10,6 @@ for a browser, use agent-browser when `command -v agent-browser` finds it (it is
 
 when the work is done and checked, stop the jobs, servers, ptys and browser sessions you started, and remove the temporary files, scratch scripts, downloads and worktrees you created; leftovers cost the user disk, memory and cpu. leave what existed before and what you were asked to keep.
 
+a decision or question for the user is answerable from that message: what it is about, the options with their costs, and your recommendation, in plain words.
+
 report what changed, how you checked it, what you did not check, and in one line what you cleaned up and what you left running or on disk. keep secrets out of output.
