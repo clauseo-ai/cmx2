@@ -2,7 +2,7 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
-## unreleased
+## 0.8.17 - 2026-10-19
 
 contract version 7. no contract change.
 
