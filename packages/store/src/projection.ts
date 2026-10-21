@@ -360,6 +360,7 @@ export function closeIfDone(store: Store, messageId: string, at: number): boolea
 	if (running.n > 0) return false;
 	const info = JSON.parse(m.info);
 	info.time = { ...info.time, completed: at };
+	store.noteTranscriptWrite(messageId);
 	store.db.query("update message set completed_at = ?, info = ? where id = ?").run(at, JSON.stringify(info), messageId);
 	return true;
 }
@@ -371,6 +372,7 @@ export function closeOpenSteps(store: Store, sessionId: string, at: number): str
 		const m = store.message(id)!;
 		const info = JSON.parse(m.info);
 		info.time = { ...info.time, completed: at };
+		store.noteTranscriptWrite(id);
 		store.db.query("update message set completed_at = ?, info = ? where id = ?").run(at, JSON.stringify(info), id);
 	}
 	return open.map((o) => o.id);
@@ -485,6 +487,16 @@ function row(sessionId: string, seq: number, role: string, created: number, comp
  */
 export function projectTranscript(store: Store, sessionId: string, path: string, cwd: string, opts: { all?: boolean } = {}): number {
 	if (!existsSync(path)) return 0;
+	// one transaction: the rows a replay changes and the transcript revision they move commit together (protocol 14a); a
+	// replay that only rewrites what is stored leaves the revision where it was, so a read never moves it
+	return store.db.transaction(() => {
+		const { result, changed } = store.trackTranscript(() => replayTranscript(store, sessionId, path, cwd, opts));
+		if (changed) store.bumpTranscriptRev(sessionId);
+		return result;
+	})();
+}
+
+function replayTranscript(store: Store, sessionId: string, path: string, cwd: string, opts: { all?: boolean }): number {
 	const have = store.lastMessageSeq(sessionId);
 	// what this process saw of the file last time (kept in memory, so the first read after a restart pays once):
 	// the same size, mtime and last row means the replay below would rewrite rows with what they hold

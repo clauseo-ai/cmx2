@@ -356,6 +356,8 @@ export type SessionInfo = {
 			deletions: number;
 		};
 	};
+	/** the session's transcript revision: 0 for a new session, persisted with it, and moved on (never back) in the same transaction as every write that changes what GET /session/:id/message answers, streamed text aside: a message landed or updated, a part created or replaced, a message removed (taken back, a queued prompt that failed, a provisional message swapped for its committed one, a revert made permanent), a revert and its undo, a compaction summary. status, idle, model, title, archive, message.part.delta and a shell's tail leave it. on every rest answer that returns a session; on session.created and session.updated only for a stream that asks with rev=1. imported history stays at 0, and a session that had history before the revision existed starts at 0 too: 0 does not mean empty, and a client with no revision stored for a session reads it */
+	transcriptRev?: number;
 };
 
 /** opencode-shaped message info; assistant messages add modelID, providerID, cost, tokens, finish, variant (effort) */
@@ -676,6 +678,8 @@ export interface EventMap {
 					deletions: number;
 				};
 			};
+			/** the session's transcript revision: 0 for a new session, persisted with it, and moved on (never back) in the same transaction as every write that changes what GET /session/:id/message answers, streamed text aside: a message landed or updated, a part created or replaced, a message removed (taken back, a queued prompt that failed, a provisional message swapped for its committed one, a revert made permanent), a revert and its undo, a compaction summary. status, idle, model, title, archive, message.part.delta and a shell's tail leave it. on every rest answer that returns a session; on session.created and session.updated only for a stream that asks with rev=1. imported history stays at 0, and a session that had history before the revision existed starts at 0 too: 0 does not mean empty, and a client with no revision stored for a session reads it */
+			transcriptRev?: number;
 		};
 	};
 	/** the session's model changed (the picker); applies from the next turn (v1) */
@@ -819,12 +823,16 @@ export interface EventMap {
 		sessionID: string;
 		/** opencode-shaped message info; assistant messages add modelID, providerID, cost, tokens, finish, variant (effort) */
 		info: MessageInfo;
+		/** the session's transcriptRev after this write; only on a stream that asks with rev=1 */
+		rev?: number;
 	};
 	/** a part was created or changed (a tool call running, then completed). every text and reasoning part of a streaming message is announced when it starts, before its first delta: this event with empty text and streaming true, logged like any other, in content order; its final update carries the whole text, no streaming, and time {start, end}, and is published when that part's block ends (a reasoning part when the reply begins), not when the step does; the step's end publishes it again, the same text and time.end. a running shell's output tail (state.metadata.output on its running tool part, at most once a second, numbered by state.metadata.progress) goes out unnumbered and is not logged; reads carry the latest tail and a resume gets it at its seam, not every tick, so a client that buffers frames until its read lands orders tails by progress, not by seq (v1) */
 	"message.part.updated": {
 		sessionID: string;
 		/** opencode-shaped part, discriminated on type. step-start, step-finish, patch and subtask appear in imported (source cmx) history only */
 		part: Part;
+		/** the session's transcriptRev after this write; only on a stream that asks with rev=1 */
+		rev?: number;
 	};
 	/** streamed text for a text or reasoning part that was announced (a message.part.updated with streaming true); never sent to a part that was not (v1) */
 	"message.part.delta": {
@@ -847,10 +855,12 @@ export interface EventMap {
 		/** lines this edit or write removed */
 		deletions?: number;
 	};
-	/** a queued prompt was taken back before the model saw it (v1) */
+	/** a message left the transcript's reads: a queued prompt taken back before the model saw it or that failed to start, a provisional message swapped for its committed one, or a message a revert made permanent (v1) */
 	"message.removed": {
 		sessionID: string;
 		messageID: string;
+		/** the session's transcriptRev after this write; only on a stream that asks with rev=1 */
+		rev?: number;
 	};
 	/** a / command ran as a prompt (v1) */
 	"command.executed": {

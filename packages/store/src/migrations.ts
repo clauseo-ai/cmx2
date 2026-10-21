@@ -302,4 +302,9 @@ export const MIGRATIONS: readonly string[] = [
 	// 12 · putRecall deletes a message's rows before it writes them again; without this index that is a scan of
 	// the whole recall table, on the main thread, for every message projected
 	`create index recall_doc_message_idx on recall_doc (message_id)`,
+	// 13 · the transcript revision (boxbox protocol 14a): a per-session counter every transcript write moves, and the
+	// revision each logged message or session event carried. existing sessions start at 0: no client has seen a revision
+	// before this column, and it only grows from here
+	`alter table session add column transcript_rev integer not null default 0;
+	 alter table event_log add column rev integer`,
 ];

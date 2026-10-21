@@ -14,6 +14,8 @@ export interface StreamSwitches {
 	compact: boolean;
 	/** gzip the stream (`gzip=1` and `Accept-Encoding: gzip`) */
 	gzip: boolean;
+	/** the transcript revision on message and session events (`rev=1`, protocol 14a) */
+	rev?: boolean;
 }
 
 /** the only batch window there is: boxbox's 100 ms. other values are not offered */
@@ -40,6 +42,7 @@ export function acceptsGzip(header: string | null | undefined): boolean {
 export function switchesOf(url: URL, headers: Headers): StreamSwitches {
 	const s: StreamSwitches = { compact: on(url.searchParams.get("compact")), gzip: on(url.searchParams.get("gzip")) && acceptsGzip(headers.get("accept-encoding")) };
 	if (url.searchParams.get("coalesce") === String(COALESCE_MS)) s.coalesce = COALESCE_MS;
+	if (on(url.searchParams.get("rev"))) s.rev = true;
 	const types = url.searchParams.get("types");
 	if (types) s.types = new Set(types.split(",").map((t) => t.trim()).filter(Boolean));
 	return s;

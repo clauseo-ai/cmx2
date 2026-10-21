@@ -47,7 +47,8 @@ function parse(s: string): Record<string, unknown> {
 export function exportSession(store: Store, id: string, opts: { cmx2?: string } = {}): SessionExport {
 	const s = store.session(id);
 	if (!s) throw new ExportError(`there is no session ${id} in ${store.path}; cmx2 session list shows the ids`);
-	const { session_file, archived_at: _a, ...session } = s;
+	// the transcript revision belongs to this store's writes; an import starts its own at 0
+	const { session_file, archived_at: _a, transcript_rev: _r, ...session } = s;
 	const messages: ExportedMessage[] = [];
 	let before: number | undefined;
 	// newest page first, 200 at a time, so a long session never sits in memory twice as rows and json

@@ -1138,6 +1138,10 @@
 							}
 						},
 						"description": "an armed revert: the files are back as they were before messageID"
+					},
+					"transcriptRev": {
+						"type": "integer",
+						"description": "the session's transcript revision: 0 for a new session, persisted with it, and moved on (never back) in the same transaction as every write that changes what GET /session/:id/message answers, streamed text aside: a message landed or updated, a part created or replaced, a message removed (taken back, a queued prompt that failed, a provisional message swapped for its committed one, a revert made permanent), a revert and its undo, a compaction summary. status, idle, model, title, archive, message.part.delta and a shell's tail leave it. on every rest answer that returns a session; on session.created and session.updated only for a stream that asks with rev=1. imported history stays at 0, and a session that had history before the revision existed starts at 0 too: 0 does not mean empty, and a client with no revision stored for a session reads it"
 					}
 				},
 				"description": "opencode-compatible session info plus cmx2's fields"
@@ -2566,6 +2570,10 @@
 											}
 										},
 										"description": "an armed revert: the files are back as they were before messageID"
+									},
+									"transcriptRev": {
+										"type": "integer",
+										"description": "the session's transcript revision: 0 for a new session, persisted with it, and moved on (never back) in the same transaction as every write that changes what GET /session/:id/message answers, streamed text aside: a message landed or updated, a part created or replaced, a message removed (taken back, a queued prompt that failed, a provisional message swapped for its committed one, a revert made permanent), a revert and its undo, a compaction summary. status, idle, model, title, archive, message.part.delta and a shell's tail leave it. on every rest answer that returns a session; on session.created and session.updated only for a stream that asks with rev=1. imported history stays at 0, and a session that had history before the revision existed starts at 0 too: 0 does not mean empty, and a client with no revision stored for a session reads it"
 									}
 								},
 								"description": "opencode-compatible session info plus cmx2's fields"
@@ -3497,6 +3505,10 @@
 							},
 							"info": {
 								"$ref": "#/components/schemas/MessageInfo"
+							},
+							"rev": {
+								"type": "integer",
+								"description": "the session's transcriptRev after this write; only on a stream that asks with rev=1"
 							}
 						}
 					},
@@ -3539,6 +3551,10 @@
 							},
 							"part": {
 								"$ref": "#/components/schemas/Part"
+							},
+							"rev": {
+								"type": "integer",
+								"description": "the session's transcriptRev after this write; only on a stream that asks with rev=1"
 							}
 						}
 					},
@@ -3665,7 +3681,7 @@
 			},
 			"Event_message_removed": {
 				"type": "object",
-				"description": "a queued prompt was taken back before the model saw it",
+				"description": "a message left the transcript's reads: a queued prompt taken back before the model saw it or that failed to start, a provisional message swapped for its committed one, or a message a revert made permanent",
 				"x-cmx2-version": 1,
 				"required": [
 					"id",
@@ -3692,6 +3708,10 @@
 							},
 							"messageID": {
 								"type": "string"
+							},
+							"rev": {
+								"type": "integer",
+								"description": "the session's transcriptRev after this write; only on a stream that asks with rev=1"
 							}
 						}
 					},
@@ -6685,6 +6705,16 @@
 						}
 					},
 					{
+						"name": "rev",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"const": "1",
+							"description": "the transcript revision on the events that move or carry it: properties.rev (the session's revision after the write) on message.updated, message.part.updated and message.removed, and transcriptRev as the last field of the session info on session.created and session.updated. each logged message.updated, message.part.updated and message.removed moves its session's revision by one; an unnumbered message.part.updated (a shell's tail, a streaming part resent at a resume's seam) carries the revision as it stands. a stream that does not ask gets the events without them, byte for byte"
+						}
+					},
+					{
 						"name": "gzip",
 						"in": "query",
 						"required": false,
@@ -6780,6 +6810,16 @@
 							"type": "string",
 							"const": "1",
 							"description": "on a resume from a cursor (and the catch-up after a stream is held at the cap), skip the state events between the first and the last of each key instead of sending every event since the cursor. the keys: session.updated per session, session.status per session and status type (busy, idle, retry: a status is never skipped for a later one of another type, so busy then idle both come), message.updated per message, message.part.updated per part, project.updated per project. the first and the last of each key always come, so a message's first message.updated still comes before its parts; one between them is skipped only when the last has every field it had. every other event is kept, and everything in seq order; the final state equals a full replay's for a client that upserts or merges state. live events are never compacted"
+						}
+					},
+					{
+						"name": "rev",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"const": "1",
+							"description": "the transcript revision on the events that move or carry it: properties.rev (the session's revision after the write) on message.updated, message.part.updated and message.removed, and transcriptRev as the last field of the session info on session.created and session.updated. each logged message.updated, message.part.updated and message.removed moves its session's revision by one; an unnumbered message.part.updated (a shell's tail, a streaming part resent at a resume's seam) carries the revision as it stands. a stream that does not ask gets the events without them, byte for byte"
 						}
 					},
 					{
@@ -10576,6 +10616,12 @@
 								"schema": {
 									"type": "string"
 								}
+							},
+							"x-cmx2-rev": {
+								"description": "the session's transcriptRev the body reflects, read with the body and x-cmx2-seq in one step: at least the revision of the last counted event at or before that cursor (a heal of the rows from the transcript, or a landing that failed part way, moves it with no event)",
+								"schema": {
+									"type": "string"
+								}
 							}
 						}
 					},
@@ -10903,6 +10949,12 @@
 						"headers": {
 							"x-cmx2-seq": {
 								"description": "the cursor (<epoch>:<seq>) of the last event this state includes; apply only events after it",
+								"schema": {
+									"type": "string"
+								}
+							},
+							"x-cmx2-rev": {
+								"description": "the session's transcriptRev the body reflects, read with the body and x-cmx2-seq in one step: at least the revision of the last counted event at or before that cursor (a heal of the rows from the transcript, or a landing that failed part way, moves it with no event)",
 								"schema": {
 									"type": "string"
 								}

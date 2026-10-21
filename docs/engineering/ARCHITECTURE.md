@@ -278,6 +278,45 @@ them:
   them into one deflate stream a decoder reads frame by frame; the end writes
   the gzip trailer. it runs synchronously, so the 1 MB cap and the stall
   judge count compressed bytes on the socket (plus at most one batch).
+- `rev=1`: the transcript revision on the events that move or carry it
+  (below). a logged `message.updated`, `message.part.updated` or
+  `message.removed` gets `properties.rev`, a session event gets
+  `transcriptRev` as the last field of its info, both spliced into the
+  stored text, so every other stream's bytes are untouched. an unnumbered
+  `message.part.updated` (a shell's tail, a part resent at the seam) carries
+  the revision as it stands.
+
+### the transcript revision
+
+`transcriptRev` (boxbox protocol 14a) is a per-session counter in
+`session.transcript_rev`: 0 for a new session, persisted, never lowered. it
+tells a client whether a re-read of `GET /session/:id/message` could differ
+from what it holds. each logged `message.updated`, `message.part.updated`
+and `message.removed` moves it by one in the transaction that logs the event
+(`publish`; inside a landed message's transaction, a savepoint of it, so the
+rows, the event and the revision commit together), and `event_log.rev`
+keeps the revision for replays. that covers a message landed or updated, a
+part started, ended or replaced (a tool's result), a queued prompt shown,
+taken back, failed or swapped for its committed message, a revert made
+permanent (each parked message's `message.removed` goes out from the revert
+line's landing) and a compaction summary. a revert armed or undone moves it
+with the `session_state` write. a transcript replay (a heal on read or open)
+moves it once, in its transaction, only when a message it wrote ends
+different (`Store.trackTranscript`); a replay that rewrites what is stored
+leaves it, so reads never move it. at start the daemon heals, before
+anything runs, each session whose transcript was written after it was last
+touched (a crash between the engine's line and the landing's commit) or
+whose rows name another directory than the session's (a merged checkout),
+and says a move with `session.updated`. a landing that throws part way
+commits what it wrote and moves the revision too. text deltas, shell tails, status, idle,
+model, title and archive do not. every rest answer that returns a session
+carries it; message reads answer `x-cmx2-rev`, read in the step that reads
+the body and stamps `x-cmx2-seq`, so it is at least the revision of the last
+counted event at or before that cursor (a heal or a failed landing moves it
+with no event). imported history is always 0, and so is every session that
+had history before the column: 0 does not mean empty. the migration
+that added the column started existing sessions at 0: no client had a
+revision to compare before it, and it only grows from there.
 
 frames are built once per kind of stream (directory or global) and shared,
 except deltas and frames to a stream held at the cap, which each stream

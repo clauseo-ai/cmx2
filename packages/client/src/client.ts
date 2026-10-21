@@ -39,6 +39,8 @@ export interface Page<T> {
 	next?: string;
 	/** the x-cmx2-seq header on reads: the cursor of the last event this state includes */
 	seq?: string;
+	/** the x-cmx2-rev header on message reads: the session's transcript revision the body reflects */
+	rev?: number;
 }
 
 export interface BytesOptions extends CallOptions {
@@ -105,7 +107,8 @@ export function createClient(opts: ClientOptions) {
 		if (!res.ok) throw new Cmx2Error(res.status, json?.name ?? "UnknownError", json?.data ?? { message: text || res.statusText });
 		const next = res.headers.get("x-next-cursor") ?? undefined;
 		const seq = res.headers.get("x-cmx2-seq") ?? undefined;
-		return { data: json as T, ...(next ? { next } : {}), ...(seq ? { seq } : {}) };
+		const rev = res.headers.get("x-cmx2-rev");
+		return { data: json as T, ...(next ? { next } : {}), ...(seq ? { seq } : {}), ...(rev ? { rev: Number(rev) } : {}) };
 	}
 	/** a route whose answer is a file's bytes: the bytes with the type and etag they came with; a 304 has no bytes */
 	async function callBytes(path: string, query: Record<string, unknown> | undefined, o: BytesOptions = {}): Promise<FileBytes> {

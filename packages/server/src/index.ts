@@ -12,7 +12,7 @@ import { Transcript } from "@cmx2/engine/transcript";
 import { evaluate, type PermissionRule, rulesFromConfig, subagentEnv } from "@cmx2/engine/permission";
 import { BusyError, EngineSession, type EngineEvent, type MailRecord, type StepRow, type TurnEvent, type UserBlock } from "@cmx2/engine/session";
 import { defaultSkillDirs, LspPool, McpPool, resizeImage, runCommand, Skills } from "@cmx2/tools";
-import { closeOpenSteps, decodeCursor, documentPart, encodeCursor, messageId, partId, projectMessage, projectTranscript, type SessionQuery, type SessionStateInfo, Store, type StoredSession } from "@cmx2/store";
+import { closeOpenSteps, decodeCursor, documentPart, encodeCursor, messageId, partId, projectMessage, projectTranscript, type SessionQuery, type SessionRevert, type SessionStateInfo, Store, type StoredSession } from "@cmx2/store";
 import { Value } from "typebox/value";
 import { Asks, permissionJson, questionJson, type ReplyOutcome } from "./asks.ts";
 import { Catalog, expandTemplate, providersJson } from "./catalog.ts";
@@ -57,6 +57,8 @@ const SERVER_EVENTS = new Set(["server.connected", "server.heartbeat", "global.d
 /** frames that change no state, or stream too fast to keep: never logged, never numbered (a1) */
 const UNLOGGED = new Set([...SERVER_EVENTS, "message.part.delta"]);
 /** the replay window: an event is kept while it is inside either bound (30 minutes or 10,000 events, whichever keeps more) */
+/** sessions the start's heal looks at between yields to the loop */
+const HEAL_PAGE = 16;
 export const EVENT_WINDOW = { events: 10_000, ms: 30 * 60_000 };
 /** what one subscriber may fall behind before its stream is closed; the client resumes from its last id */
 export const STREAM_CAP_BYTES = 1024 * 1024;
@@ -89,8 +91,30 @@ const REPLAY_PAGE = 500;
 /** a client id binds a request for this long */
 const CLIENT_ID_MS = 24 * 3_600_000;
 
-/** one logged event as stored; frames are rendered from this, live and on replay alike, so both are byte-identical */
-type Logged = { seq: number; directory: string; project: string | null; type: string; properties: string };
+/**
+ * one logged event as stored; frames are rendered from this, live and on replay alike, so both are byte-identical. rev:
+ * the transcript revision a rev=1 stream sees on it (properties.rev, or the session info's transcriptRev), null for none
+ */
+type Logged = { seq: number; directory: string; project: string | null; type: string; properties: string; rev?: number | null };
+/** logged events that count a transcript write: each moves its session's revision by one (protocol 14a) */
+const REV_COUNTED = new Set(["message.updated", "message.part.updated", "message.removed"]);
+/** logged events whose session info carries the revision to a rev=1 stream */
+const REV_SESSION = new Set(["session.created", "session.updated"]);
+
+/**
+ * properties as a rev=1 stream gets them: the revision spliced in as the last field (properties.rev on a message event,
+ * info.transcriptRev on a session event), so the rest of the text is the bytes every other stream gets
+ */
+export function withRev(type: string, properties: string, rev: number | null | undefined): string {
+	if (rev === null || rev === undefined) return properties;
+	if (REV_SESSION.has(type)) {
+		// {"sessionID":...,"info":{...}}: info is the last field and never empty
+		if (properties.endsWith("}}")) return `${properties.slice(0, -2)},"transcriptRev":${rev}}}`;
+		const p = JSON.parse(properties);
+		return JSON.stringify({ ...p, info: { ...p.info, transcriptRev: rev } });
+	}
+	return properties === "{}" ? `{"rev":${rev}}` : `${properties.slice(0, -1)},"rev":${rev}}`;
+}
 type Delta = { sessionID: string; messageID: string; partID: string; field: string; delta: string; offset: number };
 /** a text or reasoning part of the message being streamed: announced at its start, its text grows with each delta */
 type StreamingPart = { index: number; type: "text" | "reasoning"; text: string; start: number; end?: number };
@@ -607,13 +631,13 @@ export function serve(opts: ServeOptions) {
 	}
 
 	/** an unnumbered payload: server frames, deltas and streaming resends */
-	function unloggedPayload(type: string, properties: Record<string, unknown>): string {
-		return JSON.stringify({ id: `evt_${Date.now().toString(36)}_${++eventSeq}`, type, properties });
+	function unloggedPayload(type: string, properties: Record<string, unknown>, rev?: number): string {
+		return JSON.stringify({ id: `evt_${Date.now().toString(36)}_${++eventSeq}`, type, properties: rev === undefined ? properties : { ...properties, rev } });
 	}
 
-	/** a logged payload; the id, the seq and the epoch name the same point in the log */
-	function loggedPayload(e: Logged): string {
-		return `{"id":"${epoch}:${e.seq}","type":${JSON.stringify(e.type)},"properties":${e.properties},"seq":${e.seq},"epoch":"${epoch}"}`;
+	/** a logged payload; the id, the seq and the epoch name the same point in the log. rev: as a rev=1 stream gets it */
+	function loggedPayload(e: Logged, rev = false): string {
+		return `{"id":"${epoch}:${e.seq}","type":${JSON.stringify(e.type)},"properties":${rev ? withRev(e.type, e.properties, e.rev) : e.properties},"seq":${e.seq},"epoch":"${epoch}"}`;
 	}
 
 	/** /global/event wraps a payload with where it happened; server frames carry no directory */
@@ -629,10 +653,17 @@ export function serve(opts: ServeOptions) {
 	 * back at the cap builds its own, as every stream did before: the judge's looks at a held peer come one per withheld
 	 * frame while a burst holds the loop, so the work per frame paces them and stays as it was
 	 */
-	function shared(build: (global: boolean) => string): (sub: Subscriber) => string {
+	function shared(build: (global: boolean, rev: boolean) => string): (sub: Subscriber) => string {
 		let scoped: string | undefined;
 		let global: string | undefined;
-		return (sub) => (sub.lagging ? build(!sub.directory) : sub.directory ? (scoped ??= build(false)) : (global ??= build(true)));
+		let scopedRev: string | undefined;
+		let globalRev: string | undefined;
+		return (sub) => {
+			const rev = !!sub.switches?.rev;
+			if (sub.lagging) return build(!sub.directory, rev);
+			if (rev) return sub.directory ? (scopedRev ??= build(false, true)) : (globalRev ??= build(true, true));
+			return sub.directory ? (scoped ??= build(false, false)) : (global ??= build(true, false));
+		};
 	}
 
 	/** one logged event as an sse frame for this subscriber: `id:` then the body, byte-identical on every send */
@@ -641,8 +672,8 @@ export function serve(opts: ServeOptions) {
 	}
 
 	function loggedFrames(e: Logged): (sub: Subscriber) => string {
-		return shared((global) => {
-			const p = loggedPayload(e);
+		return shared((global, rev) => {
+			const p = loggedPayload(e, rev);
 			return `id: ${epoch}:${e.seq}\ndata: ${global ? envelope(e.directory, e.project, p) : p}\n\n`;
 		});
 	}
@@ -651,10 +682,16 @@ export function serve(opts: ServeOptions) {
 		return unloggedFrames(type, properties, directory, id)(sub);
 	}
 
-	/** an unnumbered event's frames (each kind of stream numbers its payload once) */
+	/**
+	 * an unnumbered event's frames (each kind of stream numbers its payload once). an unnumbered message.part.updated (a
+	 * shell's tail, a streaming part resent at a resume's seam) carries the session's revision now to a rev=1 stream: it
+	 * moves nothing, so the revision is the one the stream's last counted event said
+	 */
 	function unloggedFrames(type: string, properties: Record<string, unknown>, directory: string | null, id?: string): (sub: Subscriber) => string {
-		return shared((global) => {
-			const p = unloggedPayload(type, properties);
+		let rev: number | undefined;
+		const revOf = () => (rev ??= store.transcriptRev(String(properties.sessionID)));
+		return shared((global, withRev) => {
+			const p = unloggedPayload(type, properties, withRev && type === "message.part.updated" && typeof properties.sessionID === "string" ? revOf() : undefined);
 			const body = global ? envelope(SERVER_EVENTS.has(type) ? null : directory, directory && directory !== "global" && !SERVER_EVENTS.has(type) ? projectFor(directory) : null, p) : p;
 			return `${id ? `id: ${id}\n` : ""}data: ${body}\n\n`;
 		});
@@ -664,7 +701,7 @@ export function serve(opts: ServeOptions) {
 		return (!sub.directory || sub.directory === directory || SERVER_EVENTS.has(type)) && wants(sub.switches, type);
 	}
 
-	function publish<T extends EventType>(directory: string, type: T, properties: Record<string, unknown>, how?: { unlogged?: true }) {
+	function publish<T extends EventType>(directory: string, type: T, properties: Record<string, unknown>, how?: { unlogged?: true; rev?: number }) {
 		if (opts.checkEvents) {
 			const def = EVENTS[type];
 			if (!def) {
@@ -676,6 +713,7 @@ export function serve(opts: ServeOptions) {
 				console.error(`contract violation: ${type} ${e?.instancePath ?? ""} ${e?.message ?? ""} ${JSON.stringify(properties).slice(0, 300)}`);
 			}
 		}
+		const rev = how?.rev;
 		if (UNLOGGED.has(type) || how?.unlogged) {
 			// live subscribers only: a stream still replaying gets deltas' text from the streaming resend at its seam
 			if (type === "message.part.delta" && !holding) return publishDelta(directory, properties as Delta);
@@ -694,7 +732,18 @@ export function serve(opts: ServeOptions) {
 		flushBurst();
 		// the log write and the fan-out happen in one synchronous step: a read (a2) or a replay's seam sees both or neither
 		const e: Logged = { seq: 0, directory, project: directory === "global" ? null : projectFor(directory), type, properties: JSON.stringify(properties) };
-		e.seq = store.appendEvent({ at: Date.now(), directory: e.directory, project: e.project, type: e.type, properties: e.properties });
+		const sid = typeof properties.sessionID === "string" ? properties.sessionID : undefined;
+		if (sid && REV_COUNTED.has(type)) {
+			// a counted write: the session's revision moves in the transaction its event is logged in (inside a landed
+			// message's, a savepoint of it), so the log never holds an event whose revision did not commit, nor the reverse
+			store.db.transaction(() => {
+				e.rev = store.bumpTranscriptRev(sid);
+				e.seq = store.appendEvent({ at: Date.now(), directory: e.directory, project: e.project, type: e.type, properties: e.properties, rev: e.rev });
+			})();
+		} else {
+			if (sid && REV_SESSION.has(type)) e.rev = rev ?? store.transcriptRev(sid);
+			e.seq = store.appendEvent({ at: Date.now(), directory: e.directory, project: e.project, type: e.type, properties: e.properties, rev: e.rev ?? null });
+		}
 		head = e.seq;
 		const fan = () => {
 			const frame = loggedFrames(e);
@@ -1376,6 +1425,8 @@ export function serve(opts: ServeOptions) {
 				const queued = live?.queued ?? 0;
 				return parked || queued ? { status: { type: "idle" as const, ...(parked ? { parked } : {}), ...(queued ? { queued } : {}) } } : {};
 			})()),
+			// protocol 14a: on every rest answer; a session event carries it only to a rev=1 stream (see publish)
+			transcriptRev: row.transcript_rev ?? 0,
 		};
 	}
 
@@ -1389,9 +1440,11 @@ export function serve(opts: ServeOptions) {
 	 * a landed message's writes (projection rows, its logged events, the session touch) in one transaction.
 	 * its events reach subscribers only after the commit, so no client holds a seq a rollback could hand out
 	 * again. a throw part way still commits what was written before it, as separate writes did; the error
-	 * goes on after the commit and the sends.
+	 * goes on after the commit and the sends. a throw also moves the session's transcript revision before the commit:
+	 * rows written before it commit without the events that would have counted them, so the revision says a read may
+	 * differ (protocol 14a; at worst a move with nothing changed)
 	 */
-	function landed(fn: () => void) {
+	function landed(fn: () => void, sessionID?: string) {
 		let failed: { e: unknown } | undefined;
 		const before = head;
 		const held: Array<() => void> = [];
@@ -1402,6 +1455,7 @@ export function serve(opts: ServeOptions) {
 					fn();
 				} catch (e) {
 					failed = { e };
+					if (sessionID) store.bumpTranscriptRev(sessionID);
 				}
 			})();
 		} catch (e) {
@@ -1483,7 +1537,10 @@ export function serve(opts: ServeOptions) {
 		load: (dir) => vcs.load(dir),
 		emit: (type, id) => {
 			const r = store.session(id);
-			if (r) publish(r.directory, type, { sessionID: id, info: info(r) });
+			if (!r) return;
+			// the revision rides as the last field of info to a rev=1 stream only; every other stream gets today's info
+			const { transcriptRev, ...rest } = info(r);
+			publish(r.directory, type, { sessionID: id, info: rest }, { rev: transcriptRev });
 		},
 	});
 
@@ -1604,7 +1661,7 @@ export function serve(opts: ServeOptions) {
 			vcs.forget(dir);
 			for (const f of files) publish(dir, "file.edited", { sessionID: id, file: join(dir, f) });
 		}
-		store.setRevert(id, { messageID, ...(partID ? { partID } : {}), seq, ...(snapshot ? { snapshot } : {}), files, ...(diff ? { diff } : {}) });
+		armRevert(id, { messageID, ...(partID ? { partID } : {}), seq, ...(snapshot ? { snapshot } : {}), files, ...(diff ? { diff } : {}) });
 		await loadVcs([row(id)]);
 		publishSession("session.updated", id);
 		return info(row(id));
@@ -1621,10 +1678,18 @@ export function serve(opts: ServeOptions) {
 			vcs.forget(stored.directory);
 			for (const f of armed.files) publish(stored.directory, "file.edited", { sessionID: id, file: join(stored.directory, f) });
 		}
-		store.setRevert(id, null);
+		armRevert(id, null);
 		await loadVcs([row(id)]);
 		publishSession("session.updated", id);
 		return info(row(id));
+	}
+
+	/** a revert armed or undone moves the transcript revision in the transaction that writes it (protocol 14a); session.updated says so */
+	function armRevert(id: string, revert: SessionRevert | null) {
+		store.db.transaction(() => {
+			store.setRevert(id, revert);
+			store.bumpTranscriptRev(id);
+		})();
 	}
 
 	/** a send to a session with an armed revert makes it permanent: the parked messages leave the context and every list */
@@ -1633,11 +1698,9 @@ export function serve(opts: ServeOptions) {
 		if (!armed) return;
 		const s = await open(id);
 		if (s.state === "busy") return;
-		const stored = row(id);
-		const parked = store.db.query("select id from message where session_id = ? and seq >= ? and reverted = 0").all(id, armed.seq) as Array<{ id: string }>;
+		// the parked messages' message.removed go out from the revert line's landing (onMessage), in its transaction
 		s.revert(armed.seq);
 		store.setRevert(id, null);
-		for (const p of parked) publish(stored.directory, "message.removed", { sessionID: id, messageID: p.id });
 		publishSession("session.updated", id);
 	}
 
@@ -1828,10 +1891,13 @@ export function serve(opts: ServeOptions) {
 					inflight.delete(id);
 					forgetProgress(id);
 					vcs.forget(directory);
-					for (const mid of closeOpenSteps(store, id, Date.now())) {
-						const m = store.message(mid);
-						if (m) publish(directory, "message.updated", { sessionID: id, info: JSON.parse(m.info) });
-					}
+					// the closes and their events (and the revisions they move) commit as one
+					landed(() => {
+						for (const mid of closeOpenSteps(store, id, Date.now())) {
+							const m = store.message(mid);
+							if (m) publish(directory, "message.updated", { sessionID: id, info: JSON.parse(m.info) });
+						}
+					}, id);
 				}
 				if (e.type === "session.compacted") {
 					// boxbox finds the pit stop's kept tail by message id
@@ -1916,7 +1982,11 @@ export function serve(opts: ServeOptions) {
 				if (typeof provisional === "string") publish(directory, "message.removed", { sessionID: id, messageID: provisional });
 				// the streamed message has landed; from here the projection holds it
 				if ((message as { role?: string }).role === "assistant" && inflight.get(id)?.info.id === messageId(id, seq)) inflight.delete(id);
+				// a revert made permanent: the messages it parks leave every list, each said with message.removed in this transaction
+				const from = (message as { role?: string; from?: unknown }).role === "revert" ? (message as { from?: unknown }).from : undefined;
+				const parked = typeof from === "number" ? (store.db.query("select id from message where session_id = ? and seq >= ? and reverted = 0").all(id, from) as Array<{ id: string }>) : [];
 				const touched = projectMessage(store, { sessionId: id, cwd: directory, seq, completedAt: Date.now() }, message);
+				for (const p of parked) publish(directory, "message.removed", { sessionID: id, messageID: p.id });
 				if (touched.message) {
 					const m = store.message(touched.message);
 					if (m) publish(directory, "message.updated", { sessionID: id, info: JSON.parse(m.info) });
@@ -1936,7 +2006,7 @@ export function serve(opts: ServeOptions) {
 					}
 				}
 				touch(id);
-			}),
+			}, id),
 			procs: procs.host(id, directory, child ? subagentEnv() : undefined),
 			child,
 			skills: skillsOf(directory),
@@ -3200,17 +3270,19 @@ export function serve(opts: ServeOptions) {
 			// a running shell's latest tail (in memory, never stored) stands in for its stored part
 			const items = messagesJson(page.rows, store.archived(id), (pid) => progressTail.get(pid));
 			if (live) items.push(JSON.stringify(live));
-			return jsonText(`[${items.join(",")}]`, 200, page.next !== null ? { "x-next-cursor": String(page.next) } : undefined);
+			// the revision the body reflects, read in the same synchronous step as the body and x-cmx2-seq (protocol 14a)
+			const rev = { "x-cmx2-rev": String(store.transcriptRev(id)) };
+			return jsonText(`[${items.join(",")}]`, 200, page.next !== null ? { "x-next-cursor": String(page.next), ...rev } : rev);
 		}
 		if ((r = m(/^\/session\/([^/]+)\/message\/([^/]+)$/)) && method === "GET") {
 			const [id, mid] = [r[1]!, r[2]!];
 			const stored = row(id);
 			const live = streamingMessage(id);
-			if (live && live.info.id === mid) return json(live);
+			if (live && live.info.id === mid) return json(live, 200, { "x-cmx2-rev": String(store.transcriptRev(id)) });
 			if (stored.source !== "cmx" && stored.session_file && !sessions.has(id)) projectTranscript(store, id, stored.session_file, stored.directory);
 			const one = store.messageWithParts(id, mid);
 			if (!one) throw notFound(`no message ${mid} in session ${id}`);
-			return jsonText(messagesJson([one], store.archived(id), (pid) => progressTail.get(pid))[0]!);
+			return jsonText(messagesJson([one], store.archived(id), (pid) => progressTail.get(pid))[0]!, 200, { "x-cmx2-rev": String(store.transcriptRev(id)) });
 		}
 		if ((r = m(/^\/session\/([^/]+)\/steps$/)) && method === "GET") return json(store.steps(row(r[1]!).id));
 		if ((r = m(/^\/session\/([^/]+)\/requests$/)) && method === "GET") return json((await open(r[1]!)).requests);
@@ -3402,13 +3474,15 @@ export function serve(opts: ServeOptions) {
 					timestamp: info.time?.created ?? Date.now(),
 				};
 				t.append(message);
-				const touched = projectMessage(store, { sessionId: info.sessionID, cwd: stored.directory, seq, completedAt: closedAt }, message);
-				const m = touched.message ? store.message(touched.message) : undefined;
-				if (m) publish(stored.directory, "message.updated", { sessionID: info.sessionID, info: JSON.parse(m.info) });
-				for (const pid of touched.parts) {
-					const part = store.part(pid);
-					if (part) publish(stored.directory, "message.part.updated", { sessionID: info.sessionID, part: JSON.parse(part.data) });
-				}
+				landed(() => {
+					const touched = projectMessage(store, { sessionId: info.sessionID, cwd: stored.directory, seq, completedAt: closedAt }, message);
+					const m = touched.message ? store.message(touched.message) : undefined;
+					if (m) publish(stored.directory, "message.updated", { sessionID: info.sessionID, info: JSON.parse(m.info) });
+					for (const pid of touched.parts) {
+						const part = store.part(pid);
+						if (part) publish(stored.directory, "message.part.updated", { sessionID: info.sessionID, part: JSON.parse(part.data) });
+					}
+				}, info.sessionID);
 				console.error(`cmx2: closed ${info.id} in ${info.sessionID}: the daemon stopped before that answer finished`);
 			} catch (e) {
 				console.error(`cmx2: could not close the cut-off answer ${info.id}: ${e instanceof Error ? e.message : String(e)}`);
@@ -3418,12 +3492,72 @@ export function serve(opts: ServeOptions) {
 		}
 	}
 
+	/**
+	 * the transcripts a read would answer differently from the rows, healed before anything runs, so the revision on the
+	 * list already says so (protocol 14a): a transcript written after the session was last touched (a crash between the
+	 * engine's line and the landing's commit), or rows whose path.cwd is not the session's directory any more (a checkout
+	 * merged and its sessions moved). a heal that changed nothing leaves the revision where it was; one that moved it
+	 * says so with session.updated
+	 */
+	function healTranscripts(): Promise<{ checked: number; replayed: number; moved: number }> {
+		const rows = store.db
+			.query(
+				`select s.id, s.session_file, s.directory, s.updated_at, (select json_extract(m.info, '$.path.cwd') from message m where m.session_id = s.id and m.role = 'assistant' and coalesce(json_extract(m.info, '$.mode'), '') != 'shell' order by m.seq desc limit 1) as cwd
+				 from main.session s where s.source = 'cmx2' and s.session_file is not null`,
+			)
+			.all() as Array<{ id: string; session_file: string; directory: string; updated_at: number | null; cwd: string | null }>;
+		const out = { checked: 0, replayed: 0, moved: 0 };
+		// off the start path, a page at a time: the daemon answers while it runs
+		return (async () => {
+			for (let i = 0; i < rows.length; i++) {
+				if (stopped) break;
+				if (i % HEAL_PAGE === HEAL_PAGE - 1) await new Promise((ok) => setImmediate(ok));
+				const r = rows[i]!;
+				if (sessions.has(r.id)) continue;
+				out.checked++;
+				let mtime: number;
+				try {
+					mtime = statSync(r.session_file).mtimeMs;
+				} catch {
+					continue;
+				}
+				// file times carry a fraction of a millisecond and touch() stamps whole ones in the same millisecond as the
+				// engine's append: whole milliseconds compare, so a transcript the rows caught up with is left alone
+				// (a shell reply's rows name the shell's folder, so those are not asked about it)
+				if (Math.floor(mtime) <= (r.updated_at ?? 0) && (r.cwd === null || r.cwd === r.directory)) continue;
+				const before = store.transcriptRev(r.id);
+				out.replayed++;
+				try {
+					projectTranscript(store, r.id, r.session_file, r.directory);
+				} catch (e) {
+					console.error(`cmx2: healing ${r.id} failed: ${e instanceof Error ? e.message : String(e)}`);
+					continue;
+				}
+				if (store.transcriptRev(r.id) !== before) {
+					out.moved++;
+					console.error(`cmx2: healed ${r.id}: its transcript had what its rows did not`);
+					publishSession("session.updated", r.id);
+				}
+			}
+			return out;
+		})();
+	}
+
+	/** the start's heal, for tests: settles when every session was looked at */
+	const healing = Promise.withResolvers<{ checked: number; replayed: number; moved: number }>();
+	const healed = healing.promise;
 	queueMicrotask(() => {
 		try {
 			closeCutOff();
 		} catch (e) {
 			console.error(`cmx2: closing cut-off answers failed: ${e instanceof Error ? e.message : String(e)}`);
 		}
+		void healTranscripts()
+			.catch((e) => {
+				console.error(`cmx2: healing transcripts failed: ${e instanceof Error ? e.message : String(e)}`);
+				return { checked: 0, replayed: 0, moved: 0 };
+			})
+			.then(healing.resolve);
 		try {
 			const r = actors.reconcile();
 			if (r.interrupted.length || r.woken.length) console.error(`cmx2: agents after restart: interrupted ${r.interrupted.join(", ") || "none"}; woke ${r.woken.join(", ") || "none"}`);
@@ -3474,5 +3608,5 @@ export function serve(opts: ServeOptions) {
 		await server.stop();
 		store.close();
 	}
-	return { server, stop, store, sessions, procs, actors, routing, handle, violations: () => violations, idleSince: idleSince as ReadonlyMap<string, number> };
+	return { server, stop, store, sessions, procs, actors, routing, handle, violations: () => violations, healed: () => healed, idleSince: idleSince as ReadonlyMap<string, number> };
 }

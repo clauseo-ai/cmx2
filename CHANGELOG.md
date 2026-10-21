@@ -4,9 +4,10 @@ notable changes to cmx2, newest first. the format follows keep a changelog. "con
 
 ## unreleased
 
-contract version 7. additive: progress frames carry `state.metadata.progress`; `/global/event` and `/event` take opt-in `coalesce=100`, `types=`, `compact=1` and `gzip=1`; json answers over 1 kb are gzipped when the request accepts gzip.
+contract version 7. additive: progress frames carry `state.metadata.progress`; `/global/event` and `/event` take opt-in `coalesce=100`, `types=`, `compact=1` and `gzip=1`; json answers over 1 kb are gzipped when the request accepts gzip; session infos carry `transcriptRev`, message reads send `x-cmx2-rev`, and `rev=1` puts the revision on stream events.
 
 ### added
+- a transcript revision per session (`transcriptRev`): every logged `message.updated`, `message.part.updated` and `message.removed`, a revert and its undo move it in the transaction that writes them; a landing that fails midway still moves it; transcripts ahead of their rows (a crash between the two writes) heal after start, in pages off the start path. message reads send `x-cmx2-rev`, at least the last counted event at or before `x-cmx2-seq`; `rev=1` adds it to events. existing sessions start at 0 with their history, so 0 does not mean empty; an older binary on a migrated store writes without moving it. why: boxbox, after a gap it cannot replay, re-sends only the threads whose revision moved. migration 13 on a 470-session store took 11 ms with every count unchanged.
 - event stream switches, each described in the manifest, all off unless a client asks: `coalesce=100` merges a part's text deltas into 100 ms batches and flushes them before any other frame; `types=` sends only the listed kinds (heartbeats and `stream.reset` always pass, and a heartbeat carries the last id the stream passed); `compact=1` resumes with the first and last state event of each key instead of every event since the cursor (asks never compacted; busy and idle statuses both kept), ending in the same state as a full replay; `gzip=1` with `accept-encoding: gzip` gzips the stream, flushed per batch. a stream that asks for none is unchanged. why: boxbox's stream from a busy daemon went from 699,555 to 29,800 bytes a minute with coalesce and gzip, and an idle one from 546 to 103.
 
 ### changed

@@ -40,6 +40,8 @@ export interface StoredSession {
 	summary?: string | null;
 	/** when the session was archived (hidden from listings, never deleted: rule 15) */
 	archived_at?: number | null;
+	/** moves on every write that changes what the session's message reads answer, streamed text aside; 0 for imported history */
+	transcript_rev?: number;
 }
 
 /** an armed revert: the files are back as they were before `messageID`; unrevert puts `snapshot` back */
@@ -315,8 +317,8 @@ export class Store {
 	 */
 	private sessionView() {
 		this.db.exec("drop view if exists temp.all_session");
-		const main = `select ${COLS}, archived_at from main.session`;
-		const archive = `select ${SESSION_COLUMNS.map((c) => `a.${c}`).join(", ")}, ai.archived_at from archive.session a
+		const main = `select ${COLS}, archived_at, transcript_rev from main.session`;
+		const archive = `select ${SESSION_COLUMNS.map((c) => `a.${c}`).join(", ")}, ai.archived_at, 0 as transcript_rev from archive.session a
 			left join main.archived_import ai on ai.id = a.id where not exists (select 1 from main.session m where m.id = a.id)`;
 		this.db.exec(`create temp view all_session as ${this.attached ? `${main} union all ${archive}` : main}`);
 	}
@@ -407,6 +409,58 @@ export class Store {
 	children(id: string): StoredSession[] {
 		this.attachArchive();
 		return this.db.query("select * from all_session where parent_id = ? order by created_at desc").all(id) as StoredSession[];
+	}
+
+	/** the session's transcript revision now (0 for imported history and unknown ids) */
+	transcriptRev(id: string): number {
+		return (this.db.query("select transcript_rev as n from main.session where id = ?").get(id) as { n: number } | null)?.n ?? 0;
+	}
+
+	/**
+	 * moves the transcript revision on by one and returns it. callers run it inside the transaction of the write it
+	 * counts, so the two commit or roll back together. a session that is not in main (imported history) stays at 0
+	 */
+	bumpTranscriptRev(id: string): number {
+		return (this.db.query("update main.session set transcript_rev = transcript_rev + 1 where id = ? returning transcript_rev as n").get(id) as { n: number } | null)?.n ?? 0;
+	}
+
+	/** while a replay runs: each message it wrote, as it was before its first write (row and parts) */
+	private tracked?: Map<string, string>;
+
+	/** a message and its parts as one string, to compare a message before and after a replay */
+	private messageImage(id: string): string {
+		const m = this.db.query("select * from main.message where id = ?").get(id);
+		const parts = this.db.query("select * from main.part where message_id = ? order by id").all(id);
+		return JSON.stringify([m, parts]);
+	}
+
+	/** called before every write to a message's row or parts; while a replay is tracked, keeps how the message was */
+	noteTranscriptWrite(messageId: string) {
+		if (this.tracked && !this.tracked.has(messageId)) this.tracked.set(messageId, this.messageImage(messageId));
+	}
+
+	/**
+	 * runs a replay and says whether any message it wrote ends different from how it was (a heal that a read would see),
+	 * as opposed to rows rewritten with what they held, which a replay does on the way (a tool call reopened, then its
+	 * result landing again)
+	 */
+	trackTranscript<T>(fn: () => T): { result: T; changed: boolean } {
+		const outer = this.tracked;
+		this.tracked = new Map();
+		try {
+			const result = fn();
+			let changed = false;
+			for (const [id, was] of this.tracked) {
+				if (this.messageImage(id) !== was) {
+					changed = true;
+					break;
+				}
+			}
+			if (outer) for (const [id, was] of this.tracked) if (!outer.has(id)) outer.set(id, was);
+			return { result, changed };
+		} finally {
+			this.tracked = outer;
+		}
 	}
 
 	/** activity on a session (a message, an ask, a reply): it moves to the top of the updated list */
@@ -551,9 +605,10 @@ export class Store {
 	/** upsert one projected message and its parts; bumps the session's updated time and totals */
 	putMessage(m: MessageRow, parts: PartRow[]) {
 		this.db.transaction(() => {
-			const prev = this.db.query("select cost, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write from message where id = ?").get(m.id) as
-				| Pick<MessageRow, "cost" | "tokens_input" | "tokens_output" | "tokens_cache_read" | "tokens_cache_write">
-				| null;
+			const prev = this.db.query("select * from message where id = ?").get(m.id) as MessageRow | null;
+			// a replay of what is stored writes nothing: the read is the same, and a permanent revert's mark stays
+			if (this.sameMessage(prev, m, parts)) return;
+			this.noteTranscriptWrite(m.id);
 			this.db
 				.query(
 					`insert or replace into message (id, session_id, seq, role, created_at, completed_at, model, effort, tokens_input, tokens_output,
@@ -583,8 +638,23 @@ export class Store {
 		})();
 	}
 
+	/** whether a stored message and its parts are already exactly these (a replay rewriting what it holds) */
+	private sameMessage(prev: MessageRow | null, m: MessageRow, parts: PartRow[]): boolean {
+		if (!prev) return false;
+		for (const k of Object.keys(m) as Array<keyof MessageRow>) if (prev[k] !== m[k]) return false;
+		// a turn's system lines ride on the user message as parts at 1000 + their position (projection.ts); they are not this write's
+		const have = this.db.query("select id, seq, type, data from part where message_id = ? and seq < 1000 order by seq, rowid").all(m.id) as Array<Pick<PartRow, "id" | "seq" | "type" | "data">>;
+		if (have.length !== parts.length) return false;
+		return parts.every((p, i) => have[i]!.id === p.id && have[i]!.seq === p.seq && have[i]!.type === p.type && have[i]!.data === p.data);
+	}
+
 	/** update one part in place (a tool result landing on its call) */
 	putPart(p: PartRow) {
+		if (this.tracked) {
+			const prev = this.db.query("select message_id from part where id = ?").get(p.id) as Pick<PartRow, "message_id"> | null;
+			if (prev && prev.message_id !== p.message_id) this.noteTranscriptWrite(prev.message_id);
+			this.noteTranscriptWrite(p.message_id);
+		}
 		this.db.query("insert or replace into part (id, message_id, session_id, seq, type, data) values ($id, $message_id, $session_id, $seq, $type, $data)").run(p as never);
 	}
 
@@ -727,6 +797,7 @@ export class Store {
 
 	/** messages a permanent revert took out of the context: kept, marked, left out of message lists */
 	markReverted(sessionId: string, from: number, to: number): number {
+		if (this.tracked) for (const r of this.db.query("select id from message where session_id = ? and seq >= ? and seq < ? and reverted = 0").all(sessionId, from, to) as Array<{ id: string }>) this.noteTranscriptWrite(r.id);
 		return this.db.query("update message set reverted = 1 where session_id = ? and seq >= ? and seq < ?").run(sessionId, from, to).changes;
 	}
 
@@ -951,8 +1022,8 @@ export class Store {
 	}
 
 	/** logs one state-changing event and returns its seq: strictly increasing, never reused */
-	appendEvent(e: { at: number; directory: string; project: string | null; type: string; properties: string }): number {
-		return Number(this.db.query("insert into event_log (at, directory, project, type, properties) values ($at, $directory, $project, $type, $properties)").run(e as never).lastInsertRowid);
+	appendEvent(e: { at: number; directory: string; project: string | null; type: string; properties: string; rev?: number | null }): number {
+		return Number(this.db.query("insert into event_log (at, directory, project, type, properties, rev) values ($at, $directory, $project, $type, $properties, $rev)").run({ ...e, rev: e.rev ?? null } as never).lastInsertRowid);
 	}
 
 	/** logged events after a seq, oldest first; a directory narrows to that directory's events */
@@ -1019,6 +1090,8 @@ export interface EventRow {
 	type: string;
 	/** the event's properties as the json text that was sent */
 	properties: string;
+	/** the session's transcript revision the event carries to a stream that asks for it (rev=1), or null */
+	rev: number | null;
 }
 
 export interface ClientAction {
