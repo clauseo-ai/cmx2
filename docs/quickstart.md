@@ -130,7 +130,9 @@ cmx2 pair                       # a url and a one-time token for a client like b
 
 `cmx2 serve --install` copies the binary to `~/.local/share/cmx2/bin`, links it as `cmx2` in `~/.local/bin`
 and writes the service unit. it also saves provider keys from your current shell for the service, which does
-not inherit your shell's environment. export a key and run it again to change one.
+not inherit your shell's environment. export a key and run it again to change one. the service logs to
+`~/.local/share/cmx2/log/serve.log`; the daemon rotates it at 10 MB and keeps three older copies
+(`serve.log.1` is the newest).
 
 on macos the copy is signed with a code signing identity from your keychain when there is one (one named for
 cmx2 first, then developer id, then apple development; `CMX2_CODESIGN_IDENTITY` picks one by name or hash, `-`

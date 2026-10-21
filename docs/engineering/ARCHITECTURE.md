@@ -212,10 +212,11 @@ one manifest (`packages/contract/src/manifest.ts`) with a `type` discriminator a
 where the shape is unchanged so boxbox's move from cmx is a regeneration, not a
 rewrite of semantics.
 
-every state-changing event carries `(epoch, seq)`: a persisted, strictly
+every state-changing event carries `(epoch, seq)`, except two kinds that are
+not logged (text deltas and a running shell's output tail, below): a persisted, strictly
 increasing 64-bit counter and an epoch that changes only when the store is
 reset. sse frames carry it as `id:`; `Last-Event-ID` and `?after=` resume
-from the log (at least 30 minutes and 50,000 events), `stream.reset` names
+from the log (30 minutes or 10,000 events, whichever keeps more), `stream.reset` names
 why a cursor cannot be honoured, and every state-returning read answers
 `x-cmx2-seq` so a client applies only the events after what it read.
 deltas are not logged; a part that was streaming is resent once in full at
@@ -226,7 +227,13 @@ in-flight read returns every started part typed and in order (contract
 version 5). a part's final goes out when its block ends, not at
 the step's end: the engine says `message.part.ended` on pi's
 `thinking_end` and `text_end`, the daemon publishes the part final and reads
-and resumes serve it final from then on.
+and resumes serve it final from then on. a running shell's output tail
+(`state.metadata.output` on its tool part, at most once a second) is kept in
+memory only: it goes to live streams unnumbered, reads merge it over the
+stored part, and a resume gets the latest tail at its seam, not every tick;
+the tool's result replaces it. having no seq, each tail carries
+`state.metadata.progress` (1, 2, 3 for that part), so a client that holds
+frames until a read lands keeps whichever tail has the higher number.
 
 ### the listener
 

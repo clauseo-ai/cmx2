@@ -122,7 +122,7 @@ const partBase = { id: Type.String(), sessionID: Type.String(), messageID: Type.
 const ToolTime = Type.Object({ start: Type.Optional(Type.Union([Type.Number(), Type.Null()])), end: Type.Optional(Type.Number()) }, { additionalProperties: true });
 const ToolInput = Type.Record(Type.String(), Type.Unknown());
 export const ToolStateRunning = Type.Object(
-	{ status: Type.Literal("running"), input: ToolInput, time: Type.Optional(ToolTime), metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "while a shell runs, output holds the last 2 kb, updated at most once a second" })) },
+	{ status: Type.Literal("running"), input: ToolInput, time: Type.Optional(ToolTime), metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "while a shell runs, output holds the last 2 kb, updated at most once a second, and progress counts those updates from 1 (a tail with a lower progress than one already applied is older and can be dropped: progress frames carry no seq)" })) },
 	{ additionalProperties: true },
 );
 export const ToolStatePending = Type.Object({ status: Type.Literal("pending"), input: ToolInput }, { additionalProperties: true });
@@ -514,7 +514,7 @@ export const EVENTS = {
 	}),
 
 	"message.updated": event("a message was created or finished", { ...sid, info: MessageInfo }),
-	"message.part.updated": event("a part was created or changed (a tool call running, then completed). every text and reasoning part of a streaming message is announced when it starts, before its first delta: this event with empty text and streaming true, logged like any other, in content order; its final update carries the whole text, no streaming, and time {start, end}, and is published when that part's block ends (a reasoning part when the reply begins), not when the step does; the step's end publishes it again, the same text and time.end", { ...sid, part: Part }),
+	"message.part.updated": event("a part was created or changed (a tool call running, then completed). every text and reasoning part of a streaming message is announced when it starts, before its first delta: this event with empty text and streaming true, logged like any other, in content order; its final update carries the whole text, no streaming, and time {start, end}, and is published when that part's block ends (a reasoning part when the reply begins), not when the step does; the step's end publishes it again, the same text and time.end. a running shell's output tail (state.metadata.output on its running tool part, at most once a second, numbered by state.metadata.progress) goes out unnumbered and is not logged; reads carry the latest tail and a resume gets it at its seam, not every tick, so a client that buffers frames until its read lands orders tails by progress, not by seq", { ...sid, part: Part }),
 	"message.part.delta": event("streamed text for a text or reasoning part that was announced (a message.part.updated with streaming true); never sent to a part that was not", {
 		...sid,
 		messageID: Type.String(),
@@ -1102,7 +1102,7 @@ export const ROUTES: RouteDef[] = [
 	{ method: "POST", path: "/session/:sessionID/abort", operationId: "abort", summary: "stop the running turn", response: Ok },
 	{ method: "GET", path: "/session/:sessionID/steps", operationId: "steps", summary: "per-step telemetry", response: Type.Array(StepRow) },
 	{ method: "GET", path: "/session/:sessionID/prefix", operationId: "prefix", summary: "the recorded prefix bytes and hash", response: Type.Object({ hash: Type.String(), bytes: Type.String() }) },
-	{ method: "GET", path: "/session/:sessionID/requests", operationId: "requests", summary: "summaries of the last 200 model requests (prefix hash, markers, gates)", response: Type.Array(Type.Record(Type.String(), Type.Unknown())) },
+	{ method: "GET", path: "/session/:sessionID/requests", operationId: "requests", summary: "summaries of the last 50 model requests (prefix hash, markers, gates)", response: Type.Array(Type.Record(Type.String(), Type.Unknown())) },
 	{ method: "GET", path: "/session/:sessionID/messages", operationId: "transcript", summary: "the engine transcript as the model sees it (pi's message shapes), for evals and debugging", response: Type.Array(Type.Record(Type.String(), Type.Unknown())) },
 	{
 		method: "GET",

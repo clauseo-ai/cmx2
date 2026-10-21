@@ -40,7 +40,11 @@ import { blacklisted, checkProfileKeys, patchProfile, redactConfig, scrubText, v
 declare const CMX2_VERSION: string | undefined;
 export const VERSION: string = typeof CMX2_VERSION === "string" ? CMX2_VERSION : "0.8.8-dev";
 /** idle sessions kept loaded; the rest reload from their transcripts on the next message (the residency lru) */
-const MAX_RESIDENT = 8;
+export const MAX_RESIDENT = 4;
+/** an idle session not used for this long is dropped from memory too, unless it is warming its prompt cache */
+export const IDLE_EVICT_MS = 20 * 60_000;
+/** evicted sessions whose idle `since` is remembered, oldest dropped first (the session list's page cap) */
+export const IDLE_SINCE_MAX = 1000;
 const HEARTBEAT_MS = 10_000;
 /** a `!` line may run this long; longer work belongs in a background job */
 const SHELL_LINE_TIMEOUT_S = 600;
@@ -48,8 +52,8 @@ const SHELL_LINE_TIMEOUT_S = 600;
 const SERVER_EVENTS = new Set(["server.connected", "server.heartbeat", "global.disposed", "stream.reset"]);
 /** frames that change no state, or stream too fast to keep: never logged, never numbered (a1) */
 const UNLOGGED = new Set([...SERVER_EVENTS, "message.part.delta"]);
-/** the replay window: an event is kept while it is inside either bound (30 minutes and 50,000 events) */
-export const EVENT_WINDOW = { events: 50_000, ms: 30 * 60_000 };
+/** the replay window: an event is kept while it is inside either bound (30 minutes or 10,000 events, whichever keeps more) */
+export const EVENT_WINDOW = { events: 10_000, ms: 30 * 60_000 };
 /** what one subscriber may fall behind before its stream is closed; the client resumes from its last id */
 export const STREAM_CAP_BYTES = 1024 * 1024;
 /**
@@ -150,6 +154,11 @@ export interface ServeOptions {
 	eventWindow?: { events: number; ms: number };
 	/** per-subscriber backlog cap in bytes */
 	streamCap?: number;
+	/** how long an idle session stays loaded unused (tests shrink it); the sweep runs every minute, or every `idleSweepMs` */
+	idleEvictMs?: number;
+	idleSweepMs?: number;
+	/** how many evicted sessions' idle times are kept (tests shrink it) */
+	idleSinceMax?: number;
 }
 
 /** a request body over this is refused with 413 (photos arrive resized; a transcript import is the biggest body) */
@@ -218,6 +227,7 @@ export function serve(opts: ServeOptions) {
 	const epoch = store.epoch;
 	const eventWindow = opts.eventWindow ?? EVENT_WINDOW;
 	const streamCap = opts.streamCap ?? STREAM_CAP_BYTES;
+	const idleEvictMs = opts.idleEvictMs ?? IDLE_EVICT_MS;
 	/**
 	 * what a held stream's peer must take before it counts as reading: more than a peer that reads nothing lets its
 	 * kernel take (a paused peer on loopback took 1.2 to 2.1 MB; macos grows a receive buffer up to 4 MB)
@@ -259,6 +269,12 @@ export function serve(opts: ServeOptions) {
 	const faults = new Map<string, string>();
 	/** when each loaded session was last used, for the residency lru */
 	const lastUsed = new Map<string, number>();
+	/**
+	 * when each evicted session went idle: its status keeps `since`, and a reopen carries it back. an entry goes on
+	 * reopen and on archive (delete archives), and past IDLE_SINCE_MAX entries the oldest go
+	 */
+	const idleSince = new Map<string, number>();
+	const idleSinceMax = opts.idleSinceMax ?? IDLE_SINCE_MAX;
 
 	const host: Host = {
 		createSession: (spec) => createChild(spec),
@@ -479,7 +495,8 @@ export function serve(opts: ServeOptions) {
 		const parked = actors.parkedOf(id);
 		// an abort leaves prompts waiting: an idle session says how many (a19)
 		const queued = live?.queued ? { queued: live.queued } : {};
-		return parked ? { type: "idle" as const, parked, since: actors.parkedAt(id) ?? Date.now(), ...queued } : { type: "idle" as const, ...(live ? { since: live.stateSince } : {}), ...queued };
+		const since = live ? live.stateSince : idleSince.get(id);
+		return parked ? { type: "idle" as const, parked, since: actors.parkedAt(id) ?? Date.now(), ...queued } : { type: "idle" as const, ...(since !== undefined ? { since } : {}), ...queued };
 	}
 
 	function publishStatus(id: string) {
@@ -603,7 +620,7 @@ export function serve(opts: ServeOptions) {
 		return !sub.directory || sub.directory === directory || SERVER_EVENTS.has(type);
 	}
 
-	function publish<T extends EventType>(directory: string, type: T, properties: Record<string, unknown>) {
+	function publish<T extends EventType>(directory: string, type: T, properties: Record<string, unknown>, how?: { unlogged?: true }) {
 		if (opts.checkEvents) {
 			const def = EVENTS[type];
 			if (!def) {
@@ -615,7 +632,7 @@ export function serve(opts: ServeOptions) {
 				console.error(`contract violation: ${type} ${e?.instancePath ?? ""} ${e?.message ?? ""} ${JSON.stringify(properties).slice(0, 300)}`);
 			}
 		}
-		if (UNLOGGED.has(type)) {
+		if (UNLOGGED.has(type) || how?.unlogged) {
 			// live subscribers only: a stream still replaying gets deltas' text from the streaming resend at its seam
 			if (type === "message.part.delta") return publishDelta(directory, properties as Delta);
 			flushBurst();
@@ -919,6 +936,16 @@ export function serve(opts: ServeOptions) {
 		let last = after;
 		for (;;) {
 			if (sub.closed) return;
+			// a replay held up past the window: pruning took rows after the cursor, so say so, as an expired cursor does,
+			// and go live from the head (the reset and the switch to live are one synchronous step: no gap)
+			if (store.eventsPrunedThrough() > last) {
+				const at = store.eventHead();
+				const frame = unloggedFrame(sub, "stream.reset", { reason: "expired", seq: at, epoch }, null, `${epoch}:${at}`);
+				sub.sink.write(frame);
+				sub.written += Buffer.byteLength(frame);
+				last = sub.seq = at;
+				break;
+			}
 			const rows = store.eventsAfter(last, { directory: sub.directory, limit: REPLAY_PAGE });
 			let waited = false;
 			for (const r of rows) {
@@ -944,6 +971,10 @@ export function serve(opts: ServeOptions) {
 		for (const [sessionID, f] of inflight) {
 			if (!reaches(sub, f.directory, "message.part.updated")) continue;
 			for (const part of streamingParts(sessionID, f)) send(sub, unloggedFrame(sub, "message.part.updated", { sessionID, part }, f.directory));
+		}
+		// a running shell's latest tail is not in the log: the resumed stream gets it here, as a live one already has
+		for (const run of progressing.values()) {
+			if (run.tail && reaches(sub, run.directory, "message.part.updated")) send(sub, unloggedFrame(sub, "message.part.updated", { sessionID: run.session, part: JSON.parse(run.tail) }, run.directory));
 		}
 	}
 
@@ -1538,15 +1569,24 @@ export function serve(opts: ServeOptions) {
 					return;
 				}
 				if (e.type === "tool.progress") {
-					// a running shell's output tail lands on its tool part, at most once a second (a9); reads see it too
+					// a running shell's output tail lands on its tool part, at most once a second (a9): kept in memory, not in the
+					// database or the log, sent to live streams unnumbered; reads and a resume's seam merge it in (progressTail)
 					const p = e.properties as { callID: string; output: string };
-					const part = store.toolPart(id, p.callID);
-					if (!part) return;
-					const data = JSON.parse(part.data);
-					if (data.state?.status !== "running") return;
-					data.state = { ...data.state, metadata: { ...(data.state.metadata ?? {}), output: p.output } };
-					store.putPart({ ...part, data: JSON.stringify(data) });
-					publish(directory, "message.part.updated", { sessionID: id, part: data });
+					const key = `${id}\n${p.callID}`;
+					let run = progressing.get(key);
+					if (!run) {
+						const part = store.toolPart(id, p.callID);
+						if (!part) return;
+						run = { session: id, directory, partId: part.id, data: JSON.parse(part.data), n: 0 };
+						if (run.data.state?.status !== "running") return;
+						progressing.set(key, run);
+					}
+					// progress numbers the tails: the frames carry no seq, so a client orders a tail against a read's by it
+					run.n++;
+					const data = { ...run.data, state: { ...run.data.state, metadata: { ...(run.data.state.metadata ?? {}), output: p.output, progress: run.n } } };
+					run.tail = JSON.stringify(data);
+					progressTail.set(run.partId, run.tail);
+					publish(directory, "message.part.updated", { sessionID: id, part: data }, { unlogged: true });
 					return;
 				}
 				if (e.type === "file.edited") {
@@ -1556,6 +1596,7 @@ export function serve(opts: ServeOptions) {
 				}
 				if (e.type === "session.idle") {
 					inflight.delete(id);
+					forgetProgress(id);
 					vcs.forget(directory);
 					for (const mid of closeOpenSteps(store, id, Date.now())) {
 						const m = store.message(mid);
@@ -1651,6 +1692,7 @@ export function serve(opts: ServeOptions) {
 					if (m) publish(directory, "message.updated", { sessionID: id, info: JSON.parse(m.info) });
 				}
 				for (const pid of touched.parts) {
+					forgetProgress(id, pid);
 					const p = store.part(pid);
 					if (p) publish(directory, "message.part.updated", { sessionID: id, part: JSON.parse(p.data) });
 				}
@@ -1658,6 +1700,7 @@ export function serve(opts: ServeOptions) {
 					const m = store.message(touched.also.message);
 					if (m) publish(directory, "message.updated", { sessionID: id, info: JSON.parse(m.info) });
 					for (const pid of touched.also.parts) {
+						forgetProgress(id, pid);
 						const p = store.part(pid);
 						if (p) publish(directory, "message.part.updated", { sessionID: id, part: JSON.parse(p.data) });
 					}
@@ -1734,6 +1777,10 @@ export function serve(opts: ServeOptions) {
 				}),
 			)
 			.then((s) => {
+				// an evicted session reopens idle since when it went idle, not since it was reloaded
+				const was = idleSince.get(id);
+				if (was !== undefined && s.state === "idle") s.stateSince = was;
+				idleSince.delete(id);
 				sessions.set(id, s);
 				lastUsed.set(id, Date.now());
 				const fault = faults.get(id);
@@ -1824,17 +1871,37 @@ export function serve(opts: ServeOptions) {
 		publishSession("session.updated", s.id);
 	}
 
+	/** running shells' output tails, by session and call id; reads merge `progressTail` (part id to the part's json) over the stored row */
+	const progressing = new Map<string, { session: string; directory: string; partId: string; data: any; n: number; tail?: string }>();
+	const progressTail = new Map<string, string>();
+	/** a tool part landed (its result replaces the running state), or the session went idle: its tail is dropped */
+	function forgetProgress(session: string, partId?: string) {
+		for (const [key, run] of progressing) {
+			if (run.session !== session || (partId !== undefined && run.partId !== partId)) continue;
+			progressing.delete(key);
+			progressTail.delete(run.partId);
+		}
+	}
+
 	/**
 	 * the residency lru: idle sessions beyond MAX_RESIDENT are dropped from memory, least recently used
-	 * first. their transcripts are the truth; the next message reopens them. a session warming its
-	 * cache stays loaded until the warming stops.
+	 * first, and so is any idle session unused for IDLE_EVICT_MS (the minute sweep). their transcripts are
+	 * the truth; the next message reopens them. a session warming its cache stays loaded until the warming stops.
 	 */
 	function evictIdle() {
 		// (a session with prompts waiting stays: its queue lives in memory, and dropping it would lose them)
 		const idle = [...sessions.values()].filter((s) => s.state === "idle" && !s.warming && !opening.has(s.id) && s.queued === 0);
-		if (idle.length <= MAX_RESIDENT) return;
 		idle.sort((a, b) => (lastUsed.get(a.id) ?? 0) - (lastUsed.get(b.id) ?? 0));
-		for (const s of idle.slice(0, idle.length - MAX_RESIDENT)) {
+		const stale = Date.now() - idleEvictMs;
+		const over = Math.max(0, idle.length - MAX_RESIDENT);
+		for (const [i, s] of idle.entries()) {
+			if (i >= over && (lastUsed.get(s.id) ?? 0) > stale) continue;
+			idleSince.delete(s.id);
+			idleSince.set(s.id, s.stateSince);
+			for (const id of idleSince.keys()) {
+				if (idleSince.size <= idleSinceMax) break;
+				idleSince.delete(id);
+			}
 			s.dispose();
 			sessions.delete(s.id);
 			lastUsed.delete(s.id);
@@ -1990,6 +2057,7 @@ export function serve(opts: ServeOptions) {
 		locks.release(id);
 		const reaped = await procs.reapSession(id);
 		store.archiveSession(id);
+		idleSince.delete(id);
 		publish(stored.directory, "session.deleted", { sessionID: id, info: info(row(id)) });
 		if (reaped.killed.length || reaped.kept.length) console.error(`cmx2: session ${id} ended: stopped ${reaped.killed.length} process(es), kept ${reaped.kept.map((k) => k.keep).join(", ") || "none"}`);
 		return true;
@@ -2874,7 +2942,7 @@ export function serve(opts: ServeOptions) {
 			// the newest page ends with the message being streamed, its text so far marked streaming (a5)
 			const live = before === undefined ? streamingMessage(id) : undefined;
 			const page = live && limit === 1 ? { rows: [], next: store.lastMessageSeq(id) ? store.lastMessageSeq(id) + 1 : null } : store.messages(id, { limit: (live && limit ? limit - 1 : limit) || undefined, before });
-			const items = page.rows.map((m) => ({ info: JSON.parse(m.info), parts: m.parts.map((p) => JSON.parse(p.data)) }));
+			const items = page.rows.map((m) => ({ info: JSON.parse(m.info), parts: m.parts.map((p) => JSON.parse(progressTail.get(p.id) ?? p.data)) }));
 			return json(live ? [...items, live] : items, 200, page.next !== null ? { "x-next-cursor": String(page.next) } : undefined);
 		}
 		if ((r = m(/^\/session\/([^/]+)\/message\/([^/]+)$/)) && method === "GET") {
@@ -2885,7 +2953,7 @@ export function serve(opts: ServeOptions) {
 			if (stored.source !== "cmx" && stored.session_file && !sessions.has(id)) projectTranscript(store, id, stored.session_file, stored.directory);
 			const one = store.messageWithParts(id, mid);
 			if (!one) throw notFound(`no message ${mid} in session ${id}`);
-			return json({ info: JSON.parse(one.info), parts: one.parts.map((p) => JSON.parse(p.data)) });
+			return json({ info: JSON.parse(one.info), parts: one.parts.map((p) => JSON.parse(progressTail.get(p.id) ?? p.data)) });
 		}
 		if ((r = m(/^\/session\/([^/]+)\/steps$/)) && method === "GET") return json(store.steps(row(r[1]!).id));
 		if ((r = m(/^\/session\/([^/]+)\/requests$/)) && method === "GET") return json((await open(r[1]!)).requests);
@@ -3119,12 +3187,15 @@ export function serve(opts: ServeOptions) {
 	prune();
 	const pruneTimer = setInterval(prune, 60_000);
 	pruneTimer.unref?.();
+	const evictTimer = setInterval(evictIdle, opts.idleSweepMs ?? 60_000);
+	evictTimer.unref?.();
 
 	let stopped = false;
 	async function stop() {
 		if (stopped) return;
 		stopped = true;
 		clearInterval(pruneTimer);
+		clearInterval(evictTimer);
 		watcher?.close();
 		for (const s of sessions.values()) {
 			await s.abort().catch(() => {});
@@ -3146,5 +3217,5 @@ export function serve(opts: ServeOptions) {
 		await server.stop();
 		store.close();
 	}
-	return { server, stop, store, sessions, procs, actors, routing, handle, violations: () => violations };
+	return { server, stop, store, sessions, procs, actors, routing, handle, violations: () => violations, idleSince: idleSince as ReadonlyMap<string, number> };
 }

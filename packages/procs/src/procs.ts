@@ -118,21 +118,44 @@ const HEAD = 64 * 1024;
 const TAIL = 256 * 1024;
 const READ_LIMIT = 64 * 1024;
 const SETTLE_MS = 150;
-const PORT_PROBE_MS = 250;
+/** an on_port watch probes every PORT_PROBE_MS for its first PORT_FAST_MS, then every PORT_SLOW_MS */
+export const PORT_PROBE_MS = 250;
+export const PORT_FAST_MS = 30_000;
+export const PORT_SLOW_MS = 2_000;
+/** the wait before the next port probe, this long after the watch began */
+export function probeDelay(elapsedMs: number): number {
+	return elapsedMs < PORT_FAST_MS ? PORT_PROBE_MS : PORT_SLOW_MS;
+}
 const PATTERN_LINE_MAX = 8192;
 
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-_]/g;
 
-/** processes listening on a tcp port, with their process group, from lsof and ps */
-export function listenersOf(port: number): Array<{ pid: number; pgid: number; command: string }> {
-	const r = spawnSync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpc"], { encoding: "utf8", timeout: 5000 });
+/**
+ * a command's stdout, off the event loop; killed after `ms` (what it printed by then is kept). a command that
+ * cannot start (not on PATH, out of descriptors) prints nothing, as spawnSync's error result did
+ */
+async function outputOf(cmd: string[], ms: number): Promise<string> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" });
+		timer = setTimeout(() => proc.kill(), ms);
+		return await new Response(proc.stdout).text();
+	} catch {
+		return "";
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/** processes listening on a tcp port, with their process group, from lsof and ps (spawned async, so the loop never waits on them) */
+export async function listenersOf(port: number): Promise<Array<{ pid: number; pgid: number; command: string }>> {
 	const out: Array<{ pid: number; pgid: number; command: string }> = [];
 	let pid = 0;
-	for (const line of (r.stdout ?? "").split("\n")) {
+	for (const line of (await outputOf(["lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpc"], 5000)).split("\n")) {
 		if (line.startsWith("p")) pid = Number(line.slice(1));
 		else if (line.startsWith("c") && pid) {
-			const pg = spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 });
-			out.push({ pid, pgid: Number((pg.stdout ?? "").trim()) || 0, command: line.slice(1) });
+			const pg = await outputOf(["ps", "-o", "pgid=", "-p", String(pid)], 2000);
+			out.push({ pid, pgid: Number(pg.trim()) || 0, command: line.slice(1) });
 		}
 	}
 	return out;
@@ -406,12 +429,20 @@ export class Procs {
 	}
 
 	private probePort(e: Entry, port: number) {
-		const tick = async () => {
+		// fast while a server is most likely coming up, then slower: a slow server's notice comes up to PORT_SLOW_MS late
+		const since = Date.now();
+		const next = () => probeDelay(Date.now() - since);
+		// a timer callback that throws would take the daemon down with it: a failed probe is logged and the watch ends
+		const tick = () =>
+			void probe().catch((err: unknown) => console.error(`cmx2: the port ${port} watch for ${e.info.id} failed: ${err instanceof Error ? err.message : String(err)}`));
+		const probe = async () => {
 			if (e.info.status !== "running" || this.stopped) return;
 			if ((await portOpen(port, "127.0.0.1")) || (await portOpen(port, "::1"))) {
 				if (e.info.status !== "running") return;
 				// whose port is it: a port another process already held is news, not the job coming up
-				const owners = listenersOf(port);
+				const owners = await listenersOf(port).catch(() => []);
+				// the job may have exited while lsof ran: no port and no notice after its exit
+				if (e.info.status !== "running" || this.stopped) return;
 				const mine = owners.filter((o) => o.pgid === e.info.pid);
 				if (owners.length === 0 || mine.length > 0) {
 					if (!e.info.ports.includes(port)) e.info.ports = [...e.info.ports, port].sort((a, b) => a - b);
@@ -422,7 +453,7 @@ export class Procs {
 				}
 				return;
 			}
-			e.portTimer = setTimeout(tick, PORT_PROBE_MS);
+			e.portTimer = setTimeout(tick, next());
 			e.portTimer.unref?.();
 		};
 		e.portTimer = setTimeout(tick, PORT_PROBE_MS);

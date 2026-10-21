@@ -259,3 +259,28 @@ test("a port another process already holds is reported as such, not as the job c
 	await procs.kill(job.id);
 	other.stop(true);
 });
+
+test("an on_port watch probes every 250 ms for its first 30 s, then every 2 s", async () => {
+	const { probeDelay } = await import("../src/procs.ts");
+	expect([0, 1_000, 29_999].map(probeDelay)).toEqual([250, 250, 250]);
+	expect([30_000, 60_000, 3_600_000].map(probeDelay)).toEqual([2_000, 2_000, 2_000]);
+});
+
+test("with lsof missing from PATH an on_port watch still gives its notice, and the process lives on", async () => {
+	const dir = realpathSync(mkdtempSync(join(tmpdir(), "cmx2-procs-path-")));
+	const script = join(dir, "probe.ts");
+	await Bun.write(
+		script,
+		`import { Procs } from ${JSON.stringify(join(import.meta.dir, "../src/index.ts"))};
+const port = 20000 + Math.floor(Math.random() * 20000);
+const procs = new Procs({ dataDir: ${JSON.stringify(join(dir, "data"))}, onEvent: (e) => { if (e.type === "proc.notify" && e.reason === "port") { console.log("notice: " + e.detail); void procs.stopAll().then(() => process.exit(0)); } }, killGrace: 200 });
+procs.spawn({ command: \`exec ${process.execPath} -e 'Bun.serve({ port: \${port}, hostname: "127.0.0.1", fetch() { return new Response("ok") } })'\`, sessionID: "ses_path", origin: "model", notify: { on_port: port } });
+setTimeout(() => { console.log("no notice"); process.exit(2); }, 8000);
+`,
+	);
+	const p = Bun.spawn([process.execPath, script], { env: { PATH: "/bin", HOME: process.env.HOME ?? "/tmp" }, stdout: "pipe", stderr: "pipe" });
+	const [code, out, err] = [await p.exited, await new Response(p.stdout).text(), await new Response(p.stderr).text()];
+	console.log(`PATH=/bin: exit ${code}; ${out.trim()}${err.trim() ? `; stderr ${err.trim().slice(0, 200)}` : ""}`);
+	expect(out).toContain("notice: port");
+	expect(code).toBe(0);
+}, 15_000);

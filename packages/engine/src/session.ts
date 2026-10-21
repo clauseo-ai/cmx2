@@ -105,6 +105,8 @@ export const BATCHING_NUDGE =
 const MAX_CONTINUATIONS = 3;
 /** recoveries from a media refusal (size, image count, an unreadable image) per prompt before the session stops and says so */
 const MAX_SIZE_RECOVERIES = 3;
+/** request summaries a session keeps for `/session/:id/requests`, newest last */
+export const REQUEST_SUMMARIES = 50;
 /** after a size refusal the session holds requests to this share of the one that was refused */
 const LEARNED_CAP_SHARE = 0.85;
 /** past this many images in a request every image must be under 2000 px (anthropic's many-image rule) */
@@ -539,7 +541,10 @@ export class EngineSession {
 	private touched = new Set<string>();
 	/** the escalation the next step carries in telemetry */
 	private escalationNote: string | undefined;
-	/** the last real request, replayed with a one-token cap to keep the cache warm while parked */
+	/**
+	 * the last real request, replayed with a one-token cap to keep the cache warm while parked. its context (the
+	 * copy of the message list) is dropped once warming stops; the model and options stay for the idle summary
+	 */
 	private lastCall: { model: Model<Api>; context: any; options: any } | undefined;
 	private warmTimer: ReturnType<typeof setTimeout> | undefined;
 	private warmUntil = 0;
@@ -993,7 +998,7 @@ export class EngineSession {
 			image_bytes: this.lastSize.imageBytes,
 			tail: sentMessages.slice(-5).map((m) => ({ role: m.role, text: excerpt(m.content ?? m.parts) })),
 		});
-		if (this.requests.length > 200) this.requests.shift();
+		if (this.requests.length > REQUEST_SUMMARIES) this.requests.shift();
 		if (model.api === "anthropic-messages") {
 			// the ttl is part of what an entry is found by, so a sibling at the other ttl is not waiting for the same entry
 			const retention = this.requestRetention ?? this.cacheRetention();
@@ -1157,7 +1162,7 @@ export class EngineSession {
 				if (outcome !== "aborted" && !media && last?.errorType?.kind !== "context_overflow") {
 					this.scheduleWarm();
 					this.scheduleIdleSummary();
-				}
+				} else this.dropWarmCopy();
 				// a turn the provider refused for its media (size, image count, an image it cannot read) learns the
 				// limit it showed now, before anything else can send, and drops images; one refused for length compacts
 				// and goes on; one that ended near the threshold summarises ahead
@@ -1703,13 +1708,23 @@ export class EngineSession {
 	private scheduleWarm() {
 		this.cancelWarm();
 		const w = this.opts.warm?.();
-		if (!w?.enabled || !this.lastCall) return;
+		if (!w?.enabled || !this.lastCall?.context) return this.dropWarmCopy();
 		const ttl = this.cacheRetention() === "long" ? 3_600_000 : 300_000;
 		// CMX2_WARM_DELAY_MS shortens the wait for tests; the default refreshes at 90% of the ttl
 		const delay = Number(process.env.CMX2_WARM_DELAY_MS) || Math.max(1, Math.min(ttl * 0.9, ttl - 10_000));
 		this.warmUntil = Date.now() + w.horizonMs;
-		if (Date.now() + delay > this.warmUntil) return;
+		if (Date.now() + delay > this.warmUntil) return this.dropWarmCopy();
 		this.warmTimer = setTimeout(() => void this.warmOnce(delay), delay);
+	}
+
+	/** warming has stopped: the copy of the last request's messages goes; the next real request makes a new one */
+	private dropWarmCopy() {
+		if (this.lastCall?.context) this.lastCall = { ...this.lastCall, context: undefined };
+	}
+
+	/** whether the session still holds a copy of its last request to warm with (tests read it) */
+	get holdsWarmCopy(): boolean {
+		return this.lastCall?.context !== undefined;
 	}
 
 	private cancelWarm() {
@@ -1718,17 +1733,24 @@ export class EngineSession {
 	}
 
 	/**
-	 * a refresh is scheduled, or an idle summary is scheduled or on the wire; the residency cache keeps a warming
-	 * session loaded, so neither is lost to an eviction
+	 * a refresh is scheduled or on the wire, an idle summary is scheduled or on the wire, or a summary made ahead
+	 * (prefire or its refresh) is on the wire; the residency cache keeps such a session loaded, so none of them is
+	 * lost to an eviction or left running on a disposed session
 	 */
 	get warming(): boolean {
-		return this.warmTimer !== undefined || this.idleTimer !== undefined || this.idleBusy;
+		return this.warmTimer !== undefined || this.warmBusy || this.idleTimer !== undefined || this.idleBusy || this.summaryOnWire;
+	}
+
+	/** a background summary has started and not landed */
+	private get summaryOnWire(): boolean {
+		return (this.prefire !== undefined && this.prefire.result === undefined) || this.refresh !== undefined;
 	}
 
 	private async warmOnce(delay: number) {
 		this.warmTimer = undefined;
 		const call = this.lastCall;
-		if (this.state !== "idle" || !call || Date.now() > this.warmUntil) return;
+		if (this.disposed || this.state !== "idle") return;
+		if (!call?.context || Date.now() > this.warmUntil) return this.dropWarmCopy();
 		const t0 = performance.now();
 		this.warmBusy = true;
 		try {
@@ -1747,6 +1769,11 @@ export class EngineSession {
 			const stream = await streamFn(call.model, call.context, { ...options, cacheRetention: this.cacheRetention(), signal: ctl.signal, onPayload });
 			let u: any;
 			for await (const ev of stream as AsyncIterable<any>) {
+				// disposed mid-refresh (evicted or deleted): stop here, and arm nothing below
+				if (this.disposed) {
+					ctl.abort();
+					return;
+				}
 				if (ev.type === "error") throw new Error(ev.error?.errorMessage ?? "the provider returned an error");
 				const pu = ev.partial?.usage;
 				if (pu && (pu.input || pu.cacheRead || pu.cacheWrite)) {
@@ -1755,17 +1782,23 @@ export class EngineSession {
 					break;
 				}
 			}
+			if (this.disposed) return;
 			if (!u) throw new Error("the refresh ended before the provider reported usage");
 			this.cacheUsed(call.model);
 			this.warmed = true;
 			this.emit("session.warmed", { cache_read: u.cacheRead ?? 0, cache_write: u.cacheWrite ?? 0, input: u.input ?? 0, output: u.output ?? 0, cost: u.cost?.total ?? 0, ms: Math.round(performance.now() - t0) });
 		} catch (e) {
+			if (this.disposed) return;
 			this.emit("session.warning", { message: `cache warming stopped: ${e instanceof Error ? e.message : String(e)}` });
+			// (a turn that started meanwhile holds its own request)
+			if (this.state === "idle" && this.lastCall === call) this.dropWarmCopy();
 			return;
 		} finally {
 			this.warmBusy = false;
 		}
+		if (this.disposed) return;
 		if (this.state === "idle" && Date.now() + delay <= this.warmUntil) this.warmTimer = setTimeout(() => void this.warmOnce(delay), delay);
+		else if (this.state === "idle" && this.lastCall === call) this.dropWarmCopy();
 	}
 
 	/** the cache's ttl in force, in ms */

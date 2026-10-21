@@ -8,6 +8,10 @@
  * its virtual root at their path below packages/ (tools/src/codemode-worker.js, tui/src/index.js), which
  * is where run.ts and commands/tui.ts look for them in a binary. the tui is a separate entry so the
  * daemon's import graph never holds pi-tui (the engine's drift test).
+ *
+ * whitespace and syntax are minified, identifiers are not, so stack traces in serve.log keep their function
+ * names. `--bytecode` ships each module precompiled (it starts faster and holds less code memory; the binary
+ * is larger); bytecode needs `--format=esm` here because the cli entry uses top-level await.
  */
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -31,7 +35,7 @@ function platformTarget(): string {
 async function build(target: string): Promise<string> {
 	const name = values.all ? `cmx2-${target.replace(/^bun-/, "")}` : "cmx2";
 	const outfile = join(outDir, name);
-	const proc = Bun.spawnSync(["bun", "build", "--compile", `--target=${target}`, "--minify-syntax", `--define=CMX2_VERSION=${JSON.stringify(version)}`, ...(values.repo ? [`--define=CMX2_REPO=${JSON.stringify(values.repo)}`] : []), ...ENTRIES, "--outfile", outfile], { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
+	const proc = Bun.spawnSync(["bun", "build", "--compile", `--target=${target}`, "--format=esm", "--minify-syntax", "--minify-whitespace", "--bytecode", `--define=CMX2_VERSION=${JSON.stringify(version)}`, ...(values.repo ? [`--define=CMX2_REPO=${JSON.stringify(values.repo)}`] : []), ...ENTRIES, "--outfile", outfile], { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
 	if (proc.exitCode !== 0) {
 		console.error(proc.stderr.toString() || proc.stdout.toString());
 		throw new Error(`build for ${target} failed`);

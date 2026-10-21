@@ -2,6 +2,18 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
+## unreleased
+
+contract version 7. additive: progress frames carry `state.metadata.progress`.
+
+### changed
+- a daemon keeps at most 4 idle sessions loaded and drops idle ones after 20 minutes unless they are warming the prompt cache; a session keeps 50 request summaries, not 200, and drops its copy of the last request once warming stops. why: each loaded session holds about its whole transcript in memory; with large sessions rss went from 128-155 mb to 102-107 mb.
+- a running shell's output tail (`message.part.updated` with `state.metadata.output`, at most once a second) is no longer stored, logged or numbered: on the default stream it has no id line and is numbered by `state.metadata.progress` (1, 2, 3 per part); reads carry the latest tail, and a resume gets that latest tail where it goes live, not every tick.
+- the event log keeps 30 minutes or 10,000 events, whichever keeps more (it kept at least 50,000 of any age). a client away longer gets `stream.reset` and reconciles, as before.
+- serve.log rotates at 10 mb, keeping 3 older copies.
+- the port watch probes every 250 ms for 30 s, then every 2 s; lsof and ps run without blocking the daemon.
+- release binaries ship bytecode with whitespace minified and names kept: the first health answer comes in about 33 ms instead of 80 and boot rss is 53 mb instead of 60; the binary grows from 72 to 81 mb.
+
 ## 0.8.17 - 2026-10-19
 
 contract version 7. no contract change.

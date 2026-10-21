@@ -994,7 +994,7 @@ export function createClient(opts: ClientOptions) {
 				hash: string;
 				bytes: string;
 			}>("GET", `/session/${encodeURIComponent(params.sessionID)}/prefix`, undefined, undefined, o),
-		/** summaries of the last 200 model requests (prefix hash, markers, gates) */
+		/** summaries of the last 50 model requests (prefix hash, markers, gates) */
 		requests: (params: { sessionID: string }, o?: CallOptions) =>
 			call<Array<Record<string, unknown>>>("GET", `/session/${encodeURIComponent(params.sessionID)}/requests`, undefined, undefined, o),
 		/** the engine transcript as the model sees it (pi's message shapes), for evals and debugging */

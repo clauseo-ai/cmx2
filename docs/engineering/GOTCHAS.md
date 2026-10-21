@@ -465,3 +465,10 @@ format: slug, what happened, the fix or the rule.
 - oh-my-pi is MIT but a hard fork with bun and n-api coupling; take the two
   standalone crates' designs (`pi-iso`, `pi-shell`) and the revive/wake
   logic as design only.
+
+## round three perf (2026-10-21)
+
+- `bun --compile --bytecode` defaults to cjs, which refuses top-level await: pass `--format=esm`.
+- evicting sessions lowers heap, not rss (the allocator keeps its pages): measure with `/global/memory?gc=true`.
+- `Bun.spawn` throws synchronously when the command is missing, unlike `spawnSync`, which returned an error: keep the spawn inside the try, and catch in any timer that calls it.
+- test ports span 4830 to 4929 plus `CMX2_PORT_SHIFT`, so shifts 10 apart collide: give parallel checkouts shifts at least 100 apart.

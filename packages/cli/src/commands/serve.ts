@@ -1,6 +1,8 @@
 import { parseArgs } from "node:util";
-import { loadConfig } from "@cmx2/engine/config";
+import { join } from "node:path";
+import { dataDir, loadConfig } from "@cmx2/engine/config";
 import { serve, VERSION } from "@cmx2/server";
+import { keepLogRotated } from "../logrotate.ts";
 import { fail } from "../util.ts";
 
 export const help = `cmx2 serve: run the daemon that hosts your sessions
@@ -61,6 +63,8 @@ export async function main(args: string[]) {
 		},
 	});
 	console.log(`cmx2 ${VERSION} listening on http://${server.hostname}:${server.port} (pid ${process.pid})`);
+	// under the service unit stdout is serve.log: rotated at 10 MB, three older copies kept
+	keepLogRotated(join(dataDir(), "log", "serve.log"));
 	const shutdown = async () => {
 		await stop();
 		process.exit(0);

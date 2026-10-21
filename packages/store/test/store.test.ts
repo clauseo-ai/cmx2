@@ -163,3 +163,30 @@ test("asks left open by a dead process expire at startup", () => {
 	expect(s.pendingQuestions()).toEqual([]);
 	expect(s.replyPermission("per_1", "once")).toBe(false);
 });
+
+test("event-log retention keeps 30 minutes or 10,000 events, whichever keeps more, and never touches sessions or messages", () => {
+	const s = fresh();
+	for (let i = 0; i < 3; i++) {
+		const sid = `ses_keep${i}`;
+		s.putSession({ id: sid, directory: "/w", title: "k", model: "anthropic/m", session_file: null, created_at: 1 });
+		for (let q = 1; q <= 4; q++) projectMessage(s, { sessionId: sid, cwd: "/w", seq: q, completedAt: 9 }, q % 2 ? { role: "user", content: `hi ${q}`, timestamp: q } : { role: "assistant", content: [{ type: "text", text: `ok ${q}` }], timestamp: q });
+	}
+	const before = { sessions: s.sessionCount(), messages: s.messageCount(), parts: s.partCount() };
+	const keep = { events: 10_000, ms: 30 * 60_000 };
+	const now = 100 * 60_000;
+	const add = (n: number, at: number) => s.db.transaction(() => {
+		for (let i = 0; i < n; i++) s.appendEvent({ at, directory: "/w", project: null, type: "session.updated", properties: "{}" });
+	})();
+	// 15,000 old events, then 2,000 inside the half hour: the count bound keeps more (10,000)
+	add(15_000, now - 60 * 60_000);
+	add(2_000, now - 60_000);
+	expect(s.pruneEvents(keep, now)).toBe(7_000);
+	expect(s.eventsPrunedThrough()).toBe(7_000);
+	// 12,000 more inside the half hour: the age bound keeps more (all 14,000 recent ones), so only the old 8,000 go
+	add(12_000, now - 30_000);
+	expect(s.pruneEvents(keep, now)).toBe(8_000);
+	expect(s.eventHead() - s.eventsPrunedThrough()).toBe(14_000);
+	expect({ sessions: s.sessionCount(), messages: s.messageCount(), parts: s.partCount() }).toEqual(before);
+	expect(before).toEqual({ sessions: 3, messages: 12, parts: 12 });
+});
+

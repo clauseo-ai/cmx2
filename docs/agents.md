@@ -23,7 +23,8 @@ and transcript, a path in the tree (`/root/<name>[/<child>]`) and a model from t
   report arrives. the root parks between turns while its agents work, and `session.status` says
   `{type: "idle", parked: {agents, jobs}}`.
 - **the transcript is the truth.** agents, mailboxes and paths live in sqlite. a loaded session is a cache,
-  and at most 8 idle ones stay loaded. after a daemon restart, a message to a parked agent reopens it from
+  at most 4 idle ones stay loaded, and an idle one unused for 20 minutes is dropped too
+  unless it is warming its prompt cache. after a daemon restart, a message to a parked agent reopens it from
   its transcript. an agent that was mid-turn when the daemon stopped comes back `interrupted`, and its
   spawner is told.
 - **caps count running turns.** `caps.running_turns` (default 50, the root included) limits how many

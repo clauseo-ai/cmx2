@@ -57,7 +57,7 @@ export type ToolStateRunning = {
 		end?: number;
 		[key: string]: unknown;
 	};
-	/** while a shell runs, output holds the last 2 kb, updated at most once a second */
+	/** while a shell runs, output holds the last 2 kb, updated at most once a second, and progress counts those updates from 1 (a tail with a lower progress than one already applied is older and can be dropped: progress frames carry no seq) */
 	metadata?: Record<string, unknown>;
 	[key: string]: unknown;
 };
@@ -820,7 +820,7 @@ export interface EventMap {
 		/** opencode-shaped message info; assistant messages add modelID, providerID, cost, tokens, finish, variant (effort) */
 		info: MessageInfo;
 	};
-	/** a part was created or changed (a tool call running, then completed). every text and reasoning part of a streaming message is announced when it starts, before its first delta: this event with empty text and streaming true, logged like any other, in content order; its final update carries the whole text, no streaming, and time {start, end}, and is published when that part's block ends (a reasoning part when the reply begins), not when the step does; the step's end publishes it again, the same text and time.end (v1) */
+	/** a part was created or changed (a tool call running, then completed). every text and reasoning part of a streaming message is announced when it starts, before its first delta: this event with empty text and streaming true, logged like any other, in content order; its final update carries the whole text, no streaming, and time {start, end}, and is published when that part's block ends (a reasoning part when the reply begins), not when the step does; the step's end publishes it again, the same text and time.end. a running shell's output tail (state.metadata.output on its running tool part, at most once a second, numbered by state.metadata.progress) goes out unnumbered and is not logged; reads carry the latest tail and a resume gets it at its seam, not every tick, so a client that buffers frames until its read lands orders tails by progress, not by seq (v1) */
 	"message.part.updated": {
 		sessionID: string;
 		/** opencode-shaped part, discriminated on type. step-start, step-finish, patch and subtask appear in imported (source cmx) history only */
