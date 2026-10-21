@@ -158,6 +158,17 @@ run(code)                                                                       
   `worktree.review.requested`; boxbox raises the card on it and nothing else. `project.updated
   {worktree, sandboxes}`, `worktree.merged`, `worktree.discarded`; `GET /project?worktrees=true`,
   `GET /experimental/worktree`, `GET .../diff`.
+- `GET /project` reads each project's checkouts with git off the event loop and keeps them until
+  something that publishes `project.updated` (a checkout made, merged or discarded, a project
+  opened) reads them again; a checkout made with git by hand shows after the next such event.
+- session rows carry their directory's branch and dirty flag: git runs async, cached 30 s per
+  directory and dropped on an edit or a turn's end. a read waits for it first, then reads its rows
+  and stamps `x-cmx2-seq` in one synchronous step (a2). a session event whose directory has no
+  fresh status waits for it too, then goes out with the session as it is by then (updates asked for
+  meanwhile fold into it). a git (or a stat of the directory) that takes over 10 s is stopped and
+  the row keeps the last status known for 5 s, or shows no branch when none is known, as a
+  directory outside git does. activity (a landed message, an ask) sends one
+  `session.updated` per session per tick.
 - `spawn({directory})` puts an agent to work in a checkout; a checkout's sessions belong to its
   repository's project (`projectID` is the main checkout's path).
 
@@ -262,6 +273,14 @@ this was measured on: `GOTCHAS.md`, "sync and the listener (m6)".
   `job`, `process`, `worktree`, `step` (telemetry), `permission`,
   `question`. page cache capped; connections pooled; transcripts read in
   ranges, never materialised whole for rendering.
+- a landed message's writes (projection rows, its logged events, the session
+  touch) commit in one transaction; its events reach subscribers after the
+  commit, so a rollback never takes back a seq a client holds. a read of an unloaded session replays its
+  transcript into the projection only when the file grew or the rows changed
+  (size, mtime) since this process last read it, and then from the last row's line, not the
+  top (what was read is kept in memory, so the first read after a restart
+  replays once). message pages splice the stored info and part json as
+  written; archived sessions' rows are parsed and rebuilt.
 - import: a one-shot importer from `~/.local/share/opencode/opencode.db`
   (sessions, messages, parts) into the projection so history is browsable.
 

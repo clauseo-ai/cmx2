@@ -1,6 +1,7 @@
 import { dlopen, FFIType, read } from "bun:ffi";
 import { createHash } from "node:crypto";
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
+import { realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
 /**
@@ -186,6 +187,45 @@ interface GitResult {
 function git(cwd: string, args: string[], env?: Record<string, string>): GitResult {
 	const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...env } });
 	return { code: r.exitCode ?? 1, out: r.stdout.toString(), err: r.stderr.toString() };
+}
+
+/** how long a git read a client waits on may take before it is stopped and its answer is unknown */
+export const GIT_READ_TIMEOUT_MS = 10_000;
+/** the exit code gitAsync reports for a git it stopped */
+const TIMED_OUT = 124;
+
+/** git without blocking the event loop, for reads a client waits on; a git that hangs is killed after GIT_READ_TIMEOUT_MS */
+async function gitAsync(cwd: string, args: string[]): Promise<GitResult> {
+	try {
+		const p = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+		const done = Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		// raced, not awaited: a child git left behind can hold the pipes open after git itself is killed
+		const won = await Promise.race([done, new Promise<"timeout">((r) => (timer = setTimeout(() => r("timeout"), GIT_READ_TIMEOUT_MS)))]);
+		clearTimeout(timer);
+		if (won === "timeout") {
+			p.kill("SIGKILL");
+			done.catch(() => {});
+			return { code: TIMED_OUT, out: "", err: `git ${args[0]} timed out after ${GIT_READ_TIMEOUT_MS / 1000} s` };
+		}
+		const [out, err, code] = won;
+		return { code: code ?? 1, out, err };
+	} catch (e) {
+		return { code: 1, out: "", err: e instanceof Error ? e.message : String(e) };
+	}
+}
+
+/** a git read that was stopped: what it would have said is unknown */
+function timedOut(r: GitResult, what: string): WorktreeError | undefined {
+	return r.code === TIMED_OUT ? new WorktreeError("WorktreeFailedError", 504, `${what}: ${r.err}`, { timedOut: true }) : undefined;
+}
+
+async function realAsync(p: string): Promise<string> {
+	try {
+		return await realpath(p);
+	} catch {
+		return resolve(p);
+	}
 }
 
 function must(cwd: string, args: string[], what: string, env?: Record<string, string>): string {
@@ -410,6 +450,40 @@ export class Worktrees {
 		return worktreeList(primary)
 			.filter((t) => inside(t.path, root) && t.path !== root)
 			.map((t) => this.info(primary, t));
+	}
+
+	/** list() without blocking the event loop: the same answer, with git and the file system run async */
+	async listAsync(dir: string): Promise<WorktreeInfo[]> {
+		const r = await gitAsync(dir, ["rev-parse", "--show-toplevel", "--git-common-dir"]);
+		const slow = timedOut(r, "finding the repository");
+		if (slow) throw slow;
+		if (r.code !== 0) throw new WorktreeError("WorktreeNotGitError", 400, `${dir} is not inside a git repository; checkouts need one`);
+		const [top, common] = r.out.trim().split("\n");
+		const commonAbs = resolve(dir, common!);
+		const primary = await realAsync(basename(commonAbs) === ".git" ? dirname(commonAbs) : await realAsync(top!));
+		const root = await realAsync(this.rootOf(primary));
+		if (!(await stat(root).then(() => true, () => false))) return [];
+		const listed = await gitAsync(primary, ["worktree", "list", "--porcelain"]);
+		const stuck = timedOut(listed, "listing the checkouts");
+		if (stuck) throw stuck;
+		if (listed.code !== 0) throw new WorktreeError("WorktreeFailedError", 500, `listing the checkouts: ${(listed.err || listed.out).trim() || `git worktree exited ${listed.code}`}`);
+		const items: ListedTree[] = [];
+		for (const line of listed.out.split("\n")) {
+			if (line.startsWith("worktree ")) items.push({ path: await realAsync(line.slice(9).trim()) });
+			else if (line.startsWith("branch ") && items.length) items.at(-1)!.branch = line.slice(7).trim().replace(/^refs\/heads\//, "");
+			else if (line.startsWith("HEAD ") && items.length) items.at(-1)!.head = line.slice(5).trim();
+		}
+		return Promise.all(
+			items
+				.filter((t) => inside(t.path, root) && t.path !== root)
+				.map(async (t) => {
+					const cfg = t.branch ? await gitAsync(primary, ["config", "--get", `branch.${t.branch}.cmx2base`]) : undefined;
+					const late = cfg && timedOut(cfg, "reading a checkout's base");
+					if (late) throw late;
+					const base = cfg ? cfg.out.trim() : "";
+					return { name: basename(t.path), directory: t.path, ...(t.branch ? { branch: t.branch } : {}), ...(base ? { base } : {}), project: primary };
+				}),
+		);
 	}
 
 	private info(primary: string, t: ListedTree): WorktreeInfo {

@@ -7,6 +7,9 @@ notable changes to cmx2, newest first. the format follows keep a changelog. "con
 contract version 7. additive: progress frames carry `state.metadata.progress`.
 
 ### changed
+- the daemon runs git status and checkout lists off its event loop, with a 10 s limit (a slow git keeps the last known status); lists and session events wait for git, and a read's `x-cmx2-seq` still covers its body. why: git ran on the loop after every edit, turn end and list, and every stream stalled; the worst loop stall during an edit-heavy run went from 108-413 ms to 20-51 ms, and `/project` from 113 ms to 3.6 ms.
+- reading an unloaded session again writes nothing (it rewrote every row: about 800 commits for one read of all sessions, now 0), and message pages are built from the stored json instead of parsed and stringified again (daemon cpu for a 19.6 mb transcript 52 to 26 ms; bytes identical).
+- `session.updated` goes out once per tick for activity, and a landed message commits once, its events sent after the commit (5,811 commits in the edit run, now 2,497).
 - a daemon keeps at most 4 idle sessions loaded and drops idle ones after 20 minutes unless they are warming the prompt cache; a session keeps 50 request summaries, not 200, and drops its copy of the last request once warming stops. why: each loaded session holds about its whole transcript in memory; with large sessions rss went from 128-155 mb to 102-107 mb.
 - a running shell's output tail (`message.part.updated` with `state.metadata.output`, at most once a second) is no longer stored, logged or numbered: on the default stream it has no id line and is numbered by `state.metadata.progress` (1, 2, 3 per part); reads carry the latest tail, and a resume gets that latest tail where it goes live, not every tick.
 - the event log keeps 30 minutes or 10,000 events, whichever keeps more (it kept at least 50,000 of any age). a client away longer gets `stream.reset` and reconciles, as before.

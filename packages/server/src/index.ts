@@ -12,12 +12,15 @@ import { Transcript } from "@cmx2/engine/transcript";
 import { evaluate, type PermissionRule, rulesFromConfig, subagentEnv } from "@cmx2/engine/permission";
 import { BusyError, EngineSession, type EngineEvent, type MailRecord, type StepRow, type TurnEvent, type UserBlock } from "@cmx2/engine/session";
 import { defaultSkillDirs, LspPool, McpPool, resizeImage, runCommand, Skills } from "@cmx2/tools";
-import { closeOpenSteps, decodeCursor, documentPart, encodeCursor, messageId, partId, projectMessage, projectTranscript, type SessionQuery, Store, type StoredSession } from "@cmx2/store";
+import { closeOpenSteps, decodeCursor, documentPart, encodeCursor, messageId, partId, projectMessage, projectTranscript, type SessionQuery, type SessionStateInfo, Store, type StoredSession } from "@cmx2/store";
 import { Value } from "typebox/value";
 import { Asks, permissionJson, questionJson, type ReplyOutcome } from "./asks.ts";
 import { Catalog, expandTemplate, providersJson } from "./catalog.ts";
 import { CONTENT_MAX, readContent } from "./content.ts";
 import { findFiles, findText } from "./find.ts";
+import { JSON_TYPE, messagesJson } from "./pages.ts";
+import { ProjectLists } from "./project-lists.ts";
+import { SessionUpdates } from "./session-updates.ts";
 import { fileStatus, VcsCache } from "./vcs.ts";
 import { browse, knownProject, projectOf, projectOfAsync } from "./fs.ts";
 import { Reach, waitingText } from "./reach.ts";
@@ -30,7 +33,7 @@ import { RunLockHeld, RunLocks } from "./lock.ts";
 import { defaultTitle, Titles } from "./title.ts";
 import { listen, type StreamResponse } from "./listen.ts";
 import { requestReviewTool, worktreeTools } from "./worktree-tools.ts";
-import { type Created, type Policy, type SetupRun, WorktreeError, Worktrees } from "@cmx2/worktrees";
+import { type Created, type Policy, type SetupRun, WorktreeError, type WorktreeInfo, Worktrees } from "@cmx2/worktrees";
 import { Notifier, notifyConfig } from "./notify.ts";
 import { PairError, Pairing } from "./pair.ts";
 import { type FileDiff, Snapshots } from "./snapshot.ts";
@@ -146,6 +149,8 @@ export interface ServeOptions {
 	onRestart?: () => void;
 	/** validate every published event against the manifest and log violations (tests turn this on) */
 	checkEvents?: boolean;
+	/** git status on session rows: how long it is kept and when a slow git is stopped (tests shorten these) */
+	vcs?: { freshMs?: number; timeoutMs?: number; unknownMs?: number };
 	/** watch the profile dir and reload on change */
 	watchConfig?: boolean;
 	/** shrinks a photo before it reaches the model; defaults to the tools package's resizer */
@@ -237,6 +242,8 @@ export function serve(opts: ServeOptions) {
 	let burst: { key: string; directory: string; count: number; held?: Delta } | undefined;
 	/** the newest seq this daemon has seen assigned; the cursor every read carries (a2) */
 	let head = store.eventHead();
+	/** frames and notices held while a landed message's transaction is open; sent in order after it commits (landed) */
+	let holding: Array<() => void> | undefined;
 	/**
 	 * assistant messages being streamed, by session: the info announced at the first token and each text
 	 * or reasoning part announced so far, with its type, start and text so far, so reads include what is
@@ -358,7 +365,17 @@ export function serve(opts: ServeOptions) {
 	});
 
 	/** branch and dirty flag per directory, for session rows */
-	const vcs = new VcsCache();
+	const vcs = new VcsCache(opts.vcs);
+
+	/** each project's checkouts as /project lists them, read async; dropped by whatever publishes project.updated */
+	const projectLists = new ProjectLists(async (project) => {
+		try {
+			return (await stat(worktrees.rootOf(project)).then(() => true, () => false)) ? await worktrees.listAsync(project) : [];
+		} catch (e) {
+			// a git that timed out: unknown, answered as no checkouts and asked again shortly
+			return e instanceof WorktreeError && e.data.timedOut ? undefined : [];
+		}
+	});
 
 	// ---------- checkouts ----------
 
@@ -374,17 +391,21 @@ export function serve(opts: ServeOptions) {
 	}
 
 	/** a project as /project lists it; sandboxes are its checkouts, from git's own list */
-	function projectRow(project: string, time?: { created: number; updated: number }, withList = false) {
-		let list: ReturnType<Worktrees["list"]> = [];
-		try {
-			list = existsSync(worktrees.rootOf(project)) ? worktrees.list(project) : [];
-		} catch {}
+	function projectRow(project: string, time?: { created: number; updated: number }, withList = false, listed?: WorktreeInfo[]) {
+		let list: WorktreeInfo[] = listed ?? [];
+		if (!listed) {
+			try {
+				list = existsSync(worktrees.rootOf(project)) ? worktrees.list(project) : [];
+			} catch {}
+			projectLists.set(project, list);
+		}
 		const t = time ?? { created: Date.now(), updated: Date.now() };
 		return { id: project, worktree: project, time: t, sandboxes: list.map((w) => w.directory), ...(withList ? { worktrees: list } : {}) };
 	}
 
 	function publishProject(project: string) {
 		const r = store.projects().find((x) => x.project === project);
+		projectLists.forget(project);
 		publish(project, "project.updated", projectRow(project, r ? { created: r.created, updated: r.updated } : undefined));
 	}
 
@@ -634,9 +655,14 @@ export function serve(opts: ServeOptions) {
 		}
 		if (UNLOGGED.has(type) || how?.unlogged) {
 			// live subscribers only: a stream still replaying gets deltas' text from the streaming resend at its seam
-			if (type === "message.part.delta") return publishDelta(directory, properties as Delta);
+			if (type === "message.part.delta" && !holding) return publishDelta(directory, properties as Delta);
 			flushBurst();
-			for (const s of subscribers) if (s.live && reaches(s, directory, type)) send(s, unloggedFrame(s, type, properties, directory));
+			const fan = () => {
+				if (type === "message.part.delta") return publishDelta(directory, properties as Delta);
+				for (const s of subscribers) if (s.live && reaches(s, directory, type)) send(s, unloggedFrame(s, type, properties, directory));
+			};
+			if (holding) holding.push(fan);
+			else fan();
 			return;
 		}
 		flushBurst();
@@ -644,8 +670,13 @@ export function serve(opts: ServeOptions) {
 		const e: Logged = { seq: 0, directory, project: directory === "global" ? null : projectFor(directory), type, properties: JSON.stringify(properties) };
 		e.seq = store.appendEvent({ at: Date.now(), directory: e.directory, project: e.project, type: e.type, properties: e.properties });
 		head = e.seq;
-		for (const s of subscribers) if (s.live && reaches(s, directory, type)) send(s, loggedFrame(s, e), e.seq);
-		notifier.onEvent(type, properties);
+		const fan = () => {
+			for (const s of subscribers) if (s.live && reaches(s, directory, type)) send(s, loggedFrame(s, e), e.seq);
+			notifier.onEvent(type, properties);
+		};
+		// inside a landed message's transaction the frames wait for its commit (see landed)
+		if (holding) holding.push(fan);
+		else fan();
 	}
 
 	/**
@@ -1195,7 +1226,8 @@ export function serve(opts: ServeOptions) {
 
 	// ---------- sessions ----------
 
-	function info(row: StoredSession) {
+	/** a session row as clients see it. `states`, when given, holds the session_state rows of a whole list (read in one query) */
+	function info(row: StoredSession, states?: Map<string, SessionStateInfo>) {
 		const live = sessions.get(row.id);
 		const slash = row.model.indexOf("/");
 		const summary = row.summary ? JSON.parse(row.summary) : undefined;
@@ -1224,7 +1256,7 @@ export function serve(opts: ServeOptions) {
 			tokens: { input: row.tokens_input ?? 0, output: row.tokens_output ?? 0, cache: { read: row.tokens_cache_read ?? 0, write: row.tokens_cache_write ?? 0 } },
 			...(() => {
 				// context fill: the live session's own count, else what the store kept at its last step (a10)
-				const st = row.source === "cmx" ? {} : store.sessionState(row.id);
+				const st = row.source === "cmx" ? {} : states ? (states.get(row.id) ?? {}) : store.sessionState(row.id);
 				const context = live ? live.contextFill : st.context;
 				const revert = st.revert ? { messageID: st.revert.messageID, ...(st.revert.partID ? { partID: st.revert.partID } : {}), ...(st.revert.snapshot ? { snapshot: st.revert.snapshot } : {}), ...(st.revert.diff ? { diff: st.revert.diff } : {}) } : undefined;
 				return { ...(context ? { context } : {}), ...(revert ? { revert } : {}) };
@@ -1243,10 +1275,41 @@ export function serve(opts: ServeOptions) {
 		return r;
 	}
 
+	/**
+	 * a landed message's writes (projection rows, its logged events, the session touch) in one transaction.
+	 * its events reach subscribers only after the commit, so no client holds a seq a rollback could hand out
+	 * again. a throw part way still commits what was written before it, as separate writes did; the error
+	 * goes on after the commit and the sends.
+	 */
+	function landed(fn: () => void) {
+		let failed: { e: unknown } | undefined;
+		const before = head;
+		const held: Array<() => void> = [];
+		holding = held;
+		try {
+			store.db.transaction(() => {
+				try {
+					fn();
+				} catch (e) {
+					failed = { e };
+				}
+			})();
+		} catch (e) {
+			// the commit failed and rolled back: none of its events reached anyone, and their seqs are free again
+			holding = undefined;
+			head = before;
+			throw e;
+		}
+		holding = undefined;
+		// committed: clients hear the events now, in the order they were logged
+		for (const send of held) send();
+		if (failed) throw failed.e;
+	}
+
 	/** activity on a session: updated_at moves and clients hear it, so the list orders by what was touched last */
 	function touch(id: string) {
 		store.touchSession(id);
-		publishSession("session.updated", id);
+		sessionUpdates.touch(id);
 	}
 
 	const titles = new Titles({
@@ -1260,9 +1323,63 @@ export function serve(opts: ServeOptions) {
 		},
 	});
 
-	function publishSession(type: "session.created" | "session.updated", id: string) {
-		const r = store.session(id);
-		if (r) publish(r.directory, type, { sessionID: id, info: info(r) });
+	/** the directory whose git a session row needs and does not have fresh; git runs async, see loadVcs */
+	function vcsWait(r: StoredSession): string | undefined {
+		return r.source !== "cmx" && reach.ready(r.directory) && !vcs.fresh(r.directory) ? r.directory : undefined;
+	}
+
+	/** git for these rows' directories, run async and in parallel, so info() answers them without blocking */
+	async function loadVcs(rows: StoredSession[]) {
+		const dirs = new Set<string>();
+		for (const r of rows) {
+			const d = vcsWait(r);
+			if (d) dirs.add(d);
+		}
+		await Promise.all([...dirs].map((d) => vcs.load(d)));
+	}
+
+	/** rows as clients see them, with git loaded off the loop and session state read in one query */
+	/**
+	 * rows as clients see them, for a read stamped with x-cmx2-seq (a2): git is loaded off the loop for the rows
+	 * read now, then the rows are read again and built in one synchronous step with the stamp, so an event
+	 * published while git ran is either in the body or after the stamp. a directory that turns up only in the
+	 * second read runs git inline.
+	 */
+	async function readInfos<T extends StoredSession[]>(read: () => T): Promise<() => { rows: T; items: ReturnType<typeof info>[] }> {
+		await loadVcs(read());
+		return () => {
+			const rows = read();
+			const states = store.sessionStates(rows.filter((r) => r.source !== "cmx").map((r) => r.id));
+			return { rows, items: rows.map((r) => info(r, states)) };
+		};
+	}
+
+	/** one session as clients see it, git loaded off the loop */
+	async function infoOf(r: StoredSession) {
+		await loadVcs([r]);
+		return info(store.session(r.id) ?? r);
+	}
+
+	/** git for a directory a new session is about to be made in, so its session.created goes out at once */
+	async function loadVcsDir(directory: string) {
+		if (reach.ready(directory) && !vcs.fresh(directory)) await vcs.load(directory);
+	}
+
+	const sessionUpdates = new SessionUpdates({
+		waitsOn: (id) => {
+			const r = store.session(id);
+			return r ? vcsWait(r) : null;
+		},
+		load: (dir) => vcs.load(dir),
+		emit: (type, id) => {
+			const r = store.session(id);
+			if (r) publish(r.directory, type, { sessionID: id, info: info(r) });
+		},
+	});
+
+	/** settles when the event has gone out (it may wait for git); most callers do not wait */
+	function publishSession(type: "session.created" | "session.updated", id: string): Promise<void> {
+		return sessionUpdates.publish(type, id);
 	}
 
 	// ---------- snapshots, revert, fork, diff ----------
@@ -1378,6 +1495,7 @@ export function serve(opts: ServeOptions) {
 			for (const f of files) publish(dir, "file.edited", { sessionID: id, file: join(dir, f) });
 		}
 		store.setRevert(id, { messageID, ...(partID ? { partID } : {}), seq, ...(snapshot ? { snapshot } : {}), files, ...(diff ? { diff } : {}) });
+		await loadVcs([row(id)]);
 		publishSession("session.updated", id);
 		return info(row(id));
 	}
@@ -1386,7 +1504,7 @@ export function serve(opts: ServeOptions) {
 		const stored = row(id);
 		await snapshotsSettled(id);
 		const armed = store.sessionState(id).revert;
-		if (!armed) return info(stored);
+		if (!armed) return infoOf(stored);
 		if (sessions.get(id)?.state === "busy") throw new HttpError(409, "BusyError", `session ${id} is running a turn`, { sessionID: id });
 		if (armed.snapshot && armed.files.length) {
 			await snapshots.restore(stored.directory, armed.snapshot, armed.files);
@@ -1394,6 +1512,7 @@ export function serve(opts: ServeOptions) {
 			for (const f of armed.files) publish(stored.directory, "file.edited", { sessionID: id, file: join(stored.directory, f) });
 		}
 		store.setRevert(id, null);
+		await loadVcs([row(id)]);
 		publishSession("session.updated", id);
 		return info(row(id));
 	}
@@ -1469,6 +1588,7 @@ export function serve(opts: ServeOptions) {
 			copyFileSync(notes, join(data, "notes", `${newId}.md`));
 		}
 		projectTranscript(store, newId, file, stored.directory);
+		await loadVcsDir(stored.directory);
 		publishSession("session.created", newId);
 		publishSession("session.updated", newId);
 		return info(row(newId));
@@ -1680,7 +1800,7 @@ export function serve(opts: ServeOptions) {
 				return "1h";
 			},
 			onPrefix: (hash: string, bytes: string) => store.putPrefix(id, hash, bytes),
-			onMessage: (seq: number, message: unknown) => {
+			onMessage: (seq: number, message: unknown) => landed(() => {
 				// a queued prompt had a provisional id while it waited; now it has its place in the transcript
 				const provisional = (message as { id?: unknown })?.id;
 				if (typeof provisional === "string") publish(directory, "message.removed", { sessionID: id, messageID: provisional });
@@ -1706,7 +1826,7 @@ export function serve(opts: ServeOptions) {
 					}
 				}
 				touch(id);
-			},
+			}),
 			procs: procs.host(id, directory, child ? subagentEnv() : undefined),
 			child,
 			skills: skillsOf(directory),
@@ -1867,6 +1987,7 @@ export function serve(opts: ServeOptions) {
 			project_id: projectOf(spec.directory),
 			version: VERSION,
 		});
+		await loadVcsDir(spec.directory);
 		publishSession("session.created", s.id);
 		publishSession("session.updated", s.id);
 	}
@@ -2058,7 +2179,7 @@ export function serve(opts: ServeOptions) {
 		const reaped = await procs.reapSession(id);
 		store.archiveSession(id);
 		idleSince.delete(id);
-		publish(stored.directory, "session.deleted", { sessionID: id, info: info(row(id)) });
+		publish(stored.directory, "session.deleted", { sessionID: id, info: await infoOf(row(id)) });
 		if (reaped.killed.length || reaped.kept.length) console.error(`cmx2: session ${id} ended: stopped ${reaped.killed.length} process(es), kept ${reaped.kept.map((k) => k.keep).join(", ") || "none"}`);
 		return true;
 	}
@@ -2319,6 +2440,8 @@ export function serve(opts: ServeOptions) {
 		// a read names the event its state reflects (a2). the body and the cursor are taken in the same synchronous
 		// step as the publish that would change them, so a client applies exactly the events after it
 		const json = (v: unknown, status = 200, headers?: Record<string, string>) => Response.json(v, { status, headers: method === "GET" ? { ...headers, "x-cmx2-seq": cursor() } : headers });
+		/** json() for a body already serialised: the same headers Response.json sets */
+		const jsonText = (body: string, status = 200, headers?: Record<string, string>) => new Response(body, { status, headers: { "content-type": JSON_TYPE, ...(method === "GET" ? { ...headers, "x-cmx2-seq": cursor() } : headers) } });
 
 		if (p === "/global/health") return json({ healthy: true, version: VERSION, name: "cmx2", contract: CONTRACT_VERSION, pid: process.pid });
 		if (p === "/global/event") return sse(req, url, undefined);
@@ -2504,11 +2627,23 @@ export function serve(opts: ServeOptions) {
 		}
 		if (p === "/project" && method === "GET") {
 			const withList = queryOf(url, "projects").worktrees === "true";
-			const rows = store.projects();
-			const known = new Set(rows.map((r) => r.project));
-			// a repository with checkouts is a project even before a session runs in it
-			const extra = worktrees.projects().filter((x) => !known.has(x));
-			return json([...rows.map((r) => projectRow(r.project, { created: r.created, updated: r.updated }, withList)), ...extra.map((x) => projectRow(x, undefined, withList))]);
+			const read = () => {
+				const rows = store.projects();
+				const known = new Set(rows.map((r) => r.project));
+				// a repository with checkouts is a project even before a session runs in it
+				return { rows, extra: worktrees.projects().filter((x) => !known.has(x)) };
+			};
+			// checkouts read off the loop first; then the projects are read again and answered with the stamp in one step (a2)
+			let all = read();
+			let wanted = [...all.rows.map((r) => r.project), ...all.extra];
+			// a project that turns up only in the re-read, or whose unknown answer expired meanwhile, is read off the loop too
+			for (let i = 0; i < 3 && wanted.length; i++) {
+				await Promise.all(wanted.map((x) => projectLists.of(x)));
+				all = read();
+				wanted = [...all.rows.map((r) => r.project), ...all.extra].filter((x) => !projectLists.peek(x));
+			}
+			const { rows, extra } = all;
+			return json([...rows.map((r) => projectRow(r.project, { created: r.created, updated: r.updated }, withList, projectLists.peek(r.project))), ...extra.map((x) => projectRow(x, undefined, withList, projectLists.peek(x)))]);
 		}
 		if (p === "/experimental/worktree" && method === "POST") {
 			const b = await bodyOf<{ name?: string; from?: string; startCommand?: string; wait?: boolean }>(req, "createWorktree");
@@ -2571,9 +2706,11 @@ export function serve(opts: ServeOptions) {
 			// a project-scoped list for a directory is how a client opens a repository (boxbox v1's "open a repo"); it stays a project
 			if (dir && q.scope === "project") await reachFor(dir);
 			if (dir && q.scope === "project" && existsSync(dir) && store.openProject(projectOf(dir))) publishProject(projectOf(dir));
-			const rows = store.sessionsByUpdated({ limit, before, ...listQuery(url, dir, q) });
+			const filters = listQuery(url, dir, q);
+			const build = await readInfos(() => store.sessionsByUpdated({ limit, before, ...filters }));
+			const { rows, items } = build();
 			const last = rows.at(-1);
-			return json(rows.map(info), 200, rows.length === limit && last ? { "x-next-cursor": `${last.updated_at ?? last.created_at}:${last.id}` } : undefined);
+			return json(items, 200, rows.length === limit && last ? { "x-next-cursor": `${last.updated_at ?? last.created_at}:${last.id}` } : undefined);
 		}
 		if (p === "/api/session" && method === "GET") {
 			const q = queryOf(url, "pageSessions");
@@ -2596,12 +2733,13 @@ export function serve(opts: ServeOptions) {
 				if (dir && q.scope === "project") await reachFor(dir);
 				filters = listQuery(url, dir, q);
 			}
-			const rows = store.sessionsByCreated({ limit, ...filters, order, after, direction });
+			const build = await readInfos(() => store.sessionsByCreated({ limit, ...filters, order, after, direction }));
+			const { rows, items } = build();
 			const clean = Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined));
 			const first = rows[0];
 			const last = rows.at(-1);
 			return json({
-				items: rows.map(info),
+				items,
 				cursor: {
 					...(first ? { previous: encodeCursor({ id: first.id, time: first.created_at, order, direction: "previous", ...clean }) } : {}),
 					...(last ? { next: encodeCursor({ id: last.id, time: last.created_at, order, direction: "next", ...clean }) } : {}),
@@ -2658,13 +2796,17 @@ export function serve(opts: ServeOptions) {
 				project_id: projectOf(directory),
 				version: VERSION,
 			});
+			await loadVcsDir(directory);
 			publishSession("session.created", s.id);
 			publishSession("session.updated", s.id);
 			return json(info(row(s.id)), 201);
 		}
 
 		let r = m(/^\/session\/([^/]+)$/);
-		if (r && method === "GET") return json(info(row(r[1]!)));
+		if (r && method === "GET") {
+			await loadVcs([row(r[1]!)]);
+			return json(info(row(r[1]!)));
+		}
 		if (r && method === "PATCH") {
 			const b = await bodyOf<{ title?: string; time?: { archived?: number } }>(req, "updateSession");
 			row(r[1]!);
@@ -2674,7 +2816,9 @@ export function serve(opts: ServeOptions) {
 				if (live) live.title = b.title;
 			}
 			if (b.time?.archived) await archive(r[1]!);
-			publishSession("session.updated", r[1]!);
+			await loadVcs([row(r[1]!)]);
+			// the reply follows its event, even when an earlier update for this session is still waiting on git
+			await publishSession("session.updated", r[1]!);
 			return json(info(row(r[1]!)));
 		}
 		if (r && method === "DELETE") {
@@ -2865,7 +3009,8 @@ export function serve(opts: ServeOptions) {
 		}
 		if ((r = m(/^\/session\/([^/]+)\/children$/)) && method === "GET") {
 			row(r[1]!);
-			return json(store.children(r[1]!).map(info));
+			const build = await readInfos(() => store.children(r![1]!));
+			return json(build().items);
 		}
 		if ((r = m(/^\/session\/([^/]+)\/agents$/)) && method === "GET") {
 			row(r[1]!);
@@ -2942,8 +3087,10 @@ export function serve(opts: ServeOptions) {
 			// the newest page ends with the message being streamed, its text so far marked streaming (a5)
 			const live = before === undefined ? streamingMessage(id) : undefined;
 			const page = live && limit === 1 ? { rows: [], next: store.lastMessageSeq(id) ? store.lastMessageSeq(id) + 1 : null } : store.messages(id, { limit: (live && limit ? limit - 1 : limit) || undefined, before });
-			const items = page.rows.map((m) => ({ info: JSON.parse(m.info), parts: m.parts.map((p) => JSON.parse(progressTail.get(p.id) ?? p.data)) }));
-			return json(live ? [...items, live] : items, 200, page.next !== null ? { "x-next-cursor": String(page.next) } : undefined);
+			// a running shell's latest tail (in memory, never stored) stands in for its stored part
+			const items = messagesJson(page.rows, store.archived(id), (pid) => progressTail.get(pid));
+			if (live) items.push(JSON.stringify(live));
+			return jsonText(`[${items.join(",")}]`, 200, page.next !== null ? { "x-next-cursor": String(page.next) } : undefined);
 		}
 		if ((r = m(/^\/session\/([^/]+)\/message\/([^/]+)$/)) && method === "GET") {
 			const [id, mid] = [r[1]!, r[2]!];
@@ -2953,7 +3100,7 @@ export function serve(opts: ServeOptions) {
 			if (stored.source !== "cmx" && stored.session_file && !sessions.has(id)) projectTranscript(store, id, stored.session_file, stored.directory);
 			const one = store.messageWithParts(id, mid);
 			if (!one) throw notFound(`no message ${mid} in session ${id}`);
-			return json({ info: JSON.parse(one.info), parts: one.parts.map((p) => JSON.parse(progressTail.get(p.id) ?? p.data)) });
+			return jsonText(messagesJson([one], store.archived(id), (pid) => progressTail.get(pid))[0]!);
 		}
 		if ((r = m(/^\/session\/([^/]+)\/steps$/)) && method === "GET") return json(store.steps(row(r[1]!).id));
 		if ((r = m(/^\/session\/([^/]+)\/requests$/)) && method === "GET") return json((await open(r[1]!)).requests);

@@ -205,6 +205,26 @@ export function archivedPart(type: string, data: string): string {
 	}
 }
 
+/** what a session's context holds and its armed revert, as session rows carry them */
+export interface SessionStateInfo {
+	context?: { used: number; limit: number; compactAt?: number };
+	revert?: SessionRevert;
+}
+
+interface SessionStateRow {
+	context_used: number | null;
+	context_limit: number | null;
+	compact_at: number | null;
+	revert: string | null;
+}
+
+function stateInfo(r: SessionStateRow): SessionStateInfo {
+	return {
+		...(r.context_used !== null && r.context_limit !== null ? { context: { used: r.context_used, limit: r.context_limit, ...(r.compact_at ? { compactAt: r.compact_at } : {}) } } : {}),
+		...(r.revert ? { revert: JSON.parse(r.revert) as SessionRevert } : {}),
+	};
+}
+
 function parseJson<T>(s: string | null | undefined, fallback: T): T {
 	if (!s) return fallback;
 	try {
@@ -620,6 +640,11 @@ export class Store {
 		return { ...m, parts: this.db.query("select * from main.part where message_id = ? order by seq").all(messageId) as PartRow[] };
 	}
 
+	/** true when the session lives in archive.db (imported history, read through archivedPart) */
+	archived(sessionId: string): boolean {
+		return this.home(sessionId) === "archive";
+	}
+
 	lastMessageSeq(sessionId: string): number {
 		return ((this.db.query("select max(seq) as n from message where session_id = ?").get(sessionId) as { n: number | null }).n ?? 0) as number;
 	}
@@ -675,15 +700,18 @@ export class Store {
 			.run(id, Math.round(used), limit, compactAt);
 	}
 
-	sessionState(id: string): { context?: { used: number; limit: number; compactAt?: number }; revert?: SessionRevert } {
-		const r = this.db.query("select * from session_state where session_id = ?").get(id) as
-			| { context_used: number | null; context_limit: number | null; compact_at: number | null; revert: string | null }
-			| null;
-		if (!r) return {};
-		return {
-			...(r.context_used !== null && r.context_limit !== null ? { context: { used: r.context_used, limit: r.context_limit, ...(r.compact_at ? { compactAt: r.compact_at } : {}) } } : {}),
-			...(r.revert ? { revert: JSON.parse(r.revert) as SessionRevert } : {}),
-		};
+	sessionState(id: string): SessionStateInfo {
+		const r = this.db.query("select * from session_state where session_id = ?").get(id) as SessionStateRow | null;
+		return r ? stateInfo(r) : {};
+	}
+
+	/** sessionState for many sessions in one query; a session without a state row is left out of the map */
+	sessionStates(ids: string[]): Map<string, SessionStateInfo> {
+		const out = new Map<string, SessionStateInfo>();
+		if (!ids.length) return out;
+		const rows = this.db.query("select * from session_state where session_id in (select value from json_each(?))").all(JSON.stringify(ids)) as Array<SessionStateRow & { session_id: string }>;
+		for (const r of rows) out.set(r.session_id, stateInfo(r));
+		return out;
 	}
 
 	/** arms or clears a revert: messages from `seq` on are parked until the next send makes it permanent */

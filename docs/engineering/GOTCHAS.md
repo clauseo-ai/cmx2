@@ -472,3 +472,6 @@ format: slug, what happened, the fix or the rule.
 - evicting sessions lowers heap, not rss (the allocator keeps its pages): measure with `/global/memory?gc=true`.
 - `Bun.spawn` throws synchronously when the command is missing, unlike `spawnSync`, which returned an error: keep the spawn inside the try, and catch in any timer that calls it.
 - test ports span 4830 to 4929 plus `CMX2_PORT_SHIFT`, so shifts 10 apart collide: give parallel checkouts shifts at least 100 apart.
+- an unloaded session's transcript is replayed into the database only when its size, mtime or last row changed; the record lives in memory, so the first read after a restart replays once.
+- a read stamped with `x-cmx2-seq` loads git first, then reads its rows and stamps in one synchronous step: rows read before an await and stamped after it make boxbox drop the events that fell inside the wait.
+- events a transaction publishes are held until it commits; a failed commit sends nothing and puts the head back, or clients would hold ids the next process hands out again.

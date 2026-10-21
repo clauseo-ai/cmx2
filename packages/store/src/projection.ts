@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { shrinkDetails, toolTitle } from "@cmx2/tools/record";
 import type { MessageRow, PartRow, RecallDoc, Store } from "./index.ts";
 
@@ -486,22 +486,60 @@ function row(sessionId: string, seq: number, role: string, created: number, comp
 export function projectTranscript(store: Store, sessionId: string, path: string, cwd: string, opts: { all?: boolean } = {}): number {
 	if (!existsSync(path)) return 0;
 	const have = store.lastMessageSeq(sessionId);
-	let seq = 0;
+	// what this process saw of the file last time (kept in memory, so the first read after a restart pays once):
+	// the same size, mtime and last row means the replay below would rewrite rows with what they hold
+	const memos = projected.get(store) ?? projected.set(store, new Map()).get(store)!;
+	const key = `${sessionId}\0${path}`;
+	const memo = opts.all ? undefined : memos.get(key);
+	const st = statSync(path);
+	if (memo && memo.have === have && st.size === memo.size && st.mtimeMs === memo.mtime) return 0;
+	const buf = readFileSync(path);
+	// a transcript only grows: lines before the last row's line were applied already, so reading starts there
+	const resume = memo && memo.have === have && buf.length > memo.size;
+	let seq = resume ? memo.seq : 0;
 	let applied = 0;
-	for (const line of readFileSync(path, "utf8").split("\n")) {
-		if (!line) continue;
-		let r: any;
-		try {
-			r = JSON.parse(line);
-		} catch {
-			continue;
+	/** byte offset of each message line, by its position, from where reading started */
+	const starts: number[] = [];
+	let at = resume ? memo.offset : 0;
+	/** the end of the last whole line, and the message lines up to it */
+	let complete = at;
+	let seqComplete = seq;
+	while (at < buf.length) {
+		const nl = buf.indexOf(10, at);
+		const end = nl < 0 ? buf.length : nl;
+		const from = at;
+		at = end + 1;
+		const r = end === from ? undefined : parseLine(buf.toString("utf8", from, end));
+		if (r?.type === "message") {
+			seq++;
+			starts[seq] = from;
+			// tool results and turn messages do not create rows, so replay from the last row onwards to catch them
+			if (seq >= have || opts.all) {
+				projectMessage(store, { sessionId, cwd, seq }, r.message);
+				applied++;
+			}
 		}
-		if (r.type !== "message") continue;
-		seq++;
-		// tool results and turn messages do not create rows, so replay from the last row onwards to catch them
-		if (seq < have && !opts.all) continue;
-		projectMessage(store, { sessionId, cwd, seq }, r.message);
-		applied++;
+		if (nl >= 0) {
+			complete = at;
+			seqComplete = seq;
+		}
 	}
+	// the next replay starts at the line of the last row (or after the last whole line, when the file has no such line yet)
+	const last = store.lastMessageSeq(sessionId);
+	const first = Math.max(1, Math.ceil(last));
+	const offset = starts[first];
+	// the mtime read before the file was: a write after it shows as a change next time
+	memos.set(key, { size: buf.length, mtime: st.mtimeMs, have: last, offset: offset ?? complete, seq: offset !== undefined ? first - 1 : seqComplete });
 	return applied;
 }
+
+function parseLine(line: string): any {
+	try {
+		return JSON.parse(line);
+	} catch {
+		return undefined;
+	}
+}
+
+/** per store and transcript: the size projectTranscript last read, the last row it left, and where that row's line starts */
+const projected = new WeakMap<Store, Map<string, { size: number; mtime: number; have: number; offset: number; seq: number }>>();
