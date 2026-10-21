@@ -475,3 +475,6 @@ format: slug, what happened, the fix or the rule.
 - an unloaded session's transcript is replayed into the database only when its size, mtime or last row changed; the record lives in memory, so the first read after a restart replays once.
 - a read stamped with `x-cmx2-seq` loads git first, then reads its rows and stamps in one synchronous step: rows read before an await and stamped after it make boxbox drop the events that fell inside the wait.
 - events a transaction publishes are held until it commits; a failed commit sends nothing and puts the head back, or clients would hold ids the next process hands out again.
+- bun's node:zlib cannot compress a stream synchronously across calls (`_processChunk` closes its handle), so the gzip switch compresses each batch separately with the last 32 kb as its preset dictionary and joins them into one gzip member; every streaming decoder reads it batch by batch.
+- the stall judge's timing depends on the work done per withheld frame: delta frames, and frames to a stream held at the cap, are built per stream rather than shared, or 30 readers through a burst start getting cut.
+- bun's fetch asks for gzip by default, so the tui and cli get gzipped json answers since the rest gzip landed.

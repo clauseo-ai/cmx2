@@ -246,6 +246,46 @@ the tool's result replaces it. having no seq, each tail carries
 `state.metadata.progress` (1, 2, 3 for that part), so a client that holds
 frames until a read lands keeps whichever tail has the higher number.
 
+### stream switches and answer encoding
+
+a stream that asks for nothing gets the frames above, byte for byte; the
+tui, the cli, the sdk and the eval ask for nothing. boxbox asks for opt-in
+query switches on `/global/event` and `/event` (`packages/server/src/stream.ts`;
+the manifest's `StreamQuery` says each one), and a daemon before them ignores
+them:
+
+- `coalesce=100`: each part's deltas are held per stream and sent as one
+  delta per part every 100 ms (offset of the first, text of all), split at
+  the frame cap like any delta. any other frame to that stream sends the
+  held deltas first, so order holds; a stream that falls behind drops them,
+  as its catch-up resends the part whole.
+- `types=a,b`: only those types, live and on replay; `server.heartbeat` and
+  `stream.reset` always pass. heartbeats on such a stream carry the id of
+  the last logged event it has passed (the head when live, its seq while
+  replaying or held), so its cursor never falls out of the window over
+  events it did not ask for.
+- `compact=1`: a catch-up (a resume, or the replay after a hold) first passes
+  over the rows to replay, parsing each state row once, and keys
+  `session.updated` per session, `session.status` per session and status
+  type, `message.updated` per message, `message.part.updated` per part and
+  `project.updated` per project. the first and the last of each key stay (a
+  message's first update before its parts; busy and idle both); one between
+  them is skipped when the last has every field it had. the rest goes as it
+  was, in seq order.
+- `gzip=1` with `Accept-Encoding: gzip`: one gzip stream per subscriber. the
+  frames of one turn of the loop (or 64 KB) are deflated together with the
+  last 32 KB of the stream as their dictionary and sync-flushed, which joins
+  them into one deflate stream a decoder reads frame by frame; the end writes
+  the gzip trailer. it runs synchronously, so the 1 MB cap and the stall
+  judge count compressed bytes on the socket (plus at most one batch).
+
+frames are built once per kind of stream (directory or global) and shared,
+except deltas and frames to a stream held at the cap, which each stream
+builds as before: the judge's pacing during a burst depends on that work.
+json answers over 1 kb are gzipped (level 4, off the loop) when the request's
+`Accept-Encoding` takes gzip, with the compressed `content-length` the
+front's answer counting needs; the decoded bytes are the same.
+
 ### the listener
 
 the public port is a small tcp front (`node:net`). it reads the first

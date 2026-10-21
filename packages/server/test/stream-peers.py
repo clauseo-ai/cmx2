@@ -14,7 +14,8 @@
       not whole before the stream's; front and hop say who answered the stream (the front writes `date` first).
 
 `ka` sends a /global/health first on the same connection, so the stream is a kept-alive connection's
-second request, as a pooled http client sends it.
+second request, as a pooled http client sends it. with PEER_GZIP=1 in the environment, read and stall ask
+for the gzip stream (?gzip=1 and Accept-Encoding: gzip); read decodes it as it arrives with python's zlib.
 """
 
 import json
@@ -23,6 +24,12 @@ import select
 import socket
 import sys
 import time
+import zlib
+import os
+
+GZIP = os.environ.get("PEER_GZIP") == "1"
+STREAM = "/global/event?gzip=1" if GZIP else "/global/event"
+ENC = "Accept-Encoding: gzip\r\n" if GZIP else ""
 
 
 def connect(port, ka):
@@ -60,10 +67,11 @@ def read(port, rate, ka, cursor, need, timeout):
     while not done and time.time() - t0 < timeout:
         s = connect(port, ka)
         cur = f"Last-Event-ID: {last}\r\n" if last else ""
-        s.sendall(f"GET /global/event HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\n{cur}\r\n".encode())
+        s.sendall(f"GET {STREAM} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\n{ENC}{cur}\r\n".encode())
         buf = b""
         text = b""
         head = False
+        inflate = zlib.decompressobj(16 + zlib.MAX_WBITS) if GZIP else None
         started = time.time()
         got = 0
         while time.time() - t0 < timeout:
@@ -84,6 +92,9 @@ def read(port, rate, ka, cursor, need, timeout):
                 i = buf.find(b"\r\n\r\n")
                 if i < 0:
                     continue
+                if GZIP and b"content-encoding: gzip" not in buf[:i].lower():
+                    print(json.dumps({"error": "the stream is not gzip"}), flush=True)
+                    sys.exit(1)
                 buf = buf[i + 4 :]
                 head = True
                 if not ready:
@@ -96,7 +107,8 @@ def read(port, rate, ka, cursor, need, timeout):
                 n = int(buf[:e], 16)
                 if n == 0 or len(buf) < e + 2 + n + 2:
                     break
-                text += buf[e + 2 : e + 2 + n]
+                chunk = buf[e + 2 : e + 2 + n]
+                text += inflate.decompress(chunk) if inflate else chunk
                 buf = buf[e + 2 + n + 2 :]
             while True:
                 i = text.find(b"\n\n")
@@ -127,7 +139,7 @@ def read(port, rate, ka, cursor, need, timeout):
 
 def stall(port, ka):
     s = connect(port, ka)
-    s.sendall(f"GET /global/event HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\n\r\n".encode())
+    s.sendall(f"GET {STREAM} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: text/event-stream\r\n{ENC}\r\n".encode())
     print(json.dumps({"ready": True}), flush=True)
     sys.stdin.readline()
     reached = 0

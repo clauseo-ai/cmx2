@@ -3,7 +3,7 @@
 	"info": {
 		"title": "cmx2 daemon",
 		"version": "7",
-		"description": "generated from packages/contract/src/manifest.ts"
+		"description": "generated from packages/contract/src/manifest.ts. json answers over 1 kb are gzipped (content-encoding: gzip) when the request's accept-encoding takes gzip; the decoded bytes are the same. event streams are gzipped only when they ask for it (gzip=1)"
 	},
 	"components": {
 		"schemas": {
@@ -6644,7 +6644,57 @@
 		"/global/event": {
 			"get": {
 				"operationId": "globalEvents",
-				"summary": "every event on the host, wrapped in {directory, project, payload}",
+				"summary": "every event on the host, wrapped in {directory, project, payload}. the query switches are opt-in; a stream that asks for none is unchanged",
+				"parameters": [
+					{
+						"name": "after",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"description": "a resume cursor (<epoch>:<seq>) when the client cannot send Last-Event-ID; Last-Event-ID wins"
+						}
+					},
+					{
+						"name": "coalesce",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"const": "100",
+							"description": "merge each part's message.part.delta text into 100 ms batches: one delta per part per batch, with the offset of its first delta and the text of all of them, split at the frame cap as any delta is. every other frame (status, asks, part starts and ends, heartbeats) goes at once, after the pending deltas of every part, so order holds. offsets stay contiguous and the reassembled text is the same"
+						}
+					},
+					{
+						"name": "types",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"description": "comma-separated event types: send only these, live and on a resume's replay. server.heartbeat and stream.reset always pass; server.connected comes only when listed. each heartbeat on such a stream carries an id: <epoch>:<seq> of the last logged event the stream has passed, sent or filtered out, so Last-Event-ID moves on through events it did not ask for and a resume does not expire for them. a resume resends each part still streaming once in full as message.part.updated: a stream that takes message.part.delta without message.part.updated gets the deltas after it at the offset they continue from, with no text before them, so ask for both"
+						}
+					},
+					{
+						"name": "compact",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"const": "1",
+							"description": "on a resume from a cursor (and the catch-up after a stream is held at the cap), skip the state events between the first and the last of each key instead of sending every event since the cursor. the keys: session.updated per session, session.status per session and status type (busy, idle, retry: a status is never skipped for a later one of another type, so busy then idle both come), message.updated per message, message.part.updated per part, project.updated per project. the first and the last of each key always come, so a message's first message.updated still comes before its parts; one between them is skipped only when the last has every field it had. every other event is kept, and everything in seq order; the final state equals a full replay's for a client that upserts or merges state. live events are never compacted"
+						}
+					},
+					{
+						"name": "gzip",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"const": "1",
+							"description": "with Accept-Encoding: gzip, the stream is gzip (content-encoding: gzip): one gzip stream per subscriber, flushed after every batch (the frames of one turn of the daemon's loop), so each frame decodes as soon as its batch arrives. the stall cap counts the compressed bytes. without Accept-Encoding: gzip the stream stays plain"
+						}
+					}
+				],
 				"responses": {
 					"200": {
 						"description": "server-sent events",
@@ -6692,8 +6742,56 @@
 		"/event": {
 			"get": {
 				"operationId": "events",
-				"summary": "events for one directory, bare payloads",
+				"summary": "events for one directory, bare payloads. the query switches are opt-in; a stream that asks for none is unchanged",
 				"parameters": [
+					{
+						"name": "after",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"description": "a resume cursor (<epoch>:<seq>) when the client cannot send Last-Event-ID; Last-Event-ID wins"
+						}
+					},
+					{
+						"name": "coalesce",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"const": "100",
+							"description": "merge each part's message.part.delta text into 100 ms batches: one delta per part per batch, with the offset of its first delta and the text of all of them, split at the frame cap as any delta is. every other frame (status, asks, part starts and ends, heartbeats) goes at once, after the pending deltas of every part, so order holds. offsets stay contiguous and the reassembled text is the same"
+						}
+					},
+					{
+						"name": "types",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"description": "comma-separated event types: send only these, live and on a resume's replay. server.heartbeat and stream.reset always pass; server.connected comes only when listed. each heartbeat on such a stream carries an id: <epoch>:<seq> of the last logged event the stream has passed, sent or filtered out, so Last-Event-ID moves on through events it did not ask for and a resume does not expire for them. a resume resends each part still streaming once in full as message.part.updated: a stream that takes message.part.delta without message.part.updated gets the deltas after it at the offset they continue from, with no text before them, so ask for both"
+						}
+					},
+					{
+						"name": "compact",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"const": "1",
+							"description": "on a resume from a cursor (and the catch-up after a stream is held at the cap), skip the state events between the first and the last of each key instead of sending every event since the cursor. the keys: session.updated per session, session.status per session and status type (busy, idle, retry: a status is never skipped for a later one of another type, so busy then idle both come), message.updated per message, message.part.updated per part, project.updated per project. the first and the last of each key always come, so a message's first message.updated still comes before its parts; one between them is skipped only when the last has every field it had. every other event is kept, and everything in seq order; the final state equals a full replay's for a client that upserts or merges state. live events are never compacted"
+						}
+					},
+					{
+						"name": "gzip",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"const": "1",
+							"description": "with Accept-Encoding: gzip, the stream is gzip (content-encoding: gzip): one gzip stream per subscriber, flushed after every batch (the frames of one turn of the daemon's loop), so each frame decodes as soon as its batch arrives. the stall cap counts the compressed bytes. without Accept-Encoding: gzip the stream stays plain"
+						}
+					},
 					{
 						"name": "x-cmx2-directory",
 						"in": "header",

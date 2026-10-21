@@ -8,6 +8,7 @@
  * run: bun test packages/server/test/stream.test.ts
  */
 import { afterAll, expect, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULTS } from "@cmx2/engine/config";
@@ -25,6 +26,8 @@ const PEERS = join(import.meta.dir, "stream-peers.py");
 const MIB = 1024 * 1024;
 /** boxbox's a3 burst: 24,000 deltas of 200 characters, about 14 MiB of frames with the finished part's */
 const BURST = "[burst 24000 200]";
+/** the same burst of random text, which gzip cannot shrink below the cap */
+const NOISE = "[noise 24000 200]";
 
 const sse = (type: string, data: unknown) => `event: ${type}\ndata: ${JSON.stringify({ type, ...(data as object) })}\n\n`;
 
@@ -34,6 +37,10 @@ function deltas(body: any): string[] {
 	const first = JSON.stringify((body.messages ?? []).find((m: any) => m.role === "user") ?? "");
 	const burst = first.match(/\[burst (\d+) (\d+)\]/);
 	if (burst) return Array.from({ length: Number(burst[1]) }, (_, i) => `${String(i).padStart(8, "0")} ${"x".repeat(Number(burst[2]) - 10)}\n`);
+	const noise = first.match(/\[noise (\d+) (\d+)\]/);
+	if (noise) return Array.from({ length: Number(noise[1]) }, () => `${Buffer.from(crypto.getRandomValues(new Uint8Array(Number(noise[2])))).toString("base64").slice(0, Number(noise[2]) - 1)}\n`);
+	const bignoise = first.match(/\[bignoise (\d+)\]/);
+	if (bignoise) return [randomBytes(Number(bignoise[1])).toString("base64").slice(0, Number(bignoise[1]))];
 	const big = first.match(/\[big (\d+)\]/);
 	if (big) return ["y".repeat(Number(big[1]))];
 	return ["ok"];
@@ -85,9 +92,9 @@ async function turn(text: string) {
 	return id;
 }
 
-/** one peer process; `next()` is its next json line */
-function peer(args: string[]) {
-	const child = Bun.spawn(["python3", PEERS, args[0]!, String(PORT), ...args.slice(1)], { stdin: "pipe", stdout: "pipe", stderr: "inherit" });
+/** one peer process; `next()` is its next json line. gzip: it asks for the gzip stream (and decodes it) */
+function peer(args: string[], gzip = false) {
+	const child = Bun.spawn(["python3", PEERS, args[0]!, String(PORT), ...args.slice(1)], { stdin: "pipe", stdout: "pipe", stderr: "inherit", env: { ...process.env, PEER_GZIP: gzip ? "1" : "0" } });
 	const reader = child.stdout.getReader();
 	const dec = new TextDecoder();
 	let buf = "";
@@ -117,22 +124,27 @@ function peer(args: string[]) {
 }
 
 /** a reader at `rate` KB/s (0: as fast as it can), resuming whenever the daemon closes it, until `need` turns settle */
-const reader = (rate: number, opts: { ka?: boolean; cursor?: string; need?: number } = {}) => peer(["read", String(rate), opts.ka ? "ka" : "-", opts.cursor ?? "-", String(opts.need ?? 1), "170"]);
+const reader = (rate: number, opts: { ka?: boolean; cursor?: string; need?: number; gzip?: boolean } = {}) => peer(["read", String(rate), opts.ka ? "ka" : "-", opts.cursor ?? "-", String(opts.need ?? 1), "170"], opts.gzip);
 
 const mib = (n: number) => `${(n / MIB).toFixed(1)} MiB`;
 const said = (closes: string[]) => closes.slice(0, 3).forEach((l) => console.log(`  daemon said: ${l}`));
 
-for (const ka of [false, true]) {
-	const how = ka ? "as a kept-alive connection's second request" : "as a connection's first request";
+// the gzip stream's cap counts compressed bytes, so its burst is random text that gzip cannot bring under the cap
+for (const [ka, gzip] of [
+	[false, false],
+	[true, false],
+	[false, true],
+]) {
+	const how = (ka ? "as a kept-alive connection's second request" : "as a connection's first request") + (gzip ? ", gzip" : "");
 	test(`a22: a subscriber that never reads (${how}) is closed in a burst far past the cap, handed no more than the cap and socket buffers`, async () => {
-		await withDaemon(ka ? "stall-ka" : "stall", async (closes) => {
-			const stalled = peer(["stall", ka ? "ka" : "-"]);
-			const witness = reader(0);
+		await withDaemon(ka ? "stall-ka" : gzip ? "stall-gzip" : "stall", async (closes) => {
+			const stalled = peer(["stall", ka ? "ka" : "-"], gzip);
+			const witness = reader(0, { gzip });
 			try {
 				expect((await stalled.next()).ready).toBe(true);
 				expect((await witness.next()).ready).toBe(true);
 				await Bun.sleep(300);
-				await turn(BURST);
+				await turn(gzip ? NOISE : BURST);
 				const w = await witness.next();
 				// the turn has settled: the stalled subscriber reads for the first time, as probe a3's does
 				stalled.go();
@@ -151,12 +163,14 @@ for (const ka of [false, true]) {
 	}, 120_000);
 }
 
-test("a22: a 500 KB/s reader with a 64 KB receive buffer is never closed through a 1.5 MB part, live or replayed", async () => {
-	await withDaemon("slow", async (closes) => {
-		const live = reader(500);
+for (const gzip of [false, true])
+test(`a22: a 500 KB/s reader with a 64 KB receive buffer is never closed through a 1.5 MB part, live or replayed${gzip ? ", gzip" : ""}`, async () => {
+	// under gzip the part is random text: a part of one letter shrinks to a few KB and would never slow the reader
+	await withDaemon(gzip ? "slow-gzip" : "slow", async (closes) => {
+		const live = reader(500, { gzip });
 		try {
 			expect((await live.next()).ready).toBe(true);
-			await turn(`[big ${1536 * 1024}]`);
+			await turn(gzip ? `[bignoise ${1536 * 1024}]` : `[big ${1536 * 1024}]`);
 			const r = await live.next();
 			console.log(`a22: a 1.5 MB part to a 500 KB/s reader, live: ${mib(r.bytes)} in ${r.secs} s, ${r.resumes} resumes, ${closes.length} closes`);
 			said(closes);
@@ -169,9 +183,9 @@ test("a22: a 500 KB/s reader with a 64 KB receive buffer is never closed through
 		}
 		// the same part again, then read from the log from the start of the store
 		const epoch = (await fetch(`${BASE}/global/health`)).headers.get("x-cmx2-seq")!.split(":")[0];
-		await turn(`[big ${1536 * 1024}]`);
+		await turn(gzip ? `[bignoise ${1536 * 1024}]` : `[big ${1536 * 1024}]`);
 		await Bun.sleep(1500);
-		const replay = reader(500, { cursor: `${epoch}:0`, need: 2 });
+		const replay = reader(500, { cursor: `${epoch}:0`, need: 2, gzip });
 		try {
 			expect((await replay.next()).ready).toBe(true);
 			const r = await replay.next();

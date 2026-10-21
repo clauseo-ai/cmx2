@@ -399,7 +399,7 @@ export function openapi(): string {
 	}
 	const doc = {
 		openapi: "3.1.0",
-		info: { title: "cmx2 daemon", version: String(M.CONTRACT_VERSION), description: "generated from packages/contract/src/manifest.ts" },
+		info: { title: "cmx2 daemon", version: String(M.CONTRACT_VERSION), description: `generated from packages/contract/src/manifest.ts. ${M.ENCODING}` },
 		components: { schemas, securitySchemes: { basic: { type: "http", scheme: "basic", description: "user cmx2 (opencode accepted during cutover), password CMX2_SERVER_PASSWORD" } } },
 		security: [{ basic: [] }],
 		paths,

@@ -143,9 +143,9 @@ export function createClient(opts: ClientOptions) {
 				contract: number;
 				pid: number;
 			}>("GET", "/global/health", undefined, undefined, o),
-		/** every event on the host, wrapped in {directory, project, payload} */
+		/** every event on the host, wrapped in {directory, project, payload}. the query switches are opt-in; a stream that asks for none is unchanged */
 		globalEvents: (o?: CallOptions) => stream("/global/event", o),
-		/** events for one directory, bare payloads */
+		/** events for one directory, bare payloads. the query switches are opt-in; a stream that asks for none is unchanged */
 		events: (o?: CallOptions) => stream("/event", o),
 		/** list the directories inside a directory (default home) */
 		browse: (query: {

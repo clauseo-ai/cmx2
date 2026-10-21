@@ -2,6 +2,11 @@ import { createServer as createHttpServer, type IncomingMessage, type ServerResp
 import { connect, createServer as createNetServer, type Socket } from "node:net";
 import type { Server, WebSocketHandler } from "bun";
 import { dlopen, FFIType, ptr } from "bun:ffi";
+import { promisify } from "node:util";
+import { gzip } from "node:zlib";
+import { acceptsGzip } from "./stream.ts";
+
+const gzipAsync = promisify(gzip);
 
 /**
  * the daemon's listener. `Bun.serve` drains a streaming response into native buffers whatever the
@@ -22,6 +27,12 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
  * an event stream asked for later on a kept-alive connection still crosses the hop, whose buffers are
  * pinned as far as the front can reach (its own socket; node's side has no fd).
  */
+
+const CRLF = Buffer.from("\r\n", "latin1");
+/** a json answer over this many bytes is gzipped for a client whose accept-encoding takes gzip */
+export const GZIP_MIN_BYTES = 1024;
+/** rest answers trade a little ratio for less cpu than the default 6 (a transcript can be tens of MB) */
+const GZIP_LEVEL = 4;
 
 /** the loopback hop's buffers on the front's socket (loopback needs no window) */
 const HOP_BUFFER_BYTES = 64 * 1024;
@@ -74,7 +85,7 @@ function pinBuffer(sock: Socket, which: "snd" | "rcv", bytes: number) {
  */
 export interface StreamResponse {
 	writeHead(status: number, headers: Record<string, string>): unknown;
-	write(chunk: string): unknown;
+	write(chunk: string | Uint8Array): unknown;
 	readonly writableLength: number;
 	on(event: "close", fn: () => void): unknown;
 	end(): unknown;
@@ -110,10 +121,11 @@ class SocketResponse implements StreamResponse {
 		lines.push("transfer-encoding: chunked", "", "");
 		this.push(Buffer.from(lines.join("\r\n"), "latin1"));
 	}
-	write(chunk: string) {
+	write(chunk: string | Uint8Array) {
 		// an empty chunk is the end of a chunked body
-		if (!chunk) return;
-		this.push(Buffer.from(`${Buffer.byteLength(chunk).toString(16)}\r\n${chunk}\r\n`));
+		if (!chunk.length) return;
+		if (typeof chunk === "string") return this.push(Buffer.from(`${Buffer.byteLength(chunk).toString(16)}\r\n${chunk}\r\n`));
+		this.push(Buffer.concat([Buffer.from(`${chunk.length.toString(16)}\r\n`, "latin1"), chunk, CRLF]));
 	}
 	on(event: "close", fn: () => void) {
 		this.sock.on(event, fn);
@@ -361,8 +373,39 @@ async function refuseEarly(r: Response, res: ServerResponse) {
 	res.once("finish", () => res.socket?.destroySoon?.());
 }
 
+/**
+ * a json answer gzipped when the client takes gzip and the body is over GZIP_MIN_BYTES (standard content negotiation;
+ * the decoded bytes are the same). the body is read whole to know its size, compressed off the main thread, and sent
+ * with its compressed content-length, which the front's answer counting (Answers) needs. anything else is left as it is
+ */
+async function negotiated(req: IncomingMessage, r: Response): Promise<Response | { headers: Record<string, string>; body: Buffer; status: number }> {
+	if (!r.body || r.headers.has("content-encoding") || !/^application\/json\s*(;|$)/i.test(r.headers.get("content-type") ?? "")) return r;
+	if (!acceptsGzip(req.headers["accept-encoding"] as string | undefined) || req.method === "HEAD") return r;
+	const plain = Buffer.from(await r.arrayBuffer());
+	const headers: Record<string, string> = {};
+	r.headers.forEach((v, k) => {
+		headers[k] = v;
+	});
+	if (plain.length <= GZIP_MIN_BYTES) return new Response(plain, { status: r.status, headers: r.headers });
+	const body = await gzipAsync(plain, { level: GZIP_LEVEL });
+	headers["content-encoding"] = "gzip";
+	headers["content-length"] = String(body.length);
+	headers.vary = headers.vary ? `${headers.vary}, accept-encoding` : "accept-encoding";
+	return { headers, body, status: r.status };
+}
+
 /** a fetch response onto a node response, waiting for the peer whenever the socket is full */
-async function writeResponse(r: Response, res: ServerResponse) {
+async function writeResponse(answer: Response, res: ServerResponse, req?: IncomingMessage) {
+	let r = answer;
+	if (req) {
+		const n = await negotiated(req, r);
+		if (!(n instanceof Response)) {
+			res.writeHead(n.status, n.headers);
+			res.end(n.body);
+			return;
+		}
+		r = n;
+	}
 	const headers: Record<string, string> = {};
 	r.headers.forEach((v, k) => {
 		headers[k] = v;
@@ -403,7 +446,7 @@ export function listen<W>(opts: ListenOptions<W>): Listener {
 				if (verdict && "response" in verdict) return void (await refuseEarly(verdict.response, res));
 				const request = await toRequest(req, res, verdict?.maxBody);
 				if (opts.stream(request, res)) return;
-				await writeResponse(await opts.fetch(request), res);
+				await writeResponse(await opts.fetch(request), res, req);
 			} catch (e) {
 				if (e instanceof BodyTooLarge) {
 					return void (await refuseEarly(Response.json({ name: "PayloadTooLargeError", data: { message: "that request body is bigger than the daemon takes" } }, { status: 413 }), res));

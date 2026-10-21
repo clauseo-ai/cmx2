@@ -633,6 +633,38 @@ export interface RouteDef {
 	also?: { status: number; response: TSchema; description: string };
 }
 
+/** an event stream's opt-in switches: a client that asks for none gets the stream as it always was; a daemon before them ignores them */
+const StreamQuery = Type.Object({
+	after: Type.Optional(Type.String({ description: "a resume cursor (<epoch>:<seq>) when the client cannot send Last-Event-ID; Last-Event-ID wins" })),
+	coalesce: Type.Optional(
+		Type.Literal("100", {
+			description:
+				"merge each part's message.part.delta text into 100 ms batches: one delta per part per batch, with the offset of its first delta and the text of all of them, split at the frame cap as any delta is. every other frame (status, asks, part starts and ends, heartbeats) goes at once, after the pending deltas of every part, so order holds. offsets stay contiguous and the reassembled text is the same",
+		}),
+	),
+	types: Type.Optional(
+		Type.String({
+			description:
+				"comma-separated event types: send only these, live and on a resume's replay. server.heartbeat and stream.reset always pass; server.connected comes only when listed. each heartbeat on such a stream carries an id: <epoch>:<seq> of the last logged event the stream has passed, sent or filtered out, so Last-Event-ID moves on through events it did not ask for and a resume does not expire for them. a resume resends each part still streaming once in full as message.part.updated: a stream that takes message.part.delta without message.part.updated gets the deltas after it at the offset they continue from, with no text before them, so ask for both",
+		}),
+	),
+	compact: Type.Optional(
+		Type.Literal("1", {
+			description:
+				"on a resume from a cursor (and the catch-up after a stream is held at the cap), skip the state events between the first and the last of each key instead of sending every event since the cursor. the keys: session.updated per session, session.status per session and status type (busy, idle, retry: a status is never skipped for a later one of another type, so busy then idle both come), message.updated per message, message.part.updated per part, project.updated per project. the first and the last of each key always come, so a message's first message.updated still comes before its parts; one between them is skipped only when the last has every field it had. every other event is kept, and everything in seq order; the final state equals a full replay's for a client that upserts or merges state. live events are never compacted",
+		}),
+	),
+	gzip: Type.Optional(
+		Type.Literal("1", {
+			description:
+				"with Accept-Encoding: gzip, the stream is gzip (content-encoding: gzip): one gzip stream per subscriber, flushed after every batch (the frames of one turn of the daemon's loop), so each frame decodes as soon as its batch arrives. the stall cap counts the compressed bytes. without Accept-Encoding: gzip the stream stays plain",
+		}),
+	),
+});
+
+/** how json answers are encoded: told in the openapi document's description */
+export const ENCODING = "json answers over 1 kb are gzipped (content-encoding: gzip) when the request's accept-encoding takes gzip; the decoded bytes are the same. event streams are gzipped only when they ask for it (gzip=1)";
+
 const Effort = Type.Union(["low", "medium", "high", "xhigh", "max"].map((e) => Type.Literal(e)));
 const ListQuery = {
 	directory: Type.Optional(Type.String()),
@@ -684,8 +716,8 @@ const Settle = Type.Object({ by: Type.Optional(Type.String({ description: "who i
 
 export const ROUTES: RouteDef[] = [
 	{ method: "GET", path: "/global/health", operationId: "health", summary: "liveness and version", response: Type.Object({ healthy: Ok, version: Type.String(), name: Type.Literal("cmx2"), contract: Type.Integer(), pid: Type.Integer() }) },
-	{ method: "GET", path: "/global/event", operationId: "globalEvents", summary: "every event on the host, wrapped in {directory, project, payload}", response: "sse" },
-	{ method: "GET", path: "/event", operationId: "events", summary: "events for one directory, bare payloads", response: "sse", scoped: true },
+	{ method: "GET", path: "/global/event", operationId: "globalEvents", summary: "every event on the host, wrapped in {directory, project, payload}. the query switches are opt-in; a stream that asks for none is unchanged", query: StreamQuery, response: "sse" },
+	{ method: "GET", path: "/event", operationId: "events", summary: "events for one directory, bare payloads. the query switches are opt-in; a stream that asks for none is unchanged", query: StreamQuery, response: "sse", scoped: true },
 	{
 		method: "GET",
 		path: "/global/fs",

@@ -4,9 +4,13 @@ notable changes to cmx2, newest first. the format follows keep a changelog. "con
 
 ## unreleased
 
-contract version 7. additive: progress frames carry `state.metadata.progress`.
+contract version 7. additive: progress frames carry `state.metadata.progress`; `/global/event` and `/event` take opt-in `coalesce=100`, `types=`, `compact=1` and `gzip=1`; json answers over 1 kb are gzipped when the request accepts gzip.
+
+### added
+- event stream switches, each described in the manifest, all off unless a client asks: `coalesce=100` merges a part's text deltas into 100 ms batches and flushes them before any other frame; `types=` sends only the listed kinds (heartbeats and `stream.reset` always pass, and a heartbeat carries the last id the stream passed); `compact=1` resumes with the first and last state event of each key instead of every event since the cursor (asks never compacted; busy and idle statuses both kept), ending in the same state as a full replay; `gzip=1` with `accept-encoding: gzip` gzips the stream, flushed per batch. a stream that asks for none is unchanged. why: boxbox's stream from a busy daemon went from 699,555 to 29,800 bytes a minute with coalesce and gzip, and an idle one from 546 to 103.
 
 ### changed
+- json answers over 1 kb are gzipped for clients that accept gzip (bun's fetch does, so the tui and cli get them and decode them transparently); the decoded bytes are the same. a transcript read went from 10,967 to 3,387 bytes.
 - the daemon runs git status and checkout lists off its event loop, with a 10 s limit (a slow git keeps the last known status); lists and session events wait for git, and a read's `x-cmx2-seq` still covers its body. why: git ran on the loop after every edit, turn end and list, and every stream stalled; the worst loop stall during an edit-heavy run went from 108-413 ms to 20-51 ms, and `/project` from 113 ms to 3.6 ms.
 - reading an unloaded session again writes nothing (it rewrote every row: about 800 commits for one read of all sessions, now 0), and message pages are built from the stored json instead of parsed and stringified again (daemon cpu for a 19.6 mb transcript 52 to 26 ms; bytes identical).
 - `session.updated` goes out once per tick for activity, and a landed message commits once, its events sent after the commit (5,811 commits in the edit run, now 2,497).

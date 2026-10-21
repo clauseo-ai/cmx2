@@ -32,6 +32,7 @@ import { badRequest, bodyOf, errorResponse, HttpError, intParam, notFound, query
 import { RunLockHeld, RunLocks } from "./lock.ts";
 import { defaultTitle, Titles } from "./title.ts";
 import { listen, type StreamResponse } from "./listen.ts";
+import { gzipSink, plainSink, type RawSink, type Sink, type StreamSwitches, Supersession, switchesOf, wants } from "./stream.ts";
 import { requestReviewTool, worktreeTools } from "./worktree-tools.ts";
 import { type Created, type Policy, type SetupRun, WorktreeError, type WorktreeInfo, Worktrees } from "@cmx2/worktrees";
 import { Notifier, notifyConfig } from "./notify.ts";
@@ -90,28 +91,22 @@ const CLIENT_ID_MS = 24 * 3_600_000;
 
 /** one logged event as stored; frames are rendered from this, live and on replay alike, so both are byte-identical */
 type Logged = { seq: number; directory: string; project: string | null; type: string; properties: string };
-/** where a stream's bytes go: a node response (backlog is real) or an in-process stream (tests) */
-interface Sink {
-	write(text: string): void;
-	/** bytes written that the peer has not taken yet */
-	backlog(): number;
-	/** what the socket's kernel still holds for the peer, read without the loop, where it can be */
-	unsent?(): number | undefined;
-	end(): void;
-	destroy(): void;
-}
 type Delta = { sessionID: string; messageID: string; partID: string; field: string; delta: string; offset: number };
 /** a text or reasoning part of the message being streamed: announced at its start, its text grows with each delta */
 type StreamingPart = { index: number; type: "text" | "reasoning"; text: string; start: number; end?: number };
 type Inflight = { directory: string; info: Record<string, unknown>; parts: Map<string, StreamingPart> };
 type Subscriber = {
 	directory?: string;
+	/** where the frames go (plain or gzip); its backlog and what the peer has taken count the bytes on the wire */
 	sink: Sink;
+	/** the opt-in switches the stream asked for (coalesce, types, compact, gzip); none on a stream that asked for none */
+	switches?: StreamSwitches;
+	/** with coalesce: each part's deltas held for the current batch, merged, in the order the parts first came */
+	pending?: Map<string, { directory: string; d: Delta; bytes: number }>;
+	pendingTimer?: ReturnType<typeof setTimeout>;
 	live: boolean;
 	closed: boolean;
 	close: (why?: string) => void;
-	/** bytes handed to the sink so far; with the backlog, what the peer has taken */
-	written: number;
 	/** the seq of the last logged frame this stream was given */
 	seq: number;
 	/** set while the stream is held back at the cap: nothing is written until the peer catches up */
@@ -159,6 +154,8 @@ export interface ServeOptions {
 	eventWindow?: { events: number; ms: number };
 	/** per-subscriber backlog cap in bytes */
 	streamCap?: number;
+	/** how often every stream gets a heartbeat (tests shorten it) */
+	heartbeatMs?: number;
 	/** how long an idle session stays loaded unused (tests shrink it); the sweep runs every minute, or every `idleSweepMs` */
 	idleEvictMs?: number;
 	idleSweepMs?: number;
@@ -231,6 +228,7 @@ export function serve(opts: ServeOptions) {
 	let violations = 0;
 	const epoch = store.epoch;
 	const eventWindow = opts.eventWindow ?? EVENT_WINDOW;
+	const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
 	const streamCap = opts.streamCap ?? STREAM_CAP_BYTES;
 	const idleEvictMs = opts.idleEvictMs ?? IDLE_EVICT_MS;
 	/**
@@ -625,20 +623,45 @@ export function serve(opts: ServeOptions) {
 		return `{"directory":${JSON.stringify(directory)},"project":${JSON.stringify(project)},"payload":${payloadJson}}`;
 	}
 
+	/**
+	 * one event's frame for each kind of stream, built the first time a subscriber of that kind needs it and shared by the
+	 * rest: a stream scoped to a directory gets the bare payload, a global one the payload in its envelope. a stream held
+	 * back at the cap builds its own, as every stream did before: the judge's looks at a held peer come one per withheld
+	 * frame while a burst holds the loop, so the work per frame paces them and stays as it was
+	 */
+	function shared(build: (global: boolean) => string): (sub: Subscriber) => string {
+		let scoped: string | undefined;
+		let global: string | undefined;
+		return (sub) => (sub.lagging ? build(!sub.directory) : sub.directory ? (scoped ??= build(false)) : (global ??= build(true)));
+	}
+
 	/** one logged event as an sse frame for this subscriber: `id:` then the body, byte-identical on every send */
 	function loggedFrame(sub: Subscriber, e: Logged): string {
-		const p = loggedPayload(e);
-		return `id: ${epoch}:${e.seq}\ndata: ${sub.directory ? p : envelope(e.directory, e.project, p)}\n\n`;
+		return loggedFrames(e)(sub);
+	}
+
+	function loggedFrames(e: Logged): (sub: Subscriber) => string {
+		return shared((global) => {
+			const p = loggedPayload(e);
+			return `id: ${epoch}:${e.seq}\ndata: ${global ? envelope(e.directory, e.project, p) : p}\n\n`;
+		});
 	}
 
 	function unloggedFrame(sub: Subscriber, type: string, properties: Record<string, unknown>, directory: string | null, id?: string): string {
-		const p = unloggedPayload(type, properties);
-		const body = sub.directory ? p : envelope(SERVER_EVENTS.has(type) ? null : directory, directory && directory !== "global" && !SERVER_EVENTS.has(type) ? projectFor(directory) : null, p);
-		return `${id ? `id: ${id}\n` : ""}data: ${body}\n\n`;
+		return unloggedFrames(type, properties, directory, id)(sub);
+	}
+
+	/** an unnumbered event's frames (each kind of stream numbers its payload once) */
+	function unloggedFrames(type: string, properties: Record<string, unknown>, directory: string | null, id?: string): (sub: Subscriber) => string {
+		return shared((global) => {
+			const p = unloggedPayload(type, properties);
+			const body = global ? envelope(SERVER_EVENTS.has(type) ? null : directory, directory && directory !== "global" && !SERVER_EVENTS.has(type) ? projectFor(directory) : null, p) : p;
+			return `${id ? `id: ${id}\n` : ""}data: ${body}\n\n`;
+		});
 	}
 
 	function reaches(sub: Subscriber, directory: string, type: string): boolean {
-		return !sub.directory || sub.directory === directory || SERVER_EVENTS.has(type);
+		return (!sub.directory || sub.directory === directory || SERVER_EVENTS.has(type)) && wants(sub.switches, type);
 	}
 
 	function publish<T extends EventType>(directory: string, type: T, properties: Record<string, unknown>, how?: { unlogged?: true }) {
@@ -657,9 +680,12 @@ export function serve(opts: ServeOptions) {
 			// live subscribers only: a stream still replaying gets deltas' text from the streaming resend at its seam
 			if (type === "message.part.delta" && !holding) return publishDelta(directory, properties as Delta);
 			flushBurst();
+			// frames are built when they go (after a held batch's commit), once per kind of stream, and each stream's held
+			// coalesced deltas go before them (send)
 			const fan = () => {
 				if (type === "message.part.delta") return publishDelta(directory, properties as Delta);
-				for (const s of subscribers) if (s.live && reaches(s, directory, type)) send(s, unloggedFrame(s, type, properties, directory));
+				const frame = unloggedFrames(type, properties, directory);
+				for (const s of subscribers) if (s.live && reaches(s, directory, type)) send(s, frame(s));
 			};
 			if (holding) holding.push(fan);
 			else fan();
@@ -671,7 +697,8 @@ export function serve(opts: ServeOptions) {
 		e.seq = store.appendEvent({ at: Date.now(), directory: e.directory, project: e.project, type: e.type, properties: e.properties });
 		head = e.seq;
 		const fan = () => {
-			for (const s of subscribers) if (s.live && reaches(s, directory, type)) send(s, loggedFrame(s, e), e.seq);
+			const frame = loggedFrames(e);
+			for (const s of subscribers) if (s.live && reaches(s, directory, type)) send(s, frame(s), e.seq);
 			notifier.onEvent(type, properties);
 		};
 		// inside a landed message's transaction the frames wait for its commit (see landed)
@@ -751,12 +778,16 @@ export function serve(opts: ServeOptions) {
 		return undefined;
 	}
 
-	/** writes to a subscriber; a live stream that goes over the cap is held back (a3) */
+	/** writes to a subscriber, after the deltas it holds for a batch (so order holds); a live stream that goes over the cap is held back (a3) */
 	function send(sub: Subscriber, text: string, seq?: number) {
+		if (sub.pending?.size) flushPending(sub);
+		put(sub, text, seq);
+	}
+
+	function put(sub: Subscriber, text: string, seq?: number) {
 		if (sub.closed) return;
 		if (sub.lagging) return withhold(sub, text);
 		sub.sink.write(text);
-		sub.written += Buffer.byteLength(text);
 		if (seq !== undefined) sub.seq = seq;
 		if (sub.live && sub.sink.backlog() > streamCap) lag(sub);
 	}
@@ -803,7 +834,51 @@ export function serve(opts: ServeOptions) {
 	}
 
 	function fanDelta(directory: string, d: Delta) {
-		for (const s of subscribers) if (s.live && reaches(s, directory, "message.part.delta")) for (const f of deltaFrames(s, d, directory)) send(s, f);
+		for (const s of subscribers) {
+			if (!s.live || !reaches(s, directory, "message.part.delta")) continue;
+			if (s.switches?.coalesce) {
+				queueDelta(s, directory, d);
+				continue;
+			}
+			// each stream builds its own delta frames, as before: shared, the fan-out of a burst ran faster than the judge's
+			// pacing was tuned for, and a22's 30 readers were cut more often on a loaded machine (7 of 14 runs, against 2 of 13
+			// on main); the burst is where the time goes, so its pacing stays as it was
+			for (const f of deltaFrames(s, d, directory)) send(s, f);
+		}
+	}
+
+	/**
+	 * coalesce: a delta joins its part's batch when it continues it, else the batches go out first. the batch goes when its
+	 * window ends, when it grows to a frame's worth, and before any other frame to the stream (send), so order holds
+	 */
+	function queueDelta(sub: Subscriber, directory: string, d: Delta) {
+		const key = `${directory}\0${d.sessionID}\0${d.messageID}\0${d.partID}\0${d.field}`;
+		const held = sub.pending?.get(key);
+		// the batch's size runs on with each delta, so a batch of n deltas costs n, not n squared
+		const bytes = Buffer.byteLength(d.delta);
+		if (held && held.d.offset + held.d.delta.length === d.offset) {
+			held.d = { ...held.d, delta: held.d.delta + d.delta };
+			held.bytes += bytes;
+		} else {
+			if (held) flushPending(sub);
+			(sub.pending ??= new Map()).set(key, { directory, d: { ...d }, bytes });
+		}
+		if (sub.pending!.get(key)!.bytes >= DELTA_FRAME_BYTES - 2048) return flushPending(sub);
+		sub.pendingTimer ??= setTimeout(() => {
+			sub.pendingTimer = undefined;
+			flushPending(sub);
+		}, sub.switches!.coalesce);
+	}
+
+	/** sends a stream's held deltas, each part's as one delta (split at the frame cap); a stream no longer live drops them, as its catch-up resends the text */
+	function flushPending(sub: Subscriber) {
+		const pending = sub.pending;
+		if (sub.pendingTimer) clearTimeout(sub.pendingTimer);
+		sub.pendingTimer = undefined;
+		if (!pending?.size) return;
+		sub.pending = undefined;
+		if (!sub.live) return;
+		for (const { directory, d } of pending.values()) for (const f of deltaFrames(sub, d, directory)) put(sub, f);
 	}
 
 	/** one delta as frames of at most DELTA_FRAME_BYTES, split between utf-16 surrogate pairs, offsets moved along */
@@ -824,7 +899,7 @@ export function serve(opts: ServeOptions) {
 	 * is one far behind that takes nothing for a moment (withhold, judge).
 	 */
 	function lag(sub: Subscriber) {
-		const taken = sub.written - sub.sink.backlog();
+		const taken = sub.sink.taken();
 		const hold = sub.hold;
 		// a hold soon after the last goes on with its account unless the peer has read since: one that reads nothing
 		// can still drain a hold into its kernel's receive buffer as that grows, so a drain is not proof of reading
@@ -857,7 +932,7 @@ export function serve(opts: ServeOptions) {
 	 * beat, not as the peer's silence, as the peer could not be served meanwhile.
 	 */
 	function stallClock(sub: Subscriber, low: number, where: string, done: (caughtUp: boolean) => void, beat?: (silent: number) => void): ReturnType<typeof setInterval> {
-		let taken = sub.written - sub.sink.backlog();
+		let taken = sub.sink.taken();
 		let silent = 0;
 		let last = Date.now();
 		const timer = setInterval(
@@ -871,8 +946,8 @@ export function serve(opts: ServeOptions) {
 					const gap = Math.min(now - last, 2 * LAG_BEAT_MS);
 					last = now;
 					const backlog = sub.sink.backlog();
-					if (sub.written - backlog > taken) {
-						taken = sub.written - backlog;
+					if (sub.sink.taken() > taken) {
+						taken = sub.sink.taken();
 						silent = 0;
 					} else silent += gap;
 					beat?.(silent);
@@ -909,7 +984,7 @@ export function serve(opts: ServeOptions) {
 	function observe(sub: Subscriber) {
 		const hold = sub.hold;
 		if (!hold) return;
-		const taken = sub.written - sub.sink.backlog();
+		const taken = sub.sink.taken();
 		const unsent = sub.sink.unsent?.();
 		let moved = taken > hold.seen;
 		if (unsent !== undefined) {
@@ -927,7 +1002,7 @@ export function serve(opts: ServeOptions) {
 	 */
 	function withhold(sub: Subscriber, text: string) {
 		if (!sub.hold) return;
-		const taken = sub.written - sub.sink.backlog();
+		const taken = sub.sink.taken();
 		if (taken - sub.hold.taken >= readProof) holdFrom(sub, taken);
 		const hold = sub.hold;
 		const size = Buffer.byteLength(text);
@@ -964,6 +1039,9 @@ export function serve(opts: ServeOptions) {
 	 * be tens of MB), and only a peer that takes nothing for STREAM_STALL_MS meanwhile is closed (a3).
 	 */
 	async function catchUp(sub: Subscriber, after: number) {
+		// deltas held for a batch are in the text resent at the end
+		flushPending(sub);
+		const supersession = sub.switches?.compact ? await supersessionAfter(sub, after) : undefined;
 		let last = after;
 		for (;;) {
 			if (sub.closed) return;
@@ -971,15 +1049,18 @@ export function serve(opts: ServeOptions) {
 			// and go live from the head (the reset and the switch to live are one synchronous step: no gap)
 			if (store.eventsPrunedThrough() > last) {
 				const at = store.eventHead();
-				const frame = unloggedFrame(sub, "stream.reset", { reason: "expired", seq: at, epoch }, null, `${epoch}:${at}`);
-				sub.sink.write(frame);
-				sub.written += Buffer.byteLength(frame);
+				sub.sink.write(unloggedFrame(sub, "stream.reset", { reason: "expired", seq: at, epoch }, null, `${epoch}:${at}`));
 				last = sub.seq = at;
 				break;
 			}
 			const rows = store.eventsAfter(last, { directory: sub.directory, limit: REPLAY_PAGE });
 			let waited = false;
 			for (const r of rows) {
+				// a type the stream did not ask for, or a state a later event in the replay carries whole (compact)
+				if (!wants(sub.switches, r.type) || supersession?.skip(r.seq)) {
+					last = sub.seq = r.seq;
+					continue;
+				}
 				if (sub.sink.backlog() > streamCap) {
 					// a catch-up after a hold goes on with the hold's account; a fresh resume has none and only the quiet rule
 					const judged = sub.hold && ((silent: number) => ((sub.hold!.silent = silent), observe(sub), judge(sub)));
@@ -987,9 +1068,7 @@ export function serve(opts: ServeOptions) {
 					if (sub.closed) return;
 					waited = true;
 				}
-				const frame = loggedFrame(sub, r);
-				sub.sink.write(frame);
-				sub.written += Buffer.byteLength(frame);
+				sub.sink.write(loggedFrame(sub, r));
 				last = sub.seq = r.seq;
 			}
 			// a page cut by a wait may have missed what was published meanwhile: read on rather than go live
@@ -1009,7 +1088,25 @@ export function serve(opts: ServeOptions) {
 		}
 	}
 
+	/**
+	 * compact: the last seq of each state key among the rows a replay from `after` will read, from a pass over them
+	 * (keys only, in pages, yielding between them). rows published after the pass are replayed whole
+	 */
+	async function supersessionAfter(sub: Subscriber, after: number): Promise<Supersession> {
+		const s = new Supersession();
+		let last = after;
+		for (;;) {
+			const rows = store.eventsAfter(last, { directory: sub.directory, limit: REPLAY_PAGE });
+			for (const r of rows) s.note(r.seq, r.type, r.properties);
+			if (rows.length < REPLAY_PAGE || sub.closed) return s;
+			last = rows.at(-1)!.seq;
+			await new Promise((ok) => setImmediate(ok));
+		}
+	}
+
 	const SSE_HEADERS = { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" };
+	/** a gzip stream says so; a stream without the switch keeps today's headers */
+	const streamHeaders = (s: StreamSwitches): Record<string, string> => (s.gzip ? { ...SSE_HEADERS, "content-encoding": "gzip", vary: "accept-encoding" } : SSE_HEADERS);
 
 	/** a cursor from a client: where to replay from, or why it cannot be replayed */
 	function resolveCursor(raw: string | undefined): { after?: number; reset?: "expired" | "epoch" | "invalid" } {
@@ -1024,13 +1121,14 @@ export function serve(opts: ServeOptions) {
 	}
 
 	/** an event stream. without a cursor it starts live; with one (`Last-Event-ID`, else `?after=`) it catches up from the log first */
-	function openStream(directory: string | undefined, raw: string | undefined, sink: Sink) {
+	function openStream(directory: string | undefined, raw: string | undefined, out: RawSink, switches?: StreamSwitches) {
+		const sink = switches?.gzip ? gzipSink(out) : plainSink(out);
 		const sub: Subscriber = {
 			directory,
 			sink,
+			...(switches ? { switches } : {}),
 			live: false,
 			closed: false,
-			written: 0,
 			seq: store.eventHead(),
 			close: (why) => {
 				if (sub.closed) return;
@@ -1038,6 +1136,7 @@ export function serve(opts: ServeOptions) {
 				subscribers.delete(sub);
 				clearInterval(timer);
 				clearInterval(sub.lagging);
+				clearTimeout(sub.pendingTimer);
 				if (why) {
 					console.error(`cmx2: closed an event stream (${directory ?? "global"}): it ${why}; the client resumes from its last id`);
 					sink.destroy();
@@ -1045,18 +1144,27 @@ export function serve(opts: ServeOptions) {
 			},
 		};
 		subscribers.add(sub);
-		const timer = setInterval(() => send(sub, unloggedFrame(sub, "server.heartbeat", {}, null)), HEARTBEAT_MS);
+		// a stream with types= gets its heartbeats numbered: the id of the last logged event it has passed, sent or filtered
+		// out, so its cursor moves on through events it never asked for and a resume does not expire for them. a live stream
+		// not held back has passed everything up to the head; one replaying or held has passed what its seq says
+		const heartbeat = () => {
+			const id = switches?.types ? `${epoch}:${sub.live && !sub.lagging ? head : sub.seq}` : undefined;
+			send(sub, unloggedFrame(sub, "server.heartbeat", {}, null, id));
+		};
+		const timer = setInterval(heartbeat, heartbeatMs);
 		const c = resolveCursor(raw);
 		if (c.reset) {
 			// the cursor cannot be replayed: say why, point the stream at the head, and let the client reconcile from reads (a2)
 			const at = store.eventHead();
 			send(sub, unloggedFrame(sub, "stream.reset", { reason: c.reset, seq: at, epoch }, null, `${epoch}:${at}`));
 		}
-		send(sub, unloggedFrame(sub, "server.connected", { version: VERSION }, null));
+		if (wants(switches, "server.connected")) send(sub, unloggedFrame(sub, "server.connected", { version: VERSION }, null));
 		if (c.after === undefined) {
 			sub.live = true;
 			return sub;
 		}
+		// what the stream has passed so far, until the replay moves it on
+		sub.seq = c.after;
 		void catchUp(sub, c.after);
 		return sub;
 	}
@@ -1106,7 +1214,8 @@ export function serve(opts: ServeOptions) {
 		return true;
 
 		function attach(directory: string | undefined) {
-		res.writeHead(200, SSE_HEADERS);
+		const switches = switchesOf(url, req.headers);
+		res.writeHead(200, streamHeaders(switches));
 		const sub = openStream(directory, req.headers.get("last-event-id") ?? url.searchParams.get("after") ?? undefined, {
 			write: (t) => void res.write(t),
 			backlog: () => res.writableLength,
@@ -1117,7 +1226,7 @@ export function serve(opts: ServeOptions) {
 				server.cut(res.socket?.remotePort);
 				res.destroy();
 			},
-		});
+		}, switches);
 		res.on("close", () => sub.close());
 		}
 	}
@@ -1126,12 +1235,13 @@ export function serve(opts: ServeOptions) {
 	function sse(req: Request, url: URL, directory: string | undefined): Response {
 		const enc = new TextEncoder();
 		let sub: Subscriber | undefined;
+		const switches = switchesOf(url, req.headers);
 		const stream = new ReadableStream<Uint8Array>({
 			start(controller) {
 				sub = openStream(directory, req.headers.get("last-event-id") ?? url.searchParams.get("after") ?? undefined, {
 					write: (t) => {
 						try {
-							controller.enqueue(enc.encode(t));
+							controller.enqueue(typeof t === "string" ? enc.encode(t) : t);
 						} catch {
 							sub?.close();
 						}
@@ -1147,12 +1257,12 @@ export function serve(opts: ServeOptions) {
 							controller.error(new Error("closed"));
 						} catch {}
 					},
-				});
+				}, switches);
 				req.signal.addEventListener("abort", () => sub?.close());
 			},
 			cancel: () => sub?.close(),
 		});
-		return new Response(stream, { headers: SSE_HEADERS });
+		return new Response(stream, { headers: streamHeaders(switches) });
 	}
 
 	// ---------- processes ----------
