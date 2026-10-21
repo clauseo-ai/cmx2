@@ -2,7 +2,7 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
-## unreleased
+## 0.9.0 - 2026-10-21
 
 contract version 7. additive: progress frames carry `state.metadata.progress`; `/global/event` and `/event` take opt-in `coalesce=100`, `types=`, `compact=1` and `gzip=1`; json answers over 1 kb are gzipped when the request accepts gzip; session infos carry `transcriptRev`, message reads send `x-cmx2-rev`, and `rev=1` puts the revision on stream events.
 
