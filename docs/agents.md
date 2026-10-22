@@ -68,8 +68,10 @@ and transcript, a path in the tree (`/root/<name>[/<child>]`) and a model from t
 - **stepping up is a new spawn.** when a helper's output falls short, `spawn(model, after: <id>)` starts
   another helper, usually on a stronger model, with the first one's brief and last report attached.
   `cmx2 stats` counts helpers by model, the step-ups between them and the retries.
-- **parked children stay warm.** a parked subagent's prompt cache is refreshed with a one-token request
-  just before the ttl runs out, for up to 20 minutes (`spawn(warm: false)` turns it off).
+- **parked sessions stay warm.** a parked session's prompt cache is refreshed just before the ttl runs out:
+  its last request is re-sent and cut off once the provider has read the prompt, costing a cache read and a
+  few output tokens. a subagent is kept warm for up to 20 minutes (`spawn(warm: false)` turns it off); the
+  session you talk to for up to 4 hours on the 1h ttl and 20 minutes on the 5m one.
 
 ## over rest
 

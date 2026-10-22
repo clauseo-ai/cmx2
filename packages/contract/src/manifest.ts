@@ -600,7 +600,7 @@ export const EVENTS = {
 	"step.recorded": event("one assistant step's telemetry", { ...sid, step: StepRow }),
 	"session.escalated": event("failure signals raised a helper's effort for its next turn; the stored effort does not change", { ...sid, from: Type.String(), to: Type.String(), reason: Type.String() }),
 	"session.deescalated": event("a turn without failure signals put an escalated effort back to where the session stands; the stored effort does not change", { ...sid, from: Type.String(), to: Type.String(), reason: Type.String() }),
-	"session.warmed": event("a parked session's prompt cache was refreshed with a one-token request", {
+	"session.warmed": event("a parked session's prompt cache was refreshed: its last request was re-sent and cut off once the provider had read the prompt, costing a cache read and a few output tokens", {
 		...sid,
 		cache_read: Type.Integer(),
 		cache_write: Type.Integer(),

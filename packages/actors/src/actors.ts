@@ -104,8 +104,10 @@ export interface ActorsOptions {
 	agentType?: (directory: string, name: string) => AgentType | undefined;
 	/** agent names whose first turn fails before its first request (`CMX2_FAULT=first_turn:<name>,...`) */
 	faults?: string[];
-	/** how long a parked child's cache is kept warm */
+	/** how long a parked child's cache is kept warm, and a parked root's on the 5m ttl */
 	warmHorizonMs?: number;
+	/** how long a parked root's cache is kept warm on the 1h ttl */
+	rootWarmHorizonMs?: number;
 	/** whether the profile blacklists a model for work in a directory (providers.<id>.blacklist) */
 	blacklisted?: (directory: string, model: string) => boolean;
 	/** where every helper report is saved in full; without it reports name the child's session for the rest of a cut body */
@@ -1429,12 +1431,22 @@ export class Actors {
 		return excludeFor(json<AgentOptions>(a.options, {}));
 	}
 
-	/** whether a parked child's cache is kept warm, and for how long */
-	warmFor(sessionID: string): { enabled: boolean; horizonMs: number } {
+	/**
+	 * whether a parked session's cache is kept warm, and for how long, given the ttl in force. a helper keeps 20 minutes
+	 * (`spawn(warm: false)` turns it off). a root on the 1h ttl keeps 4 hours: a refresh every 54 minutes costs a cache
+	 * read, about a fortieth of the rewrite a return after an hour would pay. on the 5m ttl a refresh every 4.5 minutes
+	 * would cost more than that rewrite over hours, so a 5m root keeps the helpers' window. a root's agent row is made on
+	 * first need, so a session with no row and no parent is a root too
+	 */
+	warmFor(sessionID: string, ttl: "5m" | "1h"): { enabled: boolean; horizonMs: number } {
+		const helperHorizon = this.opts.warmHorizonMs ?? 20 * 60_000;
 		const a = this.rows.get(sessionID);
-		if (!a || a.depth === 0 || a.state === "closed") return { enabled: false, horizonMs: 0 };
-		const opts = json<AgentOptions>(a.options, {});
-		return { enabled: opts.warm ?? true, horizonMs: this.opts.warmHorizonMs ?? 20 * 60_000 };
+		const stored = a ? undefined : this.store.session(sessionID);
+		const root = a ? a.depth === 0 : !!stored && !stored.parent_id;
+		if (a?.state === "closed" || (!a && !root)) return { enabled: false, horizonMs: 0 };
+		if (root) return { enabled: true, horizonMs: ttl === "1h" ? (this.opts.rootWarmHorizonMs ?? 4 * 60 * 60_000) : helperHorizon };
+		const opts = json<AgentOptions>(a!.options, {});
+		return { enabled: opts.warm ?? true, horizonMs: helperHorizon };
 	}
 
 	// ---------- session lifecycle ----------

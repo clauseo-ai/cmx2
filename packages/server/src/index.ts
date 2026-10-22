@@ -12,7 +12,7 @@ import { Transcript } from "@cmx2/engine/transcript";
 import { evaluate, type PermissionRule, rulesFromConfig, subagentEnv } from "@cmx2/engine/permission";
 import { BusyError, EngineSession, type EngineEvent, type MailRecord, type StepRow, type TurnEvent, type UserBlock } from "@cmx2/engine/session";
 import { defaultSkillDirs, LspPool, McpPool, resizeImage, runCommand, Skills } from "@cmx2/tools";
-import { closeOpenSteps, decodeCursor, documentPart, encodeCursor, messageId, partId, projectMessage, projectTranscript, type SessionQuery, type SessionRevert, type SessionStateInfo, Store, type StoredSession } from "@cmx2/store";
+import { closeOpenSteps, decodeCursor, documentPart, encodeCursor, messageId, partId, projectMessage, projectTranscript, type SessionQuery, type SessionRevert, type SessionStateInfo, type RefreshUsage, Store, type StoredSession } from "@cmx2/store";
 import { Value } from "typebox/value";
 import { Asks, permissionJson, questionJson, type ReplyOutcome } from "./asks.ts";
 import { Catalog, expandTemplate, providersJson } from "./catalog.ts";
@@ -188,6 +188,10 @@ export interface ServeOptions {
 	idleSweepMs?: number;
 	/** how many evicted sessions' idle times are kept (tests shrink it) */
 	idleSinceMax?: number;
+	/** how long a parked helper, or a root on the 5m ttl, is kept warm (20 minutes; tests set 0 to turn warming off) */
+	warmHorizonMs?: number;
+	/** how long a parked root on the 1h ttl is kept warm (4 hours) */
+	rootWarmHorizonMs?: number;
 }
 
 /** a request body over this is refused with 413 (photos arrive resized; a transcript import is the biggest body) */
@@ -407,6 +411,8 @@ export function serve(opts: ServeOptions) {
 		faults: faultNames,
 		blacklisted: (directory, model) => blacklisted(configFor(directory), model),
 		reports: reportFiles,
+		warmHorizonMs: opts.warmHorizonMs,
+		rootWarmHorizonMs: opts.rootWarmHorizonMs,
 		agentType: (directory, name) => {
 			const def = catalog.agent(directory, name);
 			if (!def || def.path === "(built in)") return undefined;
@@ -1835,16 +1841,21 @@ export function serve(opts: ServeOptions) {
 		return info(row(newId));
 	}
 
-	/** a context this large is worth keeping across a wait: a 5 minute entry rewritten after every pause costs more than the 1h write premium */
+	/**
+	 * a root context this large is worth keeping across a wait: a 5 minute entry rewritten after every pause costs more than
+	 * the 1h write premium. helpers do not switch on size: they rarely wait more than 5 minutes between steps, a parked
+	 * helper is warmed at 5m, and the switch rewrites the whole prefix at twice the input price
+	 */
 	const LONG_TTL_CONTEXT = 100_000;
 	/**
 	 * why a session without an explicit `cache_ttl` should mark its requests 1h (DECISIONS D23): it has a helper that is not closed
-	 * (its report may take longer than 5 minutes), a background job that will notify it, or its context passed 100k tokens
+	 * (its report may take longer than 5 minutes), a background job that will notify it, or, for a session with no parent,
+	 * its context passed 100k tokens
 	 */
 	function longTtlReason(id: string): string | undefined {
 		if (store.agents.children(id).some((a) => a.state !== "closed")) return "it has a helper that is not closed";
 		if (liveJobsOf(id) > 0) return "a background job will notify it";
-		if ((sessions.get(id)?.contextFill.used ?? 0) > LONG_TTL_CONTEXT) return "its context passed 100k tokens";
+		if (!store.session(id)?.parent_id && (sessions.get(id)?.contextFill.used ?? 0) > LONG_TTL_CONTEXT) return "its context passed 100k tokens";
 		return undefined;
 	}
 
@@ -1981,6 +1992,8 @@ export function serve(opts: ServeOptions) {
 				}
 				if (e.type === "session.model") store.setSessionModel(id, (e.properties as { model: string }).model);
 				if (e.type === "session.effort") store.setSessionEffort(id, (e.properties as { effort: Effort }).effort);
+				// a refresh is paid for like a step: kept with its cost, and added to the session's totals
+				if (e.type === "session.warmed") store.recordRefresh(id, e.properties as unknown as RefreshUsage);
 				if (e.type === "session.status") {
 					// idle carries what the session is parked on; boxbox keeps reading any non-idle type as busy
 					const st = (e.properties as { status?: { type?: string } }).status;
@@ -2032,7 +2045,7 @@ export function serve(opts: ServeOptions) {
 			roster: () => actors.rosterText(id),
 			escalate: child ? (model: string, from: Effort) => routing.escalate(model, from) as Effort | undefined : undefined,
 			allowed: (model: string, effort: Effort) => routing.allowed(model, effort),
-			warm: () => actors.warmFor(id),
+			warm: (ttl: "5m" | "1h") => actors.warmFor(id, ttl),
 			autoCacheTtl: (): "5m" | "1h" => {
 				const why = longTtlReason(id);
 				if (!why) return "5m";
@@ -2257,16 +2270,19 @@ export function serve(opts: ServeOptions) {
 	/**
 	 * the residency lru: idle sessions beyond MAX_RESIDENT are dropped from memory, least recently used
 	 * first, and so is any idle session unused for IDLE_EVICT_MS (the minute sweep). their transcripts are
-	 * the truth; the next message reopens them. a session warming its cache stays loaded until the warming stops.
+	 * the truth; the next message reopens them. a session warming its cache stays loaded until the warming stops,
+	 * with one exception: roots are warmed for hours (D28), so when the idle non-warming sessions kept plus the warming
+	 * roots pass MAX_RESIDENT, a root whose warming is only timers (no refresh, summary or btw on the wire) goes, oldest
+	 * first. it stops warming, and its next return pays a rewrite. helpers, and the idle sweep, never evict a warming session.
 	 */
 	function evictIdle() {
 		// (a session with prompts waiting stays: its queue lives in memory, and dropping it would lose them)
-		const idle = [...sessions.values()].filter((s) => s.state === "idle" && !s.warming && !opening.has(s.id) && s.queued === 0);
+		const settled = (s: EngineSession) => s.state === "idle" && !opening.has(s.id) && s.queued === 0;
+		const idle = [...sessions.values()].filter((s) => settled(s) && !s.warming);
 		idle.sort((a, b) => (lastUsed.get(a.id) ?? 0) - (lastUsed.get(b.id) ?? 0));
 		const stale = Date.now() - idleEvictMs;
 		const over = Math.max(0, idle.length - MAX_RESIDENT);
-		for (const [i, s] of idle.entries()) {
-			if (i >= over && (lastUsed.get(s.id) ?? 0) > stale) continue;
+		const drop = (s: EngineSession) => {
 			idleSince.delete(s.id);
 			idleSince.set(s.id, s.stateSince);
 			for (const id of idleSince.keys()) {
@@ -2276,6 +2292,24 @@ export function serve(opts: ServeOptions) {
 			s.dispose();
 			sessions.delete(s.id);
 			lastUsed.delete(s.id);
+		};
+		let kept = 0;
+		for (const [i, s] of idle.entries()) {
+			if (i >= over && (lastUsed.get(s.id) ?? 0) > stale) {
+				kept++;
+				continue;
+			}
+			drop(s);
+		}
+		// warming helpers never counted toward the cap and still do not; warming roots do
+		const warmRoots = [...sessions.values()].filter((s) => settled(s) && s.warming && !store.session(s.id)?.parent_id);
+		let extra = kept + warmRoots.length - MAX_RESIDENT;
+		if (extra <= 0) return;
+		const roots = warmRoots.filter((s) => s.warmingOnTimers);
+		roots.sort((a, b) => (lastUsed.get(a.id) ?? 0) - (lastUsed.get(b.id) ?? 0));
+		for (const s of roots) {
+			if (extra-- <= 0) break;
+			drop(s);
 		}
 	}
 

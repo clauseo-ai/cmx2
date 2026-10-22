@@ -998,7 +998,7 @@ export interface EventMap {
 		to: string;
 		reason: string;
 	};
-	/** a parked session's prompt cache was refreshed with a one-token request (v1) */
+	/** a parked session's prompt cache was refreshed: its last request was re-sent and cut off once the provider had read the prompt, costing a cache read and a few output tokens (v1) */
 	"session.warmed": {
 		sessionID: string;
 		cache_read: number;

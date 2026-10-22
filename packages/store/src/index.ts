@@ -89,6 +89,16 @@ export interface RecallDoc {
 	text: string;
 }
 
+/** what one cache refresh read, wrote and cost (the session.warmed event's fields) */
+export interface RefreshUsage {
+	input: number;
+	cache_read: number;
+	cache_write: number;
+	output: number;
+	cost: number;
+	ms?: number | null;
+}
+
 export interface BtwRow {
 	id: string;
 	session_id: string;
@@ -676,6 +686,26 @@ export class Store {
 				.run({ id: r.session_id, cost: f.cost, ti: f.tokens_input, to: f.tokens_output, tr: f.tokens_cache_read, tw: f.tokens_cache_write } as never);
 			return true;
 		})();
+	}
+
+	/** one refresh of a parked session's prompt cache: its row, and its spend added to the session's totals in the same transaction */
+	recordRefresh(sessionId: string, r: RefreshUsage, at = Date.now()): void {
+		this.db.transaction(() => {
+			this.db
+				.query("insert into cache_refresh (session_id, at, input, cache_read, cache_write, output, cost, ms) values ($id, $at, $ti, $tr, $tw, $to, $cost, $ms)")
+				.run({ id: sessionId, at, ti: r.input, tr: r.cache_read, tw: r.cache_write, to: r.output, cost: r.cost, ms: r.ms ?? null } as never);
+			this.db
+				.query(
+					`update main.session set cost = cost + $cost, tokens_input = tokens_input + $ti, tokens_output = tokens_output + $to,
+					   tokens_cache_read = tokens_cache_read + $tr, tokens_cache_write = tokens_cache_write + $tw where id = $id`,
+				)
+				.run({ id: sessionId, cost: r.cost, ti: r.input, to: r.output, tr: r.cache_read, tw: r.cache_write } as never);
+		})();
+	}
+
+	/** a session's cache refreshes, oldest first */
+	refreshes(sessionId: string): Array<RefreshUsage & { session_id: string; at: number }> {
+		return this.db.query("select * from cache_refresh where session_id = ? order by at, rowid").all(sessionId) as never;
 	}
 
 	/** hides a btw (a flag; the row stays). false when it was dismissed already */

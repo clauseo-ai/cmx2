@@ -58,12 +58,14 @@ const provider = Bun.serve({
 
 const config = () => ({ ...structuredClone(DEFAULTS), providers: { anthropic: { baseUrl: `http://127.0.0.1:${provider.port}`, apiKey: "unused" } }, sources: [] });
 let d: ReturnType<typeof serve>;
-// a short idle limit and sweep, so the sweep can be seen
+// a short idle limit and sweep, so the sweep can be seen. roots are warmed while parked (D28), and a warming session is
+// never swept; this daemon keeps nothing warm (warmHorizonMs 0), so the cap and the sweep are what is measured here.
+// evicting a warming root over the cap is in warm-evict.test.ts
 const IDLE_MS = 1500;
 
 beforeAll(() => {
 	const c = config();
-	d = serve({ config: c, port: PORT, hostname: "127.0.0.1", dataDir: join(SCRATCH, "data"), checkEvents: true, reload: () => c, idleEvictMs: IDLE_MS, idleSweepMs: 200, idleSinceMax: 3 });
+	d = serve({ config: c, port: PORT, hostname: "127.0.0.1", dataDir: join(SCRATCH, "data"), checkEvents: true, reload: () => c, idleEvictMs: IDLE_MS, idleSweepMs: 200, idleSinceMax: 3, warmHorizonMs: 0 });
 });
 afterAll(async () => {
 	try {
@@ -183,7 +185,7 @@ test("idle sessions beyond the cap, or unused past the idle limit, leave memory 
 	expect(ids.filter((id) => d.sessions.has(id)).length).toBeLessThanOrEqual(MAX_RESIDENT);
 	// the newest ones stay (least recently used goes first)
 	expect(d.sessions.has(ids.at(-1)!)).toBe(true);
-	// a finished root turn does not warm, so it keeps no copy of its last request
+	// a finished turn that does not warm keeps no copy of its last request
 	expect(d.sessions.get(ids.at(-1)!)!.holdsWarmCopy).toBe(false);
 	const idleAt = d.sessions.get(ids.at(-1)!)!.stateSince;
 	// past the idle limit the sweep drops the rest

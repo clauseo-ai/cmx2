@@ -2,6 +2,18 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
+## unreleased
+
+contract version 7. no shape changes: the `session.warmed` description now says how a refresh works.
+
+### changed
+- a cache refresh hangs up as soon as the provider has read the prompt: on anthropic models at the raw `message_start`, which pi reads without passing on, instead of at the first content block, which can come after seconds of thinking billed as output. a refresh costs a cache read and a few output tokens; its usage and cost come from `message_start`, and the abort that follows is not a warning. providers that send no `message_start` keep the old path. why: refreshes sometimes paid hundreds of output tokens for thinking nobody read.
+- the session you talk to is kept warm while parked too: up to 4 hours on the 1h ttl (a refresh every 54 minutes costs a cache read, about a fortieth of the rewrite a return after an hour pays) and 20 minutes on the 5m one (refreshes every 4.5 minutes would cost more than that rewrite over hours). helpers keep 20 minutes. warming roots count toward the residency cap: past it, the oldest one with no request on the wire leaves memory and stops warming. the engine's `warm` option is now asked with the ttl in force; `rootWarmHorizonMs` sets the root's 1h window.
+- a helper no longer switches to the 1h ttl when its context passes 100k tokens; the session you talk to still does, and an open helper or a background job still switches any session. why: helpers rarely wait more than 5 minutes between steps, a parked helper is warmed at 5m, and the switch rewrites the whole prefix at twice the input price.
+
+### added
+- refresh costs are kept: each refresh is a row in a new `cache_refresh` table (migration 16) and its cost and tokens add to the session's totals. why: `session.warmed` was only an event, the event log keeps an hour, and refreshes never reached any total.
+
 ## 0.9.1 - 2026-10-22
 
 contract version 7. additive: session infos carry `forkedFrom`; btw routes (`POST`/`GET /session/:id/btw`, `/btw/:btwID/dismiss`, `/btw/:btwID/promote`), the `Btw` schema, `btw.updated` and `btw.delta` events, and `btw` on a promoted user message's info; `POST /session/:id/agents/message` takes `files`; `agent.report` carries `file`; `POST /session/:id/fork` takes `clientID`.

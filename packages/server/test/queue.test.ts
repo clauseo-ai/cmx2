@@ -1014,7 +1014,7 @@ describe("the prompt cache ttl follows the session's waits", () => {
 		expect(all(ttls.slice(-1), "1h")).toBe(true);
 	}, 60_000);
 
-	test("a context past 100k tokens switches a session to 1h", async () => {
+	test("a context past 100k tokens switches a root session to 1h", async () => {
 		const tag = `ttl-${nonce()}`;
 		const id = await newSession("ttl-big");
 		await prompt(id, `[big] ${tag} one`);
@@ -1022,6 +1022,20 @@ describe("the prompt cache ttl follows the session's waits", () => {
 		const ttls = ttlsFor(tag);
 		expect(ttls[0]!.every((t) => t === "5m")).toBe(true);
 		expect(all(ttls.slice(-1), "1h")).toBe(true);
+	}, 60_000);
+
+	test("a helper whose context passed 100k tokens stays 5m", async () => {
+		const tag = `ttl-${nonce()}`;
+		const root = await newSession("ttl-big-helper-root");
+		const spawned = await post(`/session/${root}/agents`, { brief: `[big] ${tag}-kid`, name: "ttl_big_kid", model: OPUS, effort: "low", warm: false });
+		expect(spawned.status).toBe(201);
+		const kid = spawned.json.agents[0].id as string;
+		await idleOf(kid);
+		await prompt(kid, `${tag}-kid two`);
+		const ttls = ttlsFor(`${tag}-kid`);
+		expect(ttls.length).toBeGreaterThanOrEqual(2);
+		expect(all(ttls, "5m")).toBe(true);
+		expect(d.store.session(kid)!.cache_ttl).toBeFalsy();
 	}, 60_000);
 
 	test("an explicit cache_ttl wins over the rule: a 5m session with a helper stays 5m", async () => {

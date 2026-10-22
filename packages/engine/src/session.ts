@@ -4,7 +4,7 @@ import { hostname } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { Agent } from "./pi-agent.ts";
-import { type Api, getCurrentTools, type Model, normalizeContext } from "@earendil-works/pi-ai";
+import { type Api, calculateCost, getCurrentTools, type Model, normalizeContext, type Usage } from "@earendil-works/pi-ai";
 import { profileFor, profileText } from "@cmx2/prompts";
 import {
 	type AfterWrite,
@@ -446,8 +446,11 @@ export interface EngineSessionOptions {
 	 * rest of this instance's life, so the switch (a 5m entry is not read by a request marked 1h, and the reverse) happens at most once
 	 */
 	autoCacheTtl?: () => "5m" | "1h";
-	/** whether to keep this session's prompt cache warm while it sits parked, and for how long */
-	warm?: () => { enabled: boolean; horizonMs: number };
+	/**
+	 * whether to keep this session's prompt cache warm while it sits parked, and for how long. asked each time the session parks,
+	 * with the ttl in force: a refresh goes at 90% of it, so the ttl sets how many refreshes a horizon buys
+	 */
+	warm?: (ttl: "5m" | "1h") => { enabled: boolean; horizonMs: number };
 	/** searches the session's stored history (the store's index); without it recall reads the transcript file */
 	recall?: RecallSearch;
 }
@@ -583,7 +586,7 @@ export class EngineSession {
 	/** the escalation the next step carries in telemetry */
 	private escalationNote: string | undefined;
 	/**
-	 * the last real request, replayed with a one-token cap to keep the cache warm while parked. its context (the
+	 * the last real request, re-sent and cut off at the provider's first event to keep the cache warm while parked. its context (the
 	 * copy of the message list) is dropped once warming stops; the model and options stay for the idle summary
 	 */
 	private lastCall: { model: Model<Api>; context: any; options: any } | undefined;
@@ -1749,12 +1752,13 @@ export class EngineSession {
 		}
 	}
 
-	/** while parked, re-send the last request with a one-token cap before the cache entry expires */
+	/** while parked, re-send the last request before the cache entry expires, and hang up once the provider has read it */
 	private scheduleWarm() {
 		this.cancelWarm();
-		const w = this.opts.warm?.();
+		const long = this.cacheRetention() === "long";
+		const w = this.opts.warm?.(long ? "1h" : "5m");
 		if (!w?.enabled || !this.lastCall?.context) return this.dropWarmCopy();
-		const ttl = this.cacheRetention() === "long" ? 3_600_000 : 300_000;
+		const ttl = long ? 3_600_000 : 300_000;
 		// CMX2_WARM_DELAY_MS shortens the wait for tests; the default refreshes at 90% of the ttl
 		const delay = Number(process.env.CMX2_WARM_DELAY_MS) || Math.max(1, Math.min(ttl * 0.9, ttl - 10_000));
 		this.warmUntil = Date.now() + w.horizonMs;
@@ -1786,6 +1790,14 @@ export class EngineSession {
 		return this.warmTimer !== undefined || this.warmBusy || this.idleTimer !== undefined || this.idleBusy || this.summaryOnWire || this.asides > 0;
 	}
 
+	/**
+	 * warming, and only on timers: a refresh or idle summary is scheduled and nothing (refresh, summary, btw) is on the
+	 * wire. disposing such a session cancels the timers and loses nothing in flight; the server may evict a root then
+	 */
+	get warmingOnTimers(): boolean {
+		return (this.warmTimer !== undefined || this.idleTimer !== undefined) && !this.warmBusy && !this.idleBusy && !this.summaryOnWire && this.asides === 0;
+	}
+
 	/** a background summary has started and not landed */
 	private get summaryOnWire(): boolean {
 		return (this.prefire !== undefined && this.prefire.result === undefined) || this.refresh !== undefined;
@@ -1800,10 +1812,33 @@ export class EngineSession {
 		this.warmBusy = true;
 		try {
 			// the same request byte for byte (a smaller max_tokens changes thinking parameters, which the message
-			// cache is keyed on); the prompt is processed, and the cache refreshed, before the first event, so
-			// the refresh stops there
+			// cache is keyed on); the prompt is processed, and the cache refreshed, before the provider's first event,
+			// so the refresh hangs up there. on anthropic that is the raw message_start, which pi reads for usage
+			// without passing anything on: the first event pi pushes is the first content block, which can come after
+			// seconds of thinking, all of it billed as output. a request cut at message_start pays a few output tokens.
+			// (anthropic's max_tokens: 0 pre-warm is no use here: vertex refuses it streamed, and unstreamed it wrote
+			// the prefix again instead of reading the live entry)
 			const { onPayload: _p, onResponse: _r, onProviderStreamEvent: _e, signal: _s, ...options } = call.options ?? {};
 			const ctl = new AbortController();
+			let started: Usage | undefined;
+			const onProviderStreamEvent = (event: unknown) => {
+				const ev = event as { type?: string; message?: { usage?: Record<string, any> } };
+				if (ev?.type !== "message_start" || started) return;
+				const mu = ev.message?.usage ?? {};
+				const usage: Usage = {
+					input: mu.input_tokens || 0,
+					output: mu.output_tokens || 0,
+					cacheRead: mu.cache_read_input_tokens || 0,
+					cacheWrite: mu.cache_creation_input_tokens || 0,
+					cacheWrite1h: mu.cache_creation?.ephemeral_1h_input_tokens || 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				};
+				usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+				calculateCost(call.model, usage);
+				started = usage;
+				ctl.abort();
+			};
 			// the same breakpoints the real request gets, so the refresh touches the entries the next turn reads
 			const onPayload = (payload: unknown) => {
 				const notes: GateNotes = { applied: [] };
@@ -1811,23 +1846,31 @@ export class EngineSession {
 				rollingBreakpoint(call.model.api, payload as Record<string, any>, notes);
 				return payload;
 			};
-			const stream = await streamFn(call.model, call.context, { ...options, cacheRetention: this.cacheRetention(), signal: ctl.signal, onPayload });
+			const stream = (await streamFn(call.model, call.context, { ...options, cacheRetention: this.cacheRetention(), signal: ctl.signal, onPayload, onProviderStreamEvent })) as AsyncIterable<any>;
 			let u: any;
-			for await (const ev of stream as AsyncIterable<any>) {
-				// disposed mid-refresh (evicted or deleted): stop here, and arm nothing below
-				if (this.disposed) {
-					ctl.abort();
-					return;
+			try {
+				for await (const ev of stream) {
+					// disposed mid-refresh (evicted or deleted): stop here, and arm nothing below
+					if (this.disposed) {
+						ctl.abort();
+						return;
+					}
+					// after the hang-up the stream ends aborted or in an error; neither is a failed refresh
+					if (started) break;
+					if (ev.type === "error") throw new Error(ev.error?.errorMessage ?? "the provider returned an error");
+					// providers that send no message_start: the first event with usage, then hang up
+					const pu = ev.partial?.usage;
+					if (pu && (pu.input || pu.cacheRead || pu.cacheWrite)) {
+						u = pu;
+						ctl.abort();
+						break;
+					}
 				}
-				if (ev.type === "error") throw new Error(ev.error?.errorMessage ?? "the provider returned an error");
-				const pu = ev.partial?.usage;
-				if (pu && (pu.input || pu.cacheRead || pu.cacheWrite)) {
-					u = pu;
-					ctl.abort();
-					break;
-				}
+			} catch (e) {
+				if (!started) throw e;
 			}
 			if (this.disposed) return;
+			if (started) u = started;
 			if (!u) throw new Error("the refresh ended before the provider reported usage");
 			this.cacheUsed(call.model);
 			this.warmed = true;

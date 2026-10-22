@@ -333,4 +333,17 @@ export const MIGRATIONS: readonly string[] = [
 		cost real not null default 0
 	 );
 	 create index if not exists btw_session_idx on btw (session_id, created_at)`,
+	// 16 · cache refreshes: what each refresh of a parked session's prompt cache read, wrote and cost. the event log keeps an
+	// hour, so without this a refresh's spend was gone from every total once the event aged out
+	`create table if not exists cache_refresh (
+		session_id text not null,
+		at integer not null,
+		input integer not null,
+		cache_read integer not null,
+		cache_write integer not null,
+		output integer not null,
+		cost real not null,
+		ms integer
+	 );
+	 create index if not exists cache_refresh_session_idx on cache_refresh (session_id, at)`,
 ];
