@@ -853,6 +853,22 @@
 					"parentID": {
 						"type": "string"
 					},
+					"forkedFrom": {
+						"type": "object",
+						"required": [
+							"sessionID"
+						],
+						"properties": {
+							"sessionID": {
+								"type": "string"
+							},
+							"messageID": {
+								"type": "string",
+								"description": "the parent's message the fork was cut before: the fork holds the parent's history up to, not including, this message. absent when the whole history was forked"
+							}
+						},
+						"description": "set on a session made by fork: where it came from"
+					},
 					"title": {
 						"type": "string"
 					},
@@ -2284,6 +2300,22 @@
 									},
 									"parentID": {
 										"type": "string"
+									},
+									"forkedFrom": {
+										"type": "object",
+										"required": [
+											"sessionID"
+										],
+										"properties": {
+											"sessionID": {
+												"type": "string"
+											},
+											"messageID": {
+												"type": "string",
+												"description": "the parent's message the fork was cut before: the fork holds the parent's history up to, not including, this message. absent when the whole history was forked"
+											}
+										},
+										"description": "set on a session made by fork: where it came from"
 									},
 									"title": {
 										"type": "string"
@@ -12522,7 +12554,7 @@
 		"/session/{sessionID}/fork": {
 			"post": {
 				"operationId": "fork",
-				"summary": "a new session with this one's history up to (not including) a message, or all of it; titled (fork #n)",
+				"summary": "a new session with this one's history up to (not including) a message, or all of it; titled (fork #n), with forkedFrom naming this session and the message. its copied messages get new ids under the fork's own id",
 				"parameters": [
 					{
 						"name": "sessionID",

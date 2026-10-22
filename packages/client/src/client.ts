@@ -886,7 +886,7 @@ export function createClient(opts: ClientOptions) {
 		/** undo an armed revert: the files and the parked messages come back */
 		unrevert: (params: { sessionID: string }, o?: CallOptions) =>
 			call<SessionInfo>("POST", `/session/${encodeURIComponent(params.sessionID)}/unrevert`, undefined, undefined, o),
-		/** a new session with this one's history up to (not including) a message, or all of it; titled (fork #n) */
+		/** a new session with this one's history up to (not including) a message, or all of it; titled (fork #n), with forkedFrom naming this session and the message. its copied messages get new ids under the fork's own id */
 		fork: (params: { sessionID: string }, body: {
 			messageID?: string;
 		}, o?: CallOptions) =>

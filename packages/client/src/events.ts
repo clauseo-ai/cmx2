@@ -268,6 +268,12 @@ export type SessionInfo = {
 	projectID: string;
 	directory: string;
 	parentID?: string;
+	/** set on a session made by fork: where it came from */
+	forkedFrom?: {
+		sessionID: string;
+		/** the parent's message the fork was cut before: the fork holds the parent's history up to, not including, this message. absent when the whole history was forked */
+		messageID?: string;
+	};
 	title: string;
 	/** daemon version that created the session */
 	version: string;
@@ -590,6 +596,12 @@ export interface EventMap {
 			projectID: string;
 			directory: string;
 			parentID?: string;
+			/** set on a session made by fork: where it came from */
+			forkedFrom?: {
+				sessionID: string;
+				/** the parent's message the fork was cut before: the fork holds the parent's history up to, not including, this message. absent when the whole history was forked */
+				messageID?: string;
+			};
 			title: string;
 			/** daemon version that created the session */
 			version: string;

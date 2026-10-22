@@ -53,6 +53,15 @@ export const SessionInfo = Type.Object(
 		projectID: Type.String({ description: "the project root (git top level, or the directory)" }),
 		directory: Type.String(),
 		parentID: Type.Optional(Type.String()),
+		forkedFrom: Type.Optional(
+			Type.Object(
+				{
+					sessionID: Type.String(),
+					messageID: Type.Optional(Type.String({ description: "the parent's message the fork was cut before: the fork holds the parent's history up to, not including, this message. absent when the whole history was forked" })),
+				},
+				{ description: "set on a session made by fork: where it came from" },
+			),
+		),
 		title: Type.String(),
 		version: Type.String({ description: "daemon version that created the session" }),
 		time: Type.Object({ created: Type.Number(), updated: Type.Number(), archived: Type.Optional(Type.Number({ description: "when the session was archived (deleted from view); its history stays" })) }),
@@ -1093,7 +1102,7 @@ export const ROUTES: RouteDef[] = [
 		method: "POST",
 		path: "/session/:sessionID/fork",
 		operationId: "fork",
-		summary: "a new session with this one's history up to (not including) a message, or all of it; titled (fork #n)",
+		summary: "a new session with this one's history up to (not including) a message, or all of it; titled (fork #n), with forkedFrom naming this session and the message. its copied messages get new ids under the fork's own id",
 		body: Type.Object({ messageID: Type.Optional(Type.String()) }),
 		response: SessionInfo,
 	},

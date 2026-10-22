@@ -2,6 +2,13 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
+## unreleased
+
+contract version 7. additive: session infos carry `forkedFrom`.
+
+### added
+- a fork says where it came from: `forkedFrom: { sessionID, messageID? }` on its session info (the fork answer, `GET /session/:id`, the list, `session.created` and `session.updated`). `messageID` is the parent's message the fork was cut before, in the parent's ids, and is absent when the whole history was forked; the fork's own copies carry new ids under the fork's id (`msg_<fork>_00001`, ...). a fork of a fork names its direct parent. `parentID` stays "an agent spawned by" and a fork never sets it. stored in two new session columns (migration 14, `forked_from` and `forked_at_message`); existing sessions keep every row and have no lineage. why: a client can show a fork's origin and point at the spot in the parent.
+
 ## 0.9.0 - 2026-10-21
 
 contract version 7. additive: progress frames carry `state.metadata.progress`; `/global/event` and `/event` take opt-in `coalesce=100`, `types=`, `compact=1` and `gzip=1`; json answers over 1 kb are gzipped when the request accepts gzip; session infos carry `transcriptRev`, message reads send `x-cmx2-rev`, and `rev=1` puts the revision on stream events.

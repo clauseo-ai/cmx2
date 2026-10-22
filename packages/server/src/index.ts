@@ -1397,6 +1397,7 @@ export function serve(opts: ServeOptions) {
 			projectID: row.project_id ?? row.directory,
 			directory: row.directory,
 			...(row.parent_id ? { parentID: row.parent_id } : {}),
+			...(row.forked_from ? { forkedFrom: { sessionID: row.forked_from, ...(row.forked_at_message ? { messageID: row.forked_at_message } : {}) } } : {}),
 			title: row.title,
 			version: row.version ?? VERSION,
 			time: { created: row.created_at, updated: row.updated_at ?? row.created_at, ...(row.archived_at ? { archived: row.archived_at } : {}) },
@@ -1752,6 +1753,9 @@ export function serve(opts: ServeOptions) {
 			cache_ttl: stored.cache_ttl ?? null,
 			project_id: stored.project_id ?? projectFor(stored.directory),
 			version: VERSION,
+			// lineage in the parent's ids: the fork's own copies are renumbered under its id (msg_<fork>_00001...)
+			forked_from: id,
+			forked_at_message: messageID ?? null,
 		});
 		const pre = store.prefix(id);
 		if (pre) store.putPrefix(newId, pre.hash, pre.bytes);

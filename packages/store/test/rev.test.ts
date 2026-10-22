@@ -39,7 +39,9 @@ test("the migration keeps every session, message and part, and starts each sessi
 	// the store as the version before this one left it: no revision columns
 	const raw = new Database(path);
 	raw.exec("alter table session drop column transcript_rev; alter table event_log drop column rev");
-	raw.exec(`pragma user_version = ${MIGRATIONS.length - 1}`);
+	// and without the fork lineage columns of migration 14, which runs again on top
+	raw.exec("alter table session drop column forked_from; alter table session drop column forked_at_message");
+	raw.exec("pragma user_version = 12");
 	const count = (t: string) => (raw.query(`select count(*) as n from ${t}`).get() as { n: number }).n;
 	const before = { sessions: count("session"), messages: count("message"), parts: count("part"), events: count("event_log") };
 	raw.close();

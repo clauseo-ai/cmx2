@@ -75,4 +75,5 @@ and transcript, a path in the tree (`/root/<name>[/<child>]`) and a model from t
 
 events: `agent.spawned`, `agent.updated`, `agent.report`, `agent.message`, `agent.wait`, `agent.closed`,
 `agent.metric.*`, `session.escalated`, `session.warmed`; children announce themselves with
-`session.created` carrying `parentID`.
+`session.created` carrying `parentID`. a fork (`POST /session/:id/fork`) is not a child: it carries
+`forkedFrom` (`sessionID`, and `messageID` in the parent's ids when it was cut before a message), never `parentID`.

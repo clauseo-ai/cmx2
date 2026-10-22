@@ -307,4 +307,8 @@ export const MIGRATIONS: readonly string[] = [
 	// before this column, and it only grows from here
 	`alter table session add column transcript_rev integer not null default 0;
 	 alter table event_log add column rev integer`,
+	// 14 · fork lineage: the session a fork was made from and the parent's message it was cut before (null when the whole
+	// history was forked). not parent_id, which clients read as "an agent spawned by". existing rows keep null
+	`alter table session add column forked_from text;
+	 alter table session add column forked_at_message text`,
 ];
