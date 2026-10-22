@@ -391,6 +391,8 @@ export type MessageInfo = {
 	};
 	/** on a queued or steered user message: the effort it asked for, applied when it runs (a steer's from the next turn) */
 	variant?: string;
+	/** on a user message made by promoting a btw: the btw's id. its text is the question and the answer, framed as a btw the user asked */
+	btw?: string;
 	[key: string]: unknown;
 };
 
@@ -856,6 +858,55 @@ export interface EventMap {
 		delta: string;
 		/** utf-16 units of the part's text before this delta; deltas are not logged, so a consumer checks contiguity with this */
 		offset: number;
+	};
+	/** a btw was asked, finished (done or error), dismissed or promoted; it carries the whole btw. on a resume a running btw is sent again with its answer so far where the stream goes live (v1) */
+	"btw.updated": {
+		sessionID: string;
+		/** a side question about a session, answered by the session's model from the session's context in a request that reads the session's prompt cache. it is never part of the transcript: not in message reads, forks or compaction, and the model does not see it later unless it is promoted */
+		btw: {
+			id: string;
+			sessionID: string;
+			/** the question */
+			text: string;
+			/** the answer so far: empty when asked, grown by btw.delta while running, final when done. an error keeps the text that came before it */
+			answer: string;
+			status: "running" | "done" | "error";
+			/** on status error: what went wrong, short and lowercase, to show as is */
+			error?: string;
+			/** the session's last message when the btw was asked; a client places the card after it */
+			afterMessageID?: string;
+			time: {
+				created: number;
+				/** when it finished, done or error */
+				completed?: number;
+				/** when it was dismissed; a dismissed btw stays readable, clients hide it */
+				dismissed?: number;
+			};
+			/** the user message it was promoted into */
+			promotedMessageID?: string;
+			/** the model that answers: the session's */
+			model?: {
+				providerID: string;
+				modelID: string;
+			};
+			/** once finished: what its requests used; added to the session's totals, not to its context fill */
+			tokens?: {
+				input: number;
+				output: number;
+				cache: {
+					read: number;
+					write: number;
+				};
+			};
+			/** once finished: what it cost, added to the session's cost */
+			cost?: number;
+		};
+	};
+	/** streamed answer text for a running btw, appended to its answer in order. not logged and not numbered, like message.part.delta; coalesce=100 merges a btw's deltas into one per batch (v1) */
+	"btw.delta": {
+		sessionID: string;
+		btwID: string;
+		delta: string;
 	};
 	/** a session's write or edit changed a file (after the formatter ran) (v1) */
 	"file.edited": {
@@ -1349,6 +1400,8 @@ export const EVENT_VERSIONS: Record<EventType, number> = {
 	"message.updated": 1,
 	"message.part.updated": 1,
 	"message.part.delta": 1,
+	"btw.updated": 1,
+	"btw.delta": 1,
 	"file.edited": 1,
 	"message.removed": 1,
 	"command.executed": 1,

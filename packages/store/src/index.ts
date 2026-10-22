@@ -89,6 +89,46 @@ export interface RecallDoc {
 	text: string;
 }
 
+export interface BtwRow {
+	id: string;
+	session_id: string;
+	text: string;
+	answer: string;
+	status: "running" | "done" | "error";
+	error: string | null;
+	after_message_id: string | null;
+	created_at: number;
+	completed_at: number | null;
+	dismissed_at: number | null;
+	promoted_message_id: string | null;
+	/** provider/model-id */
+	model: string | null;
+	tokens_input: number;
+	tokens_output: number;
+	tokens_cache_read: number;
+	tokens_cache_write: number;
+	cost: number;
+}
+
+/** a btw row as clients read it (the contract's Btw); `answer` overrides the stored text while it streams */
+export function btwInfo(r: BtwRow, answer?: string) {
+	const slash = r.model ? r.model.indexOf("/") : -1;
+	const spent = r.status !== "running";
+	return {
+		id: r.id,
+		sessionID: r.session_id,
+		text: r.text,
+		answer: answer ?? r.answer,
+		status: r.status,
+		...(r.error ? { error: r.error } : {}),
+		...(r.after_message_id ? { afterMessageID: r.after_message_id } : {}),
+		time: { created: r.created_at, ...(r.completed_at ? { completed: r.completed_at } : {}), ...(r.dismissed_at ? { dismissed: r.dismissed_at } : {}) },
+		...(r.promoted_message_id ? { promotedMessageID: r.promoted_message_id } : {}),
+		...(r.model && slash > 0 ? { model: { providerID: r.model.slice(0, slash), modelID: r.model.slice(slash + 1) } } : {}),
+		...(spent ? { tokens: { input: r.tokens_input, output: r.tokens_output, cache: { read: r.tokens_cache_read, write: r.tokens_cache_write } }, cost: r.cost } : {}),
+	};
+}
+
 export interface MessageRow {
 	id: string;
 	session_id: string;
@@ -596,6 +636,72 @@ export class Store {
 		return this.db.query("insert or ignore into project_opened (path, opened_at) values (?, ?)").run(path, Date.now()).changes > 0;
 	}
 
+	// ---------- btw ----------
+
+	/** a btw asked: its row, status running */
+	putBtw(b: { id: string; session_id: string; text: string; after_message_id: string | null; created_at: number; model: string | null }) {
+		this.db
+			.query("insert into btw (id, session_id, text, status, after_message_id, created_at, model) values ($id, $session_id, $text, 'running', $after_message_id, $created_at, $model)")
+			.run(b as never);
+	}
+
+	btw(id: string): BtwRow | undefined {
+		return (this.db.query("select * from btw where id = ?").get(id) as BtwRow | null) ?? undefined;
+	}
+
+	/** a session's btws, oldest first, dismissed ones included */
+	btws(sessionId: string): BtwRow[] {
+		return this.db.query("select * from btw where session_id = ? order by created_at, rowid").all(sessionId) as BtwRow[];
+	}
+
+	/**
+	 * a running btw finished (done or error): its answer and spend, and the spend added to its session's totals in the
+	 * same transaction. false when it was not running (finished already), and then nothing is counted twice
+	 */
+	finishBtw(id: string, f: { status: "done" | "error"; answer: string; error?: string; completed_at: number; model?: string; tokens_input: number; tokens_output: number; tokens_cache_read: number; tokens_cache_write: number; cost: number }): boolean {
+		return this.db.transaction(() => {
+			const r = this.btw(id);
+			if (!r || r.status !== "running") return false;
+			this.db
+				.query(
+					`update btw set status = $status, answer = $answer, error = $error, completed_at = $completed_at, model = coalesce($model, model), tokens_input = $ti,
+					   tokens_output = $to, tokens_cache_read = $tr, tokens_cache_write = $tw, cost = $cost where id = $id`,
+				)
+				.run({ id, status: f.status, answer: f.answer, error: f.error ?? null, completed_at: f.completed_at, model: f.model ?? null, ti: f.tokens_input, to: f.tokens_output, tr: f.tokens_cache_read, tw: f.tokens_cache_write, cost: f.cost } as never);
+			this.db
+				.query(
+					`update main.session set cost = cost + $cost, tokens_input = tokens_input + $ti, tokens_output = tokens_output + $to,
+					   tokens_cache_read = tokens_cache_read + $tr, tokens_cache_write = tokens_cache_write + $tw where id = $id`,
+				)
+				.run({ id: r.session_id, cost: f.cost, ti: f.tokens_input, to: f.tokens_output, tr: f.tokens_cache_read, tw: f.tokens_cache_write } as never);
+			return true;
+		})();
+	}
+
+	/** hides a btw (a flag; the row stays). false when it was dismissed already */
+	dismissBtw(id: string, at: number): boolean {
+		return this.db.query("update btw set dismissed_at = ? where id = ? and dismissed_at is null").run(at, id).changes > 0;
+	}
+
+	/** marks a done btw as promoted into its session's thread. false when it is not done or was promoted already */
+	promoteBtw(id: string, messageId: string): boolean {
+		return this.db.query("update btw set promoted_message_id = ? where id = ? and status = 'done' and promoted_message_id is null").run(messageId, id).changes > 0;
+	}
+
+	/** a promoted btw's message landed under its transcript id (a steer's provisional id gives way to it) */
+	repointBtw(id: string, messageId: string): boolean {
+		return this.db.query("update btw set promoted_message_id = ? where id = ? and promoted_message_id is not null").run(messageId, id).changes > 0;
+	}
+
+	/** btws a stopped daemon left running become errors with this text; returns them */
+	failRunningBtws(error: string, at: number): BtwRow[] {
+		return this.db.transaction(() => {
+			const rows = this.db.query("select * from btw where status = 'running'").all() as BtwRow[];
+			this.db.query("update btw set status = 'error', error = ?, completed_at = ? where status = 'running'").run(error, at);
+			return rows.map((r) => ({ ...r, status: "error" as const, error, completed_at: at }));
+		})();
+	}
+
 	// ---------- prefix ----------
 
 	/** the first request's prefix bytes; every later request and every resume is compared to this */
@@ -724,6 +830,11 @@ export class Store {
 
 	lastMessageSeq(sessionId: string): number {
 		return ((this.db.query("select max(seq) as n from message where session_id = ?").get(sessionId) as { n: number | null }).n ?? 0) as number;
+	}
+
+	/** the id of the session's last message a read lists (a revert's parked ones are not), or nothing */
+	lastMessageId(sessionId: string): string | undefined {
+		return (this.db.query("select id from message where session_id = ? and reverted = 0 order by seq desc limit 1").get(sessionId) as { id: string } | null)?.id;
 	}
 
 	/**

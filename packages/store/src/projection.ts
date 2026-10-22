@@ -118,6 +118,7 @@ export function projectMessage(store: Store, ctx: ProjectContext, m: any): Touch
 			...(m.agent ? { agent: m.agent } : {}),
 			...(m.clientID ? { clientID: m.clientID } : {}),
 			...(m.steer === true ? { steer: true } : {}),
+			...(typeof m.btw === "string" ? { btw: m.btw } : {}),
 			...(m.model?.providerID && m.model?.modelID ? { model: { providerID: String(m.model.providerID), modelID: String(m.model.modelID) } } : {}),
 			...(typeof m.variant === "string" ? { variant: m.variant } : {}),
 		};

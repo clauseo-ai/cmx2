@@ -311,4 +311,26 @@ export const MIGRATIONS: readonly string[] = [
 	// history was forked). not parent_id, which clients read as "an agent spawned by". existing rows keep null
 	`alter table session add column forked_from text;
 	 alter table session add column forked_at_message text`,
+	// 15 · btw: side questions about a session, answered from its context and never part of its transcript. their own
+	// table, so the projection, compaction, forks and message reads never see them; dismissing one is a flag
+	`create table if not exists btw (
+		id text primary key,
+		session_id text not null,
+		text text not null,
+		answer text not null default '',
+		status text not null,
+		error text,
+		after_message_id text,
+		created_at integer not null,
+		completed_at integer,
+		dismissed_at integer,
+		promoted_message_id text,
+		model text,
+		tokens_input integer not null default 0,
+		tokens_output integer not null default 0,
+		tokens_cache_read integer not null default 0,
+		tokens_cache_write integer not null default 0,
+		cost real not null default 0
+	 );
+	 create index if not exists btw_session_idx on btw (session_id, created_at)`,
 ];

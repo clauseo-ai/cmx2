@@ -207,6 +207,9 @@ not in the table: its model and effort are the user's.
 - no date, helpers line, ledger, skills list or routing table in the
   system prompt; all appended.
 - compaction and title/summary requests reuse the session prefix.
+- a btw (a side question, below) is the session's own request with one user
+  message after it: the same system, tools, options and messages, its
+  breakpoints where the session's were, none from the question on.
 - ttl: 5m default; 1h once a session has a helper that is not closed, a job
   that will notify it, or 100k of context (stored on the session, never
   switched back; an explicit `cache_ttl` wins).
@@ -219,7 +222,7 @@ one manifest (`packages/contract/src/manifest.ts`) with a `type` discriminator a
 `server.*`, `session.*` (incl. `parked`, `steered`), `message.*`, `part.*`,
 `agent.*` (spawned, report, parked, resumed, closed, metric), `job.*`,
 `process.*`, `worktree.*` (incl. `review.requested`), `permission.*`,
-`question.*`, `compaction.*`, `config.reloaded`. cmx event names are kept
+`question.*`, `compaction.*`, `btw.*` (updated, delta), `config.reloaded`. cmx event names are kept
 where the shape is unchanged so boxbox's move from cmx is a regeneration, not a
 rewrite of semantics.
 
@@ -245,6 +248,38 @@ stored part, and a resume gets the latest tail at its seam, not every tick;
 the tool's result replaces it. having no seq, each tail carries
 `state.metadata.progress` (1, 2, 3 for that part), so a client that holds
 frames until a read lands keeps whichever tail has the higher number.
+
+### btw: side questions
+
+`POST /session/:id/btw` asks a side question about a session; it runs at
+once, idle or mid-turn, and never touches the session's status, queue,
+steers, transcript or revision. `EngineSession.aside` sends the request the
+session would send, so the provider reads it from the session's cache: the
+same model, options (effort, thinking, `max_tokens`, ttl, the ask a forced
+`tool_choice` came with), system prompt and tools in the same order, and the
+same messages: mid-turn the messages of the request already on the wire,
+otherwise the context the next request would carry. one user message holds
+the question with a short framing; the effort marker every request ends
+with follows it, as on any request. `asideBreakpoint` (gates.ts) takes the
+breakpoint pi puts on the last message off the question and puts it on the
+last block before it, after the session's own gates ran, so the btw has the
+session's breakpoints at the same positions, reads its entries and writes
+none for the question or its answer. the answer is capped at 16,000
+characters and 3 minutes by the engine, not through `max_tokens`, which the
+message cache is keyed on. a tool call is not run: it gets an error result
+and one more step, then the text there is stands.
+
+btws live in their own table (migration 15): not in message reads, the
+projection, forks, compaction or an export. their spend adds to the
+session's cost and tokens, not to its context fill. `btw.updated` (logged,
+state-carrying: `compact=1` keys it per btw) carries the whole btw on ask,
+finish, dismiss and promote; `btw.delta` streams answer text unlogged, one
+per batch per btw under `coalesce=100`, and a resume gets a running btw
+whole at its seam. dismiss is a flag (`time.dismissed`) and stops a running
+btw; promote puts the question and answer into the thread as a user
+message marked `btw: <id>`, through the steer path when a turn runs and the
+prompt path otherwise. a btw a stopped daemon left running is an error
+after the next start.
 
 ### stream switches and answer encoding
 
@@ -350,7 +385,7 @@ this was measured on: `GOTCHAS.md`, "sync and the listener (m6)".
   (projection with tokens/cost/effort), `part`, `agent` (id, path, name,
   parent, seat, state, recorded prefix hash, session file), `mailbox`,
   `job`, `process`, `worktree`, `step` (telemetry), `permission`,
-  `question`. page cache capped; connections pooled; transcripts read in
+  `question`, `btw` (side questions, out of the transcript). page cache capped; connections pooled; transcripts read in
   ranges, never materialised whole for rendering.
 - a landed message's writes (projection rows, its logged events, the session
   touch) commit in one transaction; its events reach subscribers after the

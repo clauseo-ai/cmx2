@@ -229,6 +229,65 @@ export function moveTrailingSystemBreakpoint(api: string, payload: Record<string
 	notes.applied.push("cache breakpoint moved from the turn-context system message to the user message before it");
 }
 
+/** block types a cache breakpoint may sit on (thinking blocks and empty text may not carry one) */
+const MARKABLE = new Set(["text", "image", "document", "tool_use", "tool_result", "tool_addition", "tool_removal"]);
+
+/**
+ * anthropic, for a side request (a btw) appended to a session's own request: nothing from the first block
+ * holding `marker` onwards carries a breakpoint, and the one pi put on the last message goes to the last block
+ * before that, the end of the session's own messages. the request then has the breakpoints the session's
+ * request had at the same positions, so it reads the session's entries and writes none for the side question
+ * or its answer, which never go back into the session. returns whether it found the marker.
+ */
+export function asideBreakpoint(api: string, payload: Record<string, any>, marker: string, notes: GateNotes): boolean {
+	if (api !== "anthropic-messages" || !Array.isArray(payload.messages)) return false;
+	const msgs = payload.messages as Array<{ role: string; content: unknown }>;
+	let mi = -1;
+	let bi = -1;
+	for (let i = msgs.length - 1; i >= 0 && mi < 0; i--) {
+		const c = msgs[i]!.content;
+		if (typeof c === "string" && c.includes(marker)) {
+			msgs[i]!.content = [{ type: "text", text: c }];
+			[mi, bi] = [i, 0];
+		} else if (Array.isArray(c)) {
+			const at = c.findIndex((b: any) => b?.type === "text" && typeof b.text === "string" && b.text.includes(marker));
+			if (at >= 0) [mi, bi] = [i, at];
+		}
+	}
+	if (mi < 0) return false;
+	let moved: unknown;
+	for (let i = mi; i < msgs.length; i++) {
+		const c = msgs[i]!.content;
+		if (!Array.isArray(c)) continue;
+		for (let j = i === mi ? bi : 0; j < c.length; j++) {
+			const b = c[j] as Record<string, unknown>;
+			if (b?.cache_control) {
+				moved ??= b.cache_control;
+				delete b.cache_control;
+			}
+		}
+	}
+	if (!moved) return true;
+	// the last markable block before the side question
+	for (let i = mi; i >= 0; i--) {
+		const m = msgs[i]!;
+		if (typeof m.content === "string") {
+			if (!m.content.trim()) continue;
+			m.content = [{ type: "text", text: m.content }];
+		}
+		if (!Array.isArray(m.content)) continue;
+		const blocks = m.content as Array<Record<string, any>>;
+		for (let j = (i === mi ? bi : blocks.length) - 1; j >= 0; j--) {
+			const b = blocks[j]!;
+			if (!MARKABLE.has(String(b.type)) || (b.type === "text" && !String(b.text ?? "").trim())) continue;
+			b.cache_control = moved;
+			notes.applied.push("btw: cache breakpoint kept at the end of the session's own messages");
+			return true;
+		}
+	}
+	return true;
+}
+
 /**
  * anthropic: a fourth breakpoint where the previous request put its last one, so the next request hits
  * that entry exactly instead of relying on the api's look-back, which does not find an entry across a

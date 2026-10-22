@@ -1230,6 +1230,10 @@
 					"variant": {
 						"type": "string",
 						"description": "on a queued or steered user message: the effort it asked for, applied when it runs (a steer's from the next turn)"
+					},
+					"btw": {
+						"type": "string",
+						"description": "on a user message made by promoting a btw: the btw's id. its text is the question and the answer, framed as a btw the user asked"
 					}
 				},
 				"additionalProperties": true,
@@ -3647,6 +3651,218 @@
 							"offset": {
 								"type": "integer",
 								"description": "utf-16 units of the part's text before this delta; deltas are not logged, so a consumer checks contiguity with this"
+							}
+						}
+					},
+					"seq": {
+						"type": "integer",
+						"description": "logged events only: the event's place in the log; the sse id is <epoch>:<seq>"
+					},
+					"epoch": {
+						"type": "string",
+						"description": "logged events only: names the store the seq belongs to"
+					}
+				}
+			},
+			"Event_btw_updated": {
+				"type": "object",
+				"description": "a btw was asked, finished (done or error), dismissed or promoted; it carries the whole btw. on a resume a running btw is sent again with its answer so far where the stream goes live",
+				"x-cmx2-version": 1,
+				"required": [
+					"id",
+					"type",
+					"properties"
+				],
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"const": "btw.updated",
+						"type": "string"
+					},
+					"properties": {
+						"type": "object",
+						"required": [
+							"sessionID",
+							"btw"
+						],
+						"properties": {
+							"sessionID": {
+								"type": "string"
+							},
+							"btw": {
+								"type": "object",
+								"required": [
+									"id",
+									"sessionID",
+									"text",
+									"answer",
+									"status",
+									"time"
+								],
+								"properties": {
+									"id": {
+										"type": "string"
+									},
+									"sessionID": {
+										"type": "string"
+									},
+									"text": {
+										"type": "string",
+										"description": "the question"
+									},
+									"answer": {
+										"type": "string",
+										"description": "the answer so far: empty when asked, grown by btw.delta while running, final when done. an error keeps the text that came before it"
+									},
+									"status": {
+										"anyOf": [
+											{
+												"type": "string",
+												"const": "running"
+											},
+											{
+												"type": "string",
+												"const": "done"
+											},
+											{
+												"type": "string",
+												"const": "error"
+											}
+										]
+									},
+									"error": {
+										"type": "string",
+										"description": "on status error: what went wrong, short and lowercase, to show as is"
+									},
+									"afterMessageID": {
+										"type": "string",
+										"description": "the session's last message when the btw was asked; a client places the card after it"
+									},
+									"time": {
+										"type": "object",
+										"required": [
+											"created"
+										],
+										"properties": {
+											"created": {
+												"type": "number"
+											},
+											"completed": {
+												"type": "number",
+												"description": "when it finished, done or error"
+											},
+											"dismissed": {
+												"type": "number",
+												"description": "when it was dismissed; a dismissed btw stays readable, clients hide it"
+											}
+										}
+									},
+									"promotedMessageID": {
+										"type": "string",
+										"description": "the user message it was promoted into"
+									},
+									"model": {
+										"type": "object",
+										"required": [
+											"providerID",
+											"modelID"
+										],
+										"properties": {
+											"providerID": {
+												"type": "string"
+											},
+											"modelID": {
+												"type": "string"
+											}
+										},
+										"description": "the model that answers: the session's"
+									},
+									"tokens": {
+										"type": "object",
+										"required": [
+											"input",
+											"output",
+											"cache"
+										],
+										"properties": {
+											"input": {
+												"type": "number"
+											},
+											"output": {
+												"type": "number"
+											},
+											"cache": {
+												"type": "object",
+												"required": [
+													"read",
+													"write"
+												],
+												"properties": {
+													"read": {
+														"type": "number"
+													},
+													"write": {
+														"type": "number"
+													}
+												}
+											}
+										},
+										"description": "once finished: what its requests used; added to the session's totals, not to its context fill"
+									},
+									"cost": {
+										"type": "number",
+										"description": "once finished: what it cost, added to the session's cost"
+									}
+								},
+								"description": "a side question about a session, answered by the session's model from the session's context in a request that reads the session's prompt cache. it is never part of the transcript: not in message reads, forks or compaction, and the model does not see it later unless it is promoted"
+							}
+						}
+					},
+					"seq": {
+						"type": "integer",
+						"description": "logged events only: the event's place in the log; the sse id is <epoch>:<seq>"
+					},
+					"epoch": {
+						"type": "string",
+						"description": "logged events only: names the store the seq belongs to"
+					}
+				}
+			},
+			"Event_btw_delta": {
+				"type": "object",
+				"description": "streamed answer text for a running btw, appended to its answer in order. not logged and not numbered, like message.part.delta; coalesce=100 merges a btw's deltas into one per batch",
+				"x-cmx2-version": 1,
+				"required": [
+					"id",
+					"type",
+					"properties"
+				],
+				"properties": {
+					"id": {
+						"type": "string"
+					},
+					"type": {
+						"const": "btw.delta",
+						"type": "string"
+					},
+					"properties": {
+						"type": "object",
+						"required": [
+							"sessionID",
+							"btwID",
+							"delta"
+						],
+						"properties": {
+							"sessionID": {
+								"type": "string"
+							},
+							"btwID": {
+								"type": "string"
+							},
+							"delta": {
+								"type": "string"
 							}
 						}
 					},
@@ -6395,6 +6611,12 @@
 						"$ref": "#/components/schemas/Event_message_part_delta"
 					},
 					{
+						"$ref": "#/components/schemas/Event_btw_updated"
+					},
+					{
+						"$ref": "#/components/schemas/Event_btw_delta"
+					},
+					{
 						"$ref": "#/components/schemas/Event_file_edited"
 					},
 					{
@@ -6542,6 +6764,8 @@
 						"message.updated": "#/components/schemas/Event_message_updated",
 						"message.part.updated": "#/components/schemas/Event_message_part_updated",
 						"message.part.delta": "#/components/schemas/Event_message_part_delta",
+						"btw.updated": "#/components/schemas/Event_btw_updated",
+						"btw.delta": "#/components/schemas/Event_btw_delta",
 						"file.edited": "#/components/schemas/Event_file_edited",
 						"message.removed": "#/components/schemas/Event_message_removed",
 						"command.executed": "#/components/schemas/Event_command_executed",
@@ -13018,6 +13242,677 @@
 										},
 										"agent": {
 											"type": "string"
+										}
+									}
+								}
+							}
+						}
+					},
+					"400": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"401": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"404": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"409": {
+						"description": "BusyError (a turn is running) or ConflictError (already settled, imported history, a used client id)",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					}
+				}
+			}
+		},
+		"/session/{sessionID}/btw": {
+			"post": {
+				"operationId": "askBtw",
+				"summary": "ask a side question about the session. it runs at once, idle or mid-turn, on the session's model with the session's context (mid-turn, the context of the request already sent), and never touches the session's status, queue, steers or transcript. the answer streams as btw.delta and lands in btw.updated; its spend adds to the session's totals",
+				"parameters": [
+					{
+						"name": "sessionID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"required": [
+									"text"
+								],
+								"properties": {
+									"text": {
+										"type": "string",
+										"minLength": 1
+									},
+									"clientID": {
+										"type": "string",
+										"description": "a uuid the client picks; a repeat within 24 h returns the first answer and does nothing, and events the request causes carry it"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "ok",
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "object",
+									"required": [
+										"id",
+										"sessionID",
+										"text",
+										"answer",
+										"status",
+										"time"
+									],
+									"properties": {
+										"id": {
+											"type": "string"
+										},
+										"sessionID": {
+											"type": "string"
+										},
+										"text": {
+											"type": "string",
+											"description": "the question"
+										},
+										"answer": {
+											"type": "string",
+											"description": "the answer so far: empty when asked, grown by btw.delta while running, final when done. an error keeps the text that came before it"
+										},
+										"status": {
+											"anyOf": [
+												{
+													"type": "string",
+													"const": "running"
+												},
+												{
+													"type": "string",
+													"const": "done"
+												},
+												{
+													"type": "string",
+													"const": "error"
+												}
+											]
+										},
+										"error": {
+											"type": "string",
+											"description": "on status error: what went wrong, short and lowercase, to show as is"
+										},
+										"afterMessageID": {
+											"type": "string",
+											"description": "the session's last message when the btw was asked; a client places the card after it"
+										},
+										"time": {
+											"type": "object",
+											"required": [
+												"created"
+											],
+											"properties": {
+												"created": {
+													"type": "number"
+												},
+												"completed": {
+													"type": "number",
+													"description": "when it finished, done or error"
+												},
+												"dismissed": {
+													"type": "number",
+													"description": "when it was dismissed; a dismissed btw stays readable, clients hide it"
+												}
+											}
+										},
+										"promotedMessageID": {
+											"type": "string",
+											"description": "the user message it was promoted into"
+										},
+										"model": {
+											"type": "object",
+											"required": [
+												"providerID",
+												"modelID"
+											],
+											"properties": {
+												"providerID": {
+													"type": "string"
+												},
+												"modelID": {
+													"type": "string"
+												}
+											},
+											"description": "the model that answers: the session's"
+										},
+										"tokens": {
+											"type": "object",
+											"required": [
+												"input",
+												"output",
+												"cache"
+											],
+											"properties": {
+												"input": {
+													"type": "number"
+												},
+												"output": {
+													"type": "number"
+												},
+												"cache": {
+													"type": "object",
+													"required": [
+														"read",
+														"write"
+													],
+													"properties": {
+														"read": {
+															"type": "number"
+														},
+														"write": {
+															"type": "number"
+														}
+													}
+												}
+											},
+											"description": "once finished: what its requests used; added to the session's totals, not to its context fill"
+										},
+										"cost": {
+											"type": "number",
+											"description": "once finished: what it cost, added to the session's cost"
+										}
+									},
+									"description": "a side question about a session, answered by the session's model from the session's context in a request that reads the session's prompt cache. it is never part of the transcript: not in message reads, forks or compaction, and the model does not see it later unless it is promoted"
+								}
+							}
+						}
+					},
+					"400": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"401": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"404": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					}
+				}
+			},
+			"get": {
+				"operationId": "btws",
+				"summary": "the session's btws, oldest first, dismissed ones included (time.dismissed set)",
+				"parameters": [
+					{
+						"name": "sessionID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "ok",
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"required": [
+											"id",
+											"sessionID",
+											"text",
+											"answer",
+											"status",
+											"time"
+										],
+										"properties": {
+											"id": {
+												"type": "string"
+											},
+											"sessionID": {
+												"type": "string"
+											},
+											"text": {
+												"type": "string",
+												"description": "the question"
+											},
+											"answer": {
+												"type": "string",
+												"description": "the answer so far: empty when asked, grown by btw.delta while running, final when done. an error keeps the text that came before it"
+											},
+											"status": {
+												"anyOf": [
+													{
+														"type": "string",
+														"const": "running"
+													},
+													{
+														"type": "string",
+														"const": "done"
+													},
+													{
+														"type": "string",
+														"const": "error"
+													}
+												]
+											},
+											"error": {
+												"type": "string",
+												"description": "on status error: what went wrong, short and lowercase, to show as is"
+											},
+											"afterMessageID": {
+												"type": "string",
+												"description": "the session's last message when the btw was asked; a client places the card after it"
+											},
+											"time": {
+												"type": "object",
+												"required": [
+													"created"
+												],
+												"properties": {
+													"created": {
+														"type": "number"
+													},
+													"completed": {
+														"type": "number",
+														"description": "when it finished, done or error"
+													},
+													"dismissed": {
+														"type": "number",
+														"description": "when it was dismissed; a dismissed btw stays readable, clients hide it"
+													}
+												}
+											},
+											"promotedMessageID": {
+												"type": "string",
+												"description": "the user message it was promoted into"
+											},
+											"model": {
+												"type": "object",
+												"required": [
+													"providerID",
+													"modelID"
+												],
+												"properties": {
+													"providerID": {
+														"type": "string"
+													},
+													"modelID": {
+														"type": "string"
+													}
+												},
+												"description": "the model that answers: the session's"
+											},
+											"tokens": {
+												"type": "object",
+												"required": [
+													"input",
+													"output",
+													"cache"
+												],
+												"properties": {
+													"input": {
+														"type": "number"
+													},
+													"output": {
+														"type": "number"
+													},
+													"cache": {
+														"type": "object",
+														"required": [
+															"read",
+															"write"
+														],
+														"properties": {
+															"read": {
+																"type": "number"
+															},
+															"write": {
+																"type": "number"
+															}
+														}
+													}
+												},
+												"description": "once finished: what its requests used; added to the session's totals, not to its context fill"
+											},
+											"cost": {
+												"type": "number",
+												"description": "once finished: what it cost, added to the session's cost"
+											}
+										},
+										"description": "a side question about a session, answered by the session's model from the session's context in a request that reads the session's prompt cache. it is never part of the transcript: not in message reads, forks or compaction, and the model does not see it later unless it is promoted"
+									}
+								}
+							}
+						},
+						"headers": {
+							"x-cmx2-seq": {
+								"description": "the cursor (<epoch>:<seq>) of the last event this state includes; apply only events after it",
+								"schema": {
+									"type": "string"
+								}
+							}
+						}
+					},
+					"400": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"401": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"404": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					}
+				}
+			}
+		},
+		"/session/{sessionID}/btw/{btwID}/dismiss": {
+			"post": {
+				"operationId": "dismissBtw",
+				"summary": "hide a btw: sets time.dismissed (a flag; the btw stays readable). a running btw stops and ends as an error. a second call changes nothing and answers the same btw",
+				"parameters": [
+					{
+						"name": "sessionID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					},
+					{
+						"name": "btwID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "ok",
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "object",
+									"required": [
+										"id",
+										"sessionID",
+										"text",
+										"answer",
+										"status",
+										"time"
+									],
+									"properties": {
+										"id": {
+											"type": "string"
+										},
+										"sessionID": {
+											"type": "string"
+										},
+										"text": {
+											"type": "string",
+											"description": "the question"
+										},
+										"answer": {
+											"type": "string",
+											"description": "the answer so far: empty when asked, grown by btw.delta while running, final when done. an error keeps the text that came before it"
+										},
+										"status": {
+											"anyOf": [
+												{
+													"type": "string",
+													"const": "running"
+												},
+												{
+													"type": "string",
+													"const": "done"
+												},
+												{
+													"type": "string",
+													"const": "error"
+												}
+											]
+										},
+										"error": {
+											"type": "string",
+											"description": "on status error: what went wrong, short and lowercase, to show as is"
+										},
+										"afterMessageID": {
+											"type": "string",
+											"description": "the session's last message when the btw was asked; a client places the card after it"
+										},
+										"time": {
+											"type": "object",
+											"required": [
+												"created"
+											],
+											"properties": {
+												"created": {
+													"type": "number"
+												},
+												"completed": {
+													"type": "number",
+													"description": "when it finished, done or error"
+												},
+												"dismissed": {
+													"type": "number",
+													"description": "when it was dismissed; a dismissed btw stays readable, clients hide it"
+												}
+											}
+										},
+										"promotedMessageID": {
+											"type": "string",
+											"description": "the user message it was promoted into"
+										},
+										"model": {
+											"type": "object",
+											"required": [
+												"providerID",
+												"modelID"
+											],
+											"properties": {
+												"providerID": {
+													"type": "string"
+												},
+												"modelID": {
+													"type": "string"
+												}
+											},
+											"description": "the model that answers: the session's"
+										},
+										"tokens": {
+											"type": "object",
+											"required": [
+												"input",
+												"output",
+												"cache"
+											],
+											"properties": {
+												"input": {
+													"type": "number"
+												},
+												"output": {
+													"type": "number"
+												},
+												"cache": {
+													"type": "object",
+													"required": [
+														"read",
+														"write"
+													],
+													"properties": {
+														"read": {
+															"type": "number"
+														},
+														"write": {
+															"type": "number"
+														}
+													}
+												}
+											},
+											"description": "once finished: what its requests used; added to the session's totals, not to its context fill"
+										},
+										"cost": {
+											"type": "number",
+											"description": "once finished: what it cost, added to the session's cost"
+										}
+									},
+									"description": "a side question about a session, answered by the session's model from the session's context in a request that reads the session's prompt cache. it is never part of the transcript: not in message reads, forks or compaction, and the model does not see it later unless it is promoted"
+								}
+							}
+						}
+					},
+					"400": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"401": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"404": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					}
+				}
+			}
+		},
+		"/session/{sessionID}/btw/{btwID}/promote": {
+			"post": {
+				"operationId": "promoteBtw",
+				"summary": "put a done btw into the thread: a user message (marked btw: <id>) holding the question and the answer, framed as a btw the user asked, sent as a steer when a turn runs and as a prompt otherwise. 409 when the btw is not done or was promoted already",
+				"parameters": [
+					{
+						"name": "sessionID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					},
+					{
+						"name": "btwID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "ok",
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "object",
+									"required": [
+										"messageID"
+									],
+									"properties": {
+										"messageID": {
+											"type": "string",
+											"description": "the user message's id: provisional when it was steered into a running turn, as a steer's is"
 										}
 									}
 								}

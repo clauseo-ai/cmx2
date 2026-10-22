@@ -40,6 +40,7 @@ import { Value } from "typebox/value";
 import type { Config, Effort, TurnMessageMode } from "./config.ts";
 import {
 	applyAsk,
+	asideBreakpoint,
 	effortMarkers,
 	forcedToolInstruction,
 	type GateNotes,
@@ -103,6 +104,42 @@ export const BATCHING_NUDGE =
 
 /** automatic continuations after an output-limit stop, per turn */
 const MAX_CONTINUATIONS = 3;
+
+/**
+ * the text before a btw's question in its one user message. plain framing, no rules: the request still
+ * declares every tool (dropping them would change the cached prefix), so it says why it is not a task
+ */
+export const BTW_FRAMING =
+	"btw: a side question from the user, asked while you work. answer it from this conversation, in a few sentences, without calling tools. your answer is shown to the user beside the conversation; it is not added to it, and the task you are on does not change.";
+/** the result a btw's tool call gets instead of running */
+export const BTW_NO_TOOLS = "btw answers cannot use tools. answer the question from the conversation so far, in words.";
+/** a btw's answer stops here (about 4k tokens of text); the request's max_tokens stays the session's */
+export const BTW_MAX_CHARS = 16_000;
+/** a btw that has not finished by then stops with an error */
+export const BTW_TIMEOUT_MS = 180_000;
+
+/** what a btw answered and spent */
+export interface AsideResult {
+	text: string;
+	usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
+	model: { providerID: string; modelID: string };
+	/** the answer reached BTW_MAX_CHARS and was cut there */
+	capped: boolean;
+	/** asked while a turn ran: the request carried the messages of the one on the wire */
+	midTurn: boolean;
+}
+
+/** a btw that failed; what it spent and any text it had still count */
+export class AsideError extends Error {
+	constructor(
+		message: string,
+		readonly usage: AsideResult["usage"],
+		readonly text: string,
+	) {
+		super(message);
+		this.name = "AsideError";
+	}
+}
 /** recoveries from a media refusal (size, image count, an unreadable image) per prompt before the session stops and says so */
 const MAX_SIZE_RECOVERIES = 3;
 /** request summaries a session keeps for `/session/:id/requests`, newest last */
@@ -506,6 +543,10 @@ export class EngineSession {
 	private lastPrefix = { hash: "", same: 1 };
 	private recordedPrefix: string | undefined;
 	private turnAsk: RequestAsk | undefined;
+	/** the ask the last real request carried (a btw sent mid-turn carries the same, so its cached messages match) */
+	private lastAsk: RequestAsk | undefined;
+	/** btw requests on the wire; the residency cache keeps such a session loaded */
+	private asides = 0;
 	private turnRequests = 0;
 	private refusal: Refusal | undefined;
 	private lastDate: string | undefined;
@@ -915,12 +956,12 @@ export class EngineSession {
 	}
 
 	/** the prompts and steers waiting, in the order admitted, as a client draws them: the provisional id, what was typed, and what each asked for */
-	queuedPrompts(): Array<{ id: string; content: string | UserBlock[]; created: number; clientID?: string; agent?: string; steer?: boolean; model?: string; effort?: Effort }> {
+	queuedPrompts(): Array<{ id: string; content: string | UserBlock[]; created: number; clientID?: string; agent?: string; steer?: boolean; model?: string; effort?: Effort; btw?: string }> {
 		return this.waiting.flatMap((w) => {
-			const m = w as unknown as { id?: string; content: string | UserBlock[]; timestamp: number; clientID?: string; agent?: string };
+			const m = w as unknown as { id?: string; content: string | UserBlock[]; timestamp: number; clientID?: string; agent?: string; btw?: string };
 			if (!m.id) return [];
 			const pick = this.pickOf(w);
-			return [{ id: m.id, content: m.content, created: m.timestamp, ...(m.clientID ? { clientID: m.clientID } : {}), ...(m.agent ? { agent: m.agent } : {}), ...(this.isSteer(w) ? { steer: true } : {}), ...pick }];
+			return [{ id: m.id, content: m.content, created: m.timestamp, ...(m.clientID ? { clientID: m.clientID } : {}), ...(m.agent ? { agent: m.agent } : {}), ...(this.isSteer(w) ? { steer: true } : {}), ...pick, ...(m.btw ? { btw: m.btw } : {}) }];
 		});
 	}
 
@@ -952,10 +993,12 @@ export class EngineSession {
 		this.refusal = undefined;
 
 		const notes: GateNotes = { applied: [] };
+		this.lastAsk = undefined;
 		if (this.turnAsk) {
 			// a forced tool choice binds the first request of the turn only; later requests would loop on it
 			const ask: RequestAsk = { ...this.turnAsk, ...(this.turnRequests > 1 ? { toolChoice: undefined } : {}) };
 			applyAsk(model.api, model.id, payload, ask, notes);
+			this.lastAsk = ask;
 		}
 
 		this.putDocuments(model.api, payload, notes);
@@ -1359,7 +1402,7 @@ export class EngineSession {
 	}
 
 	/** a user message from typed blocks; queued and steered messages carry the id clients know them by */
-	private userMessage(content: string | UserBlock[], opts: { id?: string; agent?: string; clientID?: string; steer?: boolean; model?: string; effort?: Effort } = {}): AgentMessage {
+	private userMessage(content: string | UserBlock[], opts: { id?: string; agent?: string; clientID?: string; steer?: boolean; model?: string; effort?: Effort; btw?: string } = {}): AgentMessage {
 		const slash = opts.model ? opts.model.indexOf("/") : -1;
 		return {
 			role: "user",
@@ -1368,6 +1411,8 @@ export class EngineSession {
 			...(opts.id ? { id: opts.id } : {}),
 			...(opts.agent ? { agent: opts.agent } : {}),
 			...(opts.clientID ? { clientID: opts.clientID } : {}),
+			// a promoted btw says which one it was, on reads, on the stream and after a restart
+			...(opts.btw ? { btw: opts.btw } : {}),
 			// what a queued or steered prompt asked for rides the message, so a read, a stream and a restart all say it (a18, a20)
 			...(opts.steer ? { steer: true } : {}),
 			...(opts.model && slash > 0 ? { model: { providerID: opts.model.slice(0, slash), modelID: opts.model.slice(slash + 1) } } : {}),
@@ -1492,7 +1537,7 @@ export class EngineSession {
 	}
 
 	/** starts a turn; rejects when one is running (use steer or queue) */
-	prompt(content: string | UserBlock[], opts: { effort?: Effort; ask?: RequestAsk; id?: string; agent?: string; clientID?: string } = {}): Promise<void> {
+	prompt(content: string | UserBlock[], opts: { effort?: Effort; ask?: RequestAsk; id?: string; agent?: string; clientID?: string; btw?: string } = {}): Promise<void> {
 		if (this.state === "busy") throw new BusyError(this.id);
 		if (opts.agent) this.agentName = opts.agent;
 		const extra = this.turnText(opts.ask);
@@ -1738,7 +1783,7 @@ export class EngineSession {
 	 * lost to an eviction or left running on a disposed session
 	 */
 	get warming(): boolean {
-		return this.warmTimer !== undefined || this.warmBusy || this.idleTimer !== undefined || this.idleBusy || this.summaryOnWire;
+		return this.warmTimer !== undefined || this.warmBusy || this.idleTimer !== undefined || this.idleBusy || this.summaryOnWire || this.asides > 0;
 	}
 
 	/** a background summary has started and not landed */
@@ -2151,6 +2196,136 @@ export class EngineSession {
 	}
 
 	/**
+	 * a btw: a side question answered from this session's context, never added to it. the request is the
+	 * session's own, so the provider reads it from cache: the same model, options (effort, max tokens, ttl),
+	 * system prompt and tools, and the same messages. mid-turn those are the messages of the request already
+	 * on the wire; otherwise the context the next request would carry. one user message holding the question
+	 * goes after them, with the session's breakpoints kept where they were (asideBreakpoint). the answer is
+	 * capped by length and time here, not through max_tokens, which the message cache is keyed on. a tool call
+	 * is not run: it gets an error result and one more step, then whatever text there is stands.
+	 */
+	async aside(question: string, opts: { signal?: AbortSignal; onDelta?: (delta: string) => void; maxChars?: number; timeoutMs?: number } = {}): Promise<AsideResult> {
+		const maxChars = opts.maxChars ?? BTW_MAX_CHARS;
+		const midTurn = this.state === "busy" && this.turnRequests > 0 && this.lastCall?.context !== undefined;
+		const call = this.lastCall;
+		const model = midTurn ? call!.model : this.model;
+		let prefix: any[];
+		if (midTurn) prefix = [...call!.context.messages];
+		else {
+			// a turn that has not sent its first request yet: its messages so far, without a reply still streaming
+			const own = this.agent.state.messages.filter((m: any, i, all) => !(i === all.length - 1 && m.role === "assistant" && !m.stopReason));
+			prefix = normalizeContext({ messages: toLlm(own, DOCUMENT_APIS.has(model.api) ? this.documents : undefined).filter((m: any) => m.role === "system" || m.role === "user" || m.role === "assistant" || m.role === "toolResult") as never }).messages as any[];
+		}
+		const marker = `${BTW_FRAMING}\n\n${question}`;
+		const ask = midTurn ? this.lastAsk : undefined;
+		const { onPayload: _p, onResponse: _r, onProviderStreamEvent: _e, signal: _s, ...base } = (call?.options ?? {}) as Record<string, unknown>;
+		const options = {
+			...(call?.options ? {} : { reasoning: this.agent.state.thinkingLevel === "off" ? undefined : this.agent.state.thinkingLevel, transport: "auto" }),
+			...base,
+			sessionId: this.id,
+			apiKey: (base.apiKey as string | undefined) ?? resolveApiKey(this.opts.config, model.provider),
+			cacheRetention: midTurn ? (this.requestRetention ?? this.cacheRetention()) : this.cacheRetention(),
+		};
+		const ctl = new AbortController();
+		let why: string | undefined;
+		const stop = (reason: string) => {
+			why ??= reason;
+			ctl.abort();
+		};
+		const onAbort = () => stop("stopped");
+		if (opts.signal?.aborted) onAbort();
+		opts.signal?.addEventListener("abort", onAbort, { once: true });
+		const timer = setTimeout(() => stop("timeout"), opts.timeoutMs ?? BTW_TIMEOUT_MS);
+		const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		let text = "";
+		let capped = false;
+		let toolCalls = 0;
+		this.asides++;
+		try {
+			let messages: any[] = [...prefix, { role: "user", content: [{ type: "text", text: marker }], timestamp: Date.now() }];
+			for (let step = 0; step < 2; step++) {
+				const stepAsk: RequestAsk | undefined = step === 0 ? ask : ask ? { ...ask, toolChoice: undefined } : undefined;
+				const onPayload = (payload: unknown) => {
+					const p = payload as Record<string, any>;
+					const notes: GateNotes = { applied: [] };
+					this.cacheUsed(model);
+					if (stepAsk) applyAsk(model.api, model.id, p, stepAsk, notes);
+					this.putDocuments(model.api, p, notes);
+					// the session's own gates first, as its request had them; then nothing from the question on is marked,
+					// and a mark that lands on a turn-context system message moves to the user message before it, as the session's did
+					moveTrailingSystemBreakpoint(model.api, p, notes);
+					rollingBreakpoint(model.api, p, notes);
+					asideBreakpoint(model.api, p, marker, notes);
+					moveTrailingSystemBreakpoint(model.api, p, notes);
+					const captureDir = process.env.CMX2_CAPTURE_DIR;
+					if (captureDir) {
+						mkdirSync(captureDir, { recursive: true });
+						writeFileSync(join(captureDir, `${this.id}-${BOOT}-btw-${Date.now()}-${step}.json`), JSON.stringify(p, null, 1));
+					}
+					return p;
+				};
+				const sep = step > 0 && text ? "\n\n" : "";
+				let stepText = "";
+				const stream = await withRetry(() => streamFn(model, { messages } as never, { ...options, signal: ctl.signal, onPayload } as never), {
+					signal: ctl.signal,
+					...(this.opts.retry ? { policy: this.opts.retry } : {}),
+				});
+				for await (const ev of stream as AsyncIterable<any>) {
+					if (ev.type !== "text_delta" || capped || typeof ev.delta !== "string") continue;
+					let d = (stepText ? "" : sep) + ev.delta;
+					const room = maxChars - text.length;
+					if (d.length >= room) {
+						d = d.slice(0, Math.max(0, room));
+						capped = true;
+					}
+					if (d) {
+						text += d;
+						stepText += d;
+						opts.onDelta?.(d);
+					}
+					if (capped) stop("capped");
+				}
+				const m = (await (stream as any).result()) as any;
+				const u = m.usage ?? {};
+				usage.input += u.input ?? 0;
+				usage.output += u.output ?? 0;
+				usage.cacheRead += u.cacheRead ?? 0;
+				usage.cacheWrite += u.cacheWrite ?? 0;
+				usage.cost += u.cost?.total ?? 0;
+				if (m.stopReason === "aborted" || ctl.signal.aborted) {
+					if (why === "capped") break;
+					throw new AsideError(why === "timeout" ? `no answer within ${Math.round((opts.timeoutMs ?? BTW_TIMEOUT_MS) / 1000)} s` : "stopped before it answered", usage, text);
+				}
+				if (m.stopReason === "error") {
+					const t = classifyProviderError({ provider: m.provider, model: m.model, errorMessage: m.errorMessage, contextWindow: model.contextWindow, message: m });
+					throw new AsideError(t.message, usage, text);
+				}
+				const calls = (m.content ?? []).filter((b: any) => b.type === "toolCall");
+				if (!calls.length || step > 0) {
+					toolCalls += calls.length;
+					break;
+				}
+				toolCalls += calls.length;
+				// the call is not run: an error result, and one more step to answer in words
+				messages = [
+					...messages,
+					m,
+					...calls.map((c: any) => ({ role: "toolResult", toolCallId: c.id, toolName: c.name, content: [{ type: "text", text: BTW_NO_TOOLS }], isError: true, timestamp: Date.now() })),
+				];
+			}
+		} catch (e) {
+			if (e instanceof AsideError) throw e;
+			throw new AsideError(why === "timeout" ? `no answer within ${Math.round((opts.timeoutMs ?? BTW_TIMEOUT_MS) / 1000)} s` : ctl.signal.aborted ? "stopped before it answered" : e instanceof Error ? e.message : String(e), usage, text);
+		} finally {
+			clearTimeout(timer);
+			opts.signal?.removeEventListener("abort", onAbort);
+			this.asides--;
+		}
+		if (!text.trim()) throw new AsideError(toolCalls ? "the model asked for tools instead of answering" : "the model gave no answer", usage, text);
+		return { text, usage, model: { providerID: model.provider, modelID: model.id }, capped, midTurn };
+	}
+
+	/**
 	 * replaces the context with the summary, the post-compaction state block and the recent messages. a
 	 * summary made ahead (prefire) is used when it still describes the context's head, so the turn does not
 	 * wait on the model; otherwise the summary is asked for now. the transcript gets one more line. with
@@ -2435,7 +2610,7 @@ export class EngineSession {
 	}
 
 	/** promoted at the next tool boundary of the running turn; starts a turn when idle */
-	async steer(content: string | UserBlock[], opts: { id?: string; clientID?: string; agent?: string; effort?: Effort } = {}): Promise<"steered" | "started"> {
+	async steer(content: string | UserBlock[], opts: { id?: string; clientID?: string; agent?: string; effort?: Effort; btw?: string } = {}): Promise<"steered" | "started"> {
 		if (this.state !== "busy") {
 			void this.prompt(content, opts);
 			return "started";

@@ -977,6 +977,136 @@ export function createClient(opts: ClientOptions) {
 				effort?: string;
 				agent?: string;
 			}>("POST", `/session/${encodeURIComponent(params.sessionID)}/queue`, undefined, body, o),
+		/** ask a side question about the session. it runs at once, idle or mid-turn, on the session's model with the session's context (mid-turn, the context of the request already sent), and never touches the session's status, queue, steers or transcript. the answer streams as btw.delta and lands in btw.updated; its spend adds to the session's totals */
+		askBtw: (params: { sessionID: string }, body: {
+			text: string;
+			/** a uuid the client picks; a repeat within 24 h returns the first answer and does nothing, and events the request causes carry it */
+			clientID?: string;
+		}, o?: CallOptions) =>
+			call<{
+				id: string;
+				sessionID: string;
+				/** the question */
+				text: string;
+				/** the answer so far: empty when asked, grown by btw.delta while running, final when done. an error keeps the text that came before it */
+				answer: string;
+				status: "running" | "done" | "error";
+				/** on status error: what went wrong, short and lowercase, to show as is */
+				error?: string;
+				/** the session's last message when the btw was asked; a client places the card after it */
+				afterMessageID?: string;
+				time: {
+					created: number;
+					/** when it finished, done or error */
+					completed?: number;
+					/** when it was dismissed; a dismissed btw stays readable, clients hide it */
+					dismissed?: number;
+				};
+				/** the user message it was promoted into */
+				promotedMessageID?: string;
+				/** the model that answers: the session's */
+				model?: {
+					providerID: string;
+					modelID: string;
+				};
+				/** once finished: what its requests used; added to the session's totals, not to its context fill */
+				tokens?: {
+					input: number;
+					output: number;
+					cache: {
+						read: number;
+						write: number;
+					};
+				};
+				/** once finished: what it cost, added to the session's cost */
+				cost?: number;
+			}>("POST", `/session/${encodeURIComponent(params.sessionID)}/btw`, undefined, body, o),
+		/** the session's btws, oldest first, dismissed ones included (time.dismissed set) */
+		btws: (params: { sessionID: string }, o?: CallOptions) =>
+			call<Array<{
+				id: string;
+				sessionID: string;
+				/** the question */
+				text: string;
+				/** the answer so far: empty when asked, grown by btw.delta while running, final when done. an error keeps the text that came before it */
+				answer: string;
+				status: "running" | "done" | "error";
+				/** on status error: what went wrong, short and lowercase, to show as is */
+				error?: string;
+				/** the session's last message when the btw was asked; a client places the card after it */
+				afterMessageID?: string;
+				time: {
+					created: number;
+					/** when it finished, done or error */
+					completed?: number;
+					/** when it was dismissed; a dismissed btw stays readable, clients hide it */
+					dismissed?: number;
+				};
+				/** the user message it was promoted into */
+				promotedMessageID?: string;
+				/** the model that answers: the session's */
+				model?: {
+					providerID: string;
+					modelID: string;
+				};
+				/** once finished: what its requests used; added to the session's totals, not to its context fill */
+				tokens?: {
+					input: number;
+					output: number;
+					cache: {
+						read: number;
+						write: number;
+					};
+				};
+				/** once finished: what it cost, added to the session's cost */
+				cost?: number;
+			}>>("GET", `/session/${encodeURIComponent(params.sessionID)}/btw`, undefined, undefined, o),
+		/** hide a btw: sets time.dismissed (a flag; the btw stays readable). a running btw stops and ends as an error. a second call changes nothing and answers the same btw */
+		dismissBtw: (params: { sessionID: string; btwID: string }, o?: CallOptions) =>
+			call<{
+				id: string;
+				sessionID: string;
+				/** the question */
+				text: string;
+				/** the answer so far: empty when asked, grown by btw.delta while running, final when done. an error keeps the text that came before it */
+				answer: string;
+				status: "running" | "done" | "error";
+				/** on status error: what went wrong, short and lowercase, to show as is */
+				error?: string;
+				/** the session's last message when the btw was asked; a client places the card after it */
+				afterMessageID?: string;
+				time: {
+					created: number;
+					/** when it finished, done or error */
+					completed?: number;
+					/** when it was dismissed; a dismissed btw stays readable, clients hide it */
+					dismissed?: number;
+				};
+				/** the user message it was promoted into */
+				promotedMessageID?: string;
+				/** the model that answers: the session's */
+				model?: {
+					providerID: string;
+					modelID: string;
+				};
+				/** once finished: what its requests used; added to the session's totals, not to its context fill */
+				tokens?: {
+					input: number;
+					output: number;
+					cache: {
+						read: number;
+						write: number;
+					};
+				};
+				/** once finished: what it cost, added to the session's cost */
+				cost?: number;
+			}>("POST", `/session/${encodeURIComponent(params.sessionID)}/btw/${encodeURIComponent(params.btwID)}/dismiss`, undefined, undefined, o),
+		/** put a done btw into the thread: a user message (marked btw: <id>) holding the question and the answer, framed as a btw the user asked, sent as a steer when a turn runs and as a prompt otherwise. 409 when the btw is not done or was promoted already */
+		promoteBtw: (params: { sessionID: string; btwID: string }, o?: CallOptions) =>
+			call<{
+				/** the user message's id: provisional when it was steered into a running turn, as a steer's is */
+				messageID: string;
+			}>("POST", `/session/${encodeURIComponent(params.sessionID)}/btw/${encodeURIComponent(params.btwID)}/promote`, undefined, undefined, o),
 		/** move the effort dial; applies from the next turn */
 		setEffort: (params: { sessionID: string }, body: {
 			effort: "low" | "medium" | "high" | "xhigh" | "max";

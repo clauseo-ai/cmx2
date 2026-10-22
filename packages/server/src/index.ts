@@ -38,6 +38,7 @@ import { type Created, type Policy, type SetupRun, WorktreeError, type WorktreeI
 import { Notifier, notifyConfig } from "./notify.ts";
 import { PairError, Pairing } from "./pair.ts";
 import { type FileDiff, Snapshots } from "./snapshot.ts";
+import { BtwError, Btws } from "./btw.ts";
 import { blacklisted, checkProfileKeys, patchProfile, redactConfig, scrubText, variantEffort, variantsFor } from "./profile.ts";
 
 /** stamped into release binaries by scripts/build.ts (`--define CMX2_VERSION`); a source run says dev */
@@ -55,7 +56,7 @@ const SHELL_LINE_TIMEOUT_S = 600;
 /** events that describe the daemon, not a directory: no envelope fields on /global/event */
 const SERVER_EVENTS = new Set(["server.connected", "server.heartbeat", "global.disposed", "stream.reset"]);
 /** frames that change no state, or stream too fast to keep: never logged, never numbered (a1) */
-const UNLOGGED = new Set([...SERVER_EVENTS, "message.part.delta"]);
+const UNLOGGED = new Set([...SERVER_EVENTS, "message.part.delta", "btw.delta"]);
 /** the replay window: an event is kept while it is inside either bound (30 minutes or 10,000 events, whichever keeps more) */
 /** sessions the start's heal looks at between yields to the loop */
 const HEAL_PAGE = 16;
@@ -116,6 +117,8 @@ export function withRev(type: string, properties: string, rev: number | null | u
 	return properties === "{}" ? `{"rev":${rev}}` : `${properties.slice(0, -1)},"rev":${rev}}`;
 }
 type Delta = { sessionID: string; messageID: string; partID: string; field: string; delta: string; offset: number };
+/** a btw's streamed answer text (btw.delta): unlogged, coalesced per btw like a part's deltas */
+type BtwDelta = { sessionID: string; btwID: string; delta: string };
 /** a text or reasoning part of the message being streamed: announced at its start, its text grows with each delta */
 type StreamingPart = { index: number; type: "text" | "reasoning"; text: string; start: number; end?: number };
 type Inflight = { directory: string; info: Record<string, unknown>; parts: Map<string, StreamingPart> };
@@ -126,7 +129,7 @@ type Subscriber = {
 	/** the opt-in switches the stream asked for (coalesce, types, compact, gzip); none on a stream that asked for none */
 	switches?: StreamSwitches;
 	/** with coalesce: each part's deltas held for the current batch, merged, in the order the parts first came */
-	pending?: Map<string, { directory: string; d: Delta; bytes: number }>;
+	pending?: Map<string, { directory: string; d: Delta; bytes: number; btw?: BtwDelta }>;
 	pendingTimer?: ReturnType<typeof setTimeout>;
 	live: boolean;
 	closed: boolean;
@@ -272,6 +275,20 @@ export function serve(opts: ServeOptions) {
 	 * written already (a5) and a resumed stream gets each streaming part once in full (a1)
 	 */
 	const inflight = new Map<string, Inflight>();
+	/** side questions about sessions (btw.ts): answered from a session's cached context, kept out of its transcript */
+	const btws = new Btws({
+		store,
+		publish: (directory, type, properties) => publish(directory, type, properties),
+		delta: (directory, properties) => publish(directory, "btw.delta", properties),
+		directoryOf: (id) => row(id).directory,
+		open: (id) => open(id),
+		totalsChanged: (id) => void publishSession("session.updated", id).catch(() => {}),
+		send: async (id, text, btw) => {
+			const t = await promptTurn(id, [{ type: "text", text }], {}, { busy: "steer", btw });
+			store.setSessionEffort(id, t.s.standingEffort);
+			return t.messageID;
+		},
+	});
 
 	const machine = systemInfo(data);
 	const procs = new Procs({ dataDir: data, onEvent: (e) => onProc(e) });
@@ -722,6 +739,7 @@ export function serve(opts: ServeOptions) {
 			// coalesced deltas go before them (send)
 			const fan = () => {
 				if (type === "message.part.delta") return publishDelta(directory, properties as Delta);
+				if (type === "btw.delta") return publishBtwDelta(directory, properties as BtwDelta);
 				const frame = unloggedFrames(type, properties, directory);
 				for (const s of subscribers) if (s.live && reaches(s, directory, type)) send(s, frame(s));
 			};
@@ -897,6 +915,36 @@ export function serve(opts: ServeOptions) {
 	}
 
 	/**
+	 * a btw's answer text to every live stream: a frame each, or with coalesce one per btw per batch. a btw's answer is
+	 * capped well under a frame (BTW_MAX_CHARS), so no split is needed
+	 */
+	function publishBtwDelta(directory: string, d: BtwDelta) {
+		flushBurst();
+		for (const s of subscribers) {
+			if (!s.live || !reaches(s, directory, "btw.delta")) continue;
+			if (!s.switches?.coalesce) {
+				send(s, unloggedFrame(s, "btw.delta", d, directory));
+				continue;
+			}
+			const key = `btw\0${directory}\0${d.sessionID}\0${d.btwID}`;
+			const held = s.pending?.get(key);
+			const bytes = Buffer.byteLength(d.delta);
+			if (held?.btw) {
+				held.btw = { ...held.btw, delta: held.btw.delta + d.delta };
+				held.bytes += bytes;
+			} else (s.pending ??= new Map()).set(key, { directory, d: { sessionID: d.sessionID, messageID: "", partID: "", field: "", delta: "", offset: 0 }, bytes, btw: { ...d } });
+			if (s.pending!.get(key)!.bytes >= DELTA_FRAME_BYTES - 2048) {
+				flushPending(s);
+				continue;
+			}
+			s.pendingTimer ??= setTimeout(() => {
+				s.pendingTimer = undefined;
+				flushPending(s);
+			}, s.switches.coalesce);
+		}
+	}
+
+	/**
 	 * coalesce: a delta joins its part's batch when it continues it, else the batches go out first. the batch goes when its
 	 * window ends, when it grows to a frame's worth, and before any other frame to the stream (send), so order holds
 	 */
@@ -927,7 +975,10 @@ export function serve(opts: ServeOptions) {
 		if (!pending?.size) return;
 		sub.pending = undefined;
 		if (!sub.live) return;
-		for (const { directory, d } of pending.values()) for (const f of deltaFrames(sub, d, directory)) put(sub, f);
+		for (const { directory, d, btw } of pending.values()) {
+			if (btw) put(sub, unloggedFrame(sub, "btw.delta", btw, directory));
+			else for (const f of deltaFrames(sub, d, directory)) put(sub, f);
+		}
 	}
 
 	/** one delta as frames of at most DELTA_FRAME_BYTES, split between utf-16 surrogate pairs, offsets moved along */
@@ -1131,6 +1182,8 @@ export function serve(opts: ServeOptions) {
 			if (!reaches(sub, f.directory, "message.part.updated")) continue;
 			for (const part of streamingParts(sessionID, f)) send(sub, unloggedFrame(sub, "message.part.updated", { sessionID, part }, f.directory));
 		}
+		// a running btw's answer so far is not in the log either: the resumed stream gets the btw whole, then its deltas
+		for (const b of btws.streaming()) if (reaches(sub, b.directory, "btw.updated")) send(sub, unloggedFrame(sub, "btw.updated", { sessionID: b.sessionID, btw: b.btw }, b.directory));
 		// a running shell's latest tail is not in the log: the resumed stream gets it here, as a live one already has
 		for (const run of progressing.values()) {
 			if (run.tail && reaches(sub, run.directory, "message.part.updated")) send(sub, unloggedFrame(sub, "message.part.updated", { sessionID: run.session, part: JSON.parse(run.tail) }, run.directory));
@@ -1990,6 +2043,8 @@ export function serve(opts: ServeOptions) {
 				const from = (message as { role?: string; from?: unknown }).role === "revert" ? (message as { from?: unknown }).from : undefined;
 				const parked = typeof from === "number" ? (store.db.query("select id from message where session_id = ? and seq >= ? and reverted = 0").all(id, from) as Array<{ id: string }>) : [];
 				const touched = projectMessage(store, { sessionId: id, cwd: directory, seq, completedAt: Date.now() }, message);
+				const promoted = (message as { role?: string; btw?: unknown }).role === "user" ? (message as { btw?: unknown }).btw : undefined;
+				if (typeof promoted === "string" && touched.message) btws.landed(promoted, touched.message);
 				for (const p of parked) publish(directory, "message.removed", { sessionID: id, messageID: p.id });
 				if (touched.message) {
 					const m = store.message(touched.message);
@@ -2278,6 +2333,7 @@ export function serve(opts: ServeOptions) {
 			queued: true,
 			...(q.clientID ? { clientID: q.clientID } : {}),
 			...(q.steer ? { steer: true } : {}),
+			...(q.btw ? { btw: q.btw } : {}),
 			...(q.agent ? { agent: q.agent } : {}),
 			...(q.model && slash > 0 ? { model: { providerID: q.model.slice(0, slash), modelID: q.model.slice(slash + 1) } } : {}),
 			...(q.effort ? { variant: q.effort } : {}),
@@ -2352,6 +2408,7 @@ export function serve(opts: ServeOptions) {
 	async function archive(id: string) {
 		const stored = row(id);
 		await actors.onSessionEnded(id).catch((e) => console.error(`cmx2: closing the agents of ${id}: ${e instanceof Error ? e.message : String(e)}`));
+		btws.stopSession(id);
 		const s = sessions.get(id);
 		if (s) {
 			await s.abort().catch(() => {});
@@ -2435,7 +2492,7 @@ export function serve(opts: ServeOptions) {
 		id: string,
 		content: UserBlock[],
 		b: { model?: { providerID: string; modelID: string }; variant?: string; effort?: Effort; agent?: string },
-		opts: { ask?: RequestAsk; clientID?: string; busy?: "queue" | "steer"; messageID?: string } = {},
+		opts: { ask?: RequestAsk; clientID?: string; busy?: "queue" | "steer"; messageID?: string; btw?: string } = {},
 	) {
 		const stored = row(id);
 		await reachFor(stored.directory, id);
@@ -2464,7 +2521,7 @@ export function serve(opts: ServeOptions) {
 					}
 				}
 				const qid = opts.messageID ?? queuedId(id);
-				const pick = { ...(b.agent ? { agent: b.agent } : {}), ...(effort ? { effort } : {}) };
+				const pick = { ...(b.agent ? { agent: b.agent } : {}), ...(effort ? { effort } : {}), ...(opts.btw ? { btw: opts.btw } : {}) };
 				const result = opts.busy === "steer" ? await s.steer(content, { id: qid, clientID, ...pick }) : await s.queue(content, { id: qid, clientID, ...pick, ...(modelRef ? { model: modelRef } : {}) });
 				const waiting = s.queuedPrompts().find((x) => x.id === qid);
 				publishQueued(stored.directory, id, waiting ?? { id: qid, content, created: Date.now(), ...(clientID ? { clientID } : {}), ...(opts.busy === "steer" ? { steer: true } : {}), ...pick });
@@ -2479,7 +2536,7 @@ export function serve(opts: ServeOptions) {
 				}
 			}
 			// a prompt that waited for its directory under a provisional id lands with it, so the id is swapped the way a queued one's is
-			const turn = s.prompt(content, { effort, ask: opts.ask, ...(b.agent ? { agent: b.agent } : {}), ...(clientID ? { clientID } : {}), ...(opts.messageID ? { id: opts.messageID } : {}) });
+			const turn = s.prompt(content, { effort, ask: opts.ask, ...(b.agent ? { agent: b.agent } : {}), ...(clientID ? { clientID } : {}), ...(opts.messageID ? { id: opts.messageID } : {}), ...(opts.btw ? { btw: opts.btw } : {}) });
 			// the first message names an unnamed session; the request runs beside the turn, never in it
 			void titles.maybe(
 				id,
@@ -3047,6 +3104,28 @@ export function serve(opts: ServeOptions) {
 				return settled(id, t.s, t.turn ?? Promise.resolve());
 			});
 		}
+		if ((r = m(/^\/session\/([^/]+)\/btw$/)) && method === "POST") {
+			const id = r[1]!;
+			const b = await bodyOf<{ text: string; clientID?: string }>(req, "askBtw");
+			return once(b.clientID, "btw", id, async () => {
+				row(id);
+				return json(await btws.ask(id, b.text));
+			});
+		}
+		if ((r = m(/^\/session\/([^/]+)\/btw$/)) && method === "GET") {
+			row(r[1]!);
+			return json(btws.list(r[1]!));
+		}
+		if ((r = m(/^\/session\/([^/]+)\/btw\/([^/]+)\/(dismiss|promote)$/)) && method === "POST") {
+			const [id, bid, verb] = [r[1]!, r[2]!, r[3]!];
+			row(id);
+			try {
+				return json(verb === "dismiss" ? btws.dismiss(id, bid) : await btws.promote(id, bid));
+			} catch (e) {
+				if (e instanceof BtwError) throw new HttpError(e.status, e.name, e.message, { sessionID: id, btwID: bid });
+				throw e;
+			}
+		}
 		if ((r = m(/^\/session\/([^/]+)\/(steer|queue)$/)) && method === "POST") {
 			const [id, kind] = [r[1]!, r[2]! as "steer" | "queue"];
 			const b = await bodyOf<any>(req, kind);
@@ -3556,6 +3635,12 @@ export function serve(opts: ServeOptions) {
 		} catch (e) {
 			console.error(`cmx2: closing cut-off answers failed: ${e instanceof Error ? e.message : String(e)}`);
 		}
+		try {
+			const n = btws.heal();
+			if (n) console.error(`cmx2: ${n} btw(s) left running by the last daemon recorded as errors`);
+		} catch (e) {
+			console.error(`cmx2: closing cut-off btws failed: ${e instanceof Error ? e.message : String(e)}`);
+		}
 		void healTranscripts()
 			.catch((e) => {
 				console.error(`cmx2: healing transcripts failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -3592,6 +3677,7 @@ export function serve(opts: ServeOptions) {
 		clearInterval(pruneTimer);
 		clearInterval(evictTimer);
 		watcher?.close();
+		await btws.stopAll();
 		for (const s of sessions.values()) {
 			await s.abort().catch(() => {});
 			s.dispose();

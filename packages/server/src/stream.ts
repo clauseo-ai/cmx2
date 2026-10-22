@@ -194,6 +194,7 @@ export function stateOf(type: string, properties: string): StateOf | undefined {
 		case "message.updated":
 		case "message.part.updated":
 		case "project.updated":
+		case "btw.updated":
 			break;
 		default:
 			return undefined;
@@ -223,6 +224,10 @@ export function stateOf(type: string, properties: string): StateOf | undefined {
 		case "message.part.updated": {
 			const id = str(p.part?.id);
 			return of(id && `part\0${str(p.sessionID) ?? ""}\0${str(p.part?.messageID) ?? ""}\0${id}`, p.part);
+		}
+		case "btw.updated": {
+			const id = str(p.btw?.id);
+			return of(id && `btw\0${id}`, p.btw);
 		}
 		default: {
 			const id = str(p.id);
