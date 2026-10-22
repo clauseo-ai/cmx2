@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Routing } from "@cmx2/routing";
 import { type AgentRow, Store } from "@cmx2/store";
 import { Actors, type Host } from "../src/actors.ts";
+import { checksFor, evaluate, type PermissionRule, rulesFromConfig, DEFAULT_PERMISSION } from "@cmx2/engine/permission";
 import { helperFragment } from "../src/prompt.ts";
 import { REPORT_MAX_CHARS } from "../src/report.ts";
 import { ReportFiles } from "../src/report-files.ts";
@@ -147,13 +148,16 @@ test("message with files delivers their contents with the note", async () => {
 	writeFileSync(join(dir, "map.md"), "the whole map\nline two");
 	const big = join(dir, "big.md");
 	writeFileSync(big, "y".repeat(25_000));
-	await actors.message("ses_root", { to: "kid", body: "here is the map", files: ["map.md", big, "missing.md"] });
+	writeFileSync(join(dir, "rel.md"), "z".repeat(20_010));
+	await actors.message("ses_root", { to: "kid", body: "here is the map", files: ["map.md", big, "missing.md", "rel.md"] });
 	const [m] = store.agents.pending("ses_kid");
 	expect(m!.body).toStartWith("here is the map\n\n");
 	expect(m!.body).toContain('<file path="map.md">\nthe whole map\nline two\n</file>');
 	expect(m!.body).toContain(`<file path="${big}">`);
-	expect(m!.body).toContain("(5000 more characters; read the file for the rest)");
+	expect(m!.body).toContain(`(5000 more characters; read ${big} for the rest)`);
 	expect(m!.body).toContain('<file path="missing.md">(not found)</file>');
+	// a relative path is cut with the absolute one, so the recipient can read the rest from any directory
+	expect(m!.body).toContain(`(10 more characters; read ${join(dir, "rel.md")} for the rest)`);
 });
 
 test("retention: past the byte cap the oldest files go, the newest stays, and a restart counts what is on disk", () => {
@@ -189,4 +193,23 @@ test("the read-only and review fragments say the final reply is the deliverable 
 	expect(helperFragment({ readOnly: true })).toEndWith(`your tools read and search; you do not change files or run commands. ${line}`);
 	expect(helperFragment({ review: true })).toEndWith(`your tools read, search and run commands; you do not change files. ${line}`);
 	expect(helperFragment()).not.toContain(line);
+});
+test("the report rules: * crosses /, so an edit to any report file is denied and a tree reads its own reports without an ask", () => {
+	// the same two rules the daemon appends after the saved ones (server/index.ts, reportRules)
+	const reportsDir = "/data/reports";
+	const rules: PermissionRule[] = [
+		...rulesFromConfig(DEFAULT_PERMISSION),
+		{ permission: "external_directory", pattern: `${reportsDir}/ses_root/*`, action: "allow" },
+		{ permission: "edit", pattern: `${reportsDir}/*`, action: "deny" },
+	];
+	const verdict = (tool: string, path: string) => checksFor(tool, { path }, "/work/repo").map((c) => c.patterns.map((p) => evaluate(rules, c.permission, p).action));
+	const file = `${reportsDir}/ses_root/ses_kid-7.md`;
+	// read: the read rule allows, the external_directory check matches the tree's rule one level down
+	expect(verdict("read", file)).toEqual([["allow"], ["allow"]]);
+	// write and edit: denied, two levels below the pattern's directory, and in another tree too
+	expect(verdict("write", file)[0]).toEqual(["deny"]);
+	expect(verdict("edit", file)[0]).toEqual(["deny"]);
+	expect(verdict("write", `${reportsDir}/ses_other/ses_x-1.md`)[0]).toEqual(["deny"]);
+	// another tree's reports still ask
+	expect(verdict("read", `${reportsDir}/ses_other/ses_x-1.md`)[1]).toEqual(["ask"]);
 });

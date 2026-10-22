@@ -786,7 +786,7 @@ export class Actors {
 			const path = isAbsolute(f) ? f : join(directory, f);
 			if (!existsSync(path) || !statSync(path).isFile()) return `<file path="${f}">(not found)</file>`;
 			const text = readFileSync(path, "utf8");
-			return `<file path="${f}">\n${text.length > ATTACH_MAX ? `${text.slice(0, ATTACH_MAX)}\n(${text.length - ATTACH_MAX} more characters; read the file for the rest)` : text}\n</file>`;
+			return `<file path="${f}">\n${text.length > ATTACH_MAX ? `${text.slice(0, ATTACH_MAX)}\n(${text.length - ATTACH_MAX} more characters; read ${path} for the rest)` : text}\n</file>`;
 		});
 	}
 
