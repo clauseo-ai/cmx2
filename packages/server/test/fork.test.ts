@@ -117,3 +117,26 @@ test("lineage survives a re-read from the db", async () => {
 		fresh.close();
 	}
 });
+
+test("a fork repeated with one clientID makes one session and answers the same id; without one, two calls make two", async () => {
+	const count = () => (d.store.db.query("select count(*) as n from session where forked_from = ?").get(PARENT) as { n: number }).n;
+	const before = count();
+	const clientID = `fork-${nonce()}`;
+	const a = await call("POST", `/session/${PARENT}/fork`, { clientID });
+	const b = await call("POST", `/session/${PARENT}/fork`, { clientID });
+	expect(a.status).toBe(200);
+	expect(b.status).toBe(200);
+	expect(b.json.id).toBe(a.json.id);
+	expect(count()).toBe(before + 1);
+	// two at once with a new id: the second waits for the first and answers it
+	const id2 = `fork-${nonce()}`;
+	const [c, e] = await Promise.all([call("POST", `/session/${PARENT}/fork`, { clientID: id2 }), call("POST", `/session/${PARENT}/fork`, { clientID: id2 })]);
+	expect(e.json.id).toBe(c.json.id);
+	expect(count()).toBe(before + 2);
+	// the same id on another session is refused, as for prompts
+	expect((await call("POST", `/session/${cutFork}/fork`, { clientID })).status).toBe(409);
+	const x = await call("POST", `/session/${PARENT}/fork`, {});
+	const y = await call("POST", `/session/${PARENT}/fork`, {});
+	expect(x.json.id).not.toBe(y.json.id);
+	expect(count()).toBe(before + 4);
+});

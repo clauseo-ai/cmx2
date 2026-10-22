@@ -12789,7 +12789,7 @@
 		"/session/{sessionID}/fork": {
 			"post": {
 				"operationId": "fork",
-				"summary": "a new session with this one's history up to (not including) a message, or all of it; titled (fork #n), with forkedFrom naming this session and the message. its copied messages get new ids under the fork's own id",
+				"summary": "a new session with this one's history up to (not including) a message, or all of it; titled (fork #n), with forkedFrom naming this session and the message. its copied messages get new ids under the fork's own id. a repeat with the same clientID answers the first fork, as it was answered, and makes no other",
 				"parameters": [
 					{
 						"name": "sessionID",
@@ -12809,6 +12809,10 @@
 								"properties": {
 									"messageID": {
 										"type": "string"
+									},
+									"clientID": {
+										"type": "string",
+										"description": "a uuid the client picks; a repeat within 24 h returns the first answer and does nothing, and events the request causes carry it"
 									}
 								}
 							}

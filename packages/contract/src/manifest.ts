@@ -1138,8 +1138,9 @@ export const ROUTES: RouteDef[] = [
 		method: "POST",
 		path: "/session/:sessionID/fork",
 		operationId: "fork",
-		summary: "a new session with this one's history up to (not including) a message, or all of it; titled (fork #n), with forkedFrom naming this session and the message. its copied messages get new ids under the fork's own id",
-		body: Type.Object({ messageID: Type.Optional(Type.String()) }),
+		summary:
+			"a new session with this one's history up to (not including) a message, or all of it; titled (fork #n), with forkedFrom naming this session and the message. its copied messages get new ids under the fork's own id. a repeat with the same clientID answers the first fork, as it was answered, and makes no other",
+		body: Type.Object({ messageID: Type.Optional(Type.String()), clientID: ClientID }),
 		response: SessionInfo,
 	},
 	{

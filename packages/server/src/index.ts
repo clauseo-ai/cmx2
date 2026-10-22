@@ -3269,8 +3269,10 @@ export function serve(opts: ServeOptions) {
 		}
 		if ((r = m(/^\/session\/([^/]+)\/unrevert$/)) && method === "POST") return json(await unrevert(r[1]!));
 		if ((r = m(/^\/session\/([^/]+)\/fork$/)) && method === "POST") {
-			const b = await bodyOf<{ messageID?: string }>(req, "fork");
-			return json(await fork(r[1]!, b.messageID));
+			// a client that gave up waiting on a long copy and asks again gets the first fork, not a second one
+			const id = r[1]!;
+			const b = await bodyOf<{ messageID?: string; clientID?: string }>(req, "fork");
+			return once(b.clientID, "fork", id, async () => json(await fork(id, b.messageID)));
 		}
 		if ((r = m(/^\/session\/([^/]+)\/diff$/)) && method === "GET") {
 			const stored = row(r[1]!);
