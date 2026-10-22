@@ -2,7 +2,7 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
-## unreleased
+## 0.9.2 - 2026-10-22
 
 contract version 7. no shape changes: the `session.warmed` description now says how a refresh works.
 
