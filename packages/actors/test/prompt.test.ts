@@ -13,9 +13,9 @@ test("the helper prompt names no seat and no model, and is byte-identical howeve
 });
 
 test("explore and review add their own line, then the type body", () => {
-	expect(helperFragment({ readOnly: true })).toEndWith("your tools read and search; you do not change files or run commands.");
-	expect(helperFragment({ review: true })).toEndWith("your tools read, search and run commands; you do not change files.");
-	expect(helperFragment({ review: true, typeBody: "  check the diff.\n" })).toEndWith("you do not change files.\n\ncheck the diff.");
+	expect(helperFragment({ readOnly: true })).toContain("your tools read and search; you do not change files or run commands.");
+	expect(helperFragment({ review: true })).toContain("your tools read, search and run commands; you do not change files.");
+	expect(helperFragment({ review: true, typeBody: "  check the diff.\n" })).toEndWith("put it in your final reply instead.\n\ncheck the diff.");
 	expect(helperFragment({ typeBody: "be brief" })).toEndWith("approach_failed, user_question.\n\nbe brief");
 });
 

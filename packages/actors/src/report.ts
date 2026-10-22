@@ -6,7 +6,7 @@
  * task's body).
  */
 
-/** a report body longer than this is cut; the rest stays in the child's transcript */
+/** a report body longer than this is cut; the whole text is in the report's file (and the child's transcript) */
 export const REPORT_MAX_CHARS = 12_000;
 
 /** joined text blocks of an assistant message; tool calls and thinking are not the deliverable */
@@ -71,10 +71,15 @@ export function failedTurnBody(turn: any[], body: string): string {
 	return `${label}\n\n${body}`;
 }
 
-/** the cap: head of the body and where the rest is */
-export function capBody(body: string, sessionID: string, max = REPORT_MAX_CHARS): string {
+/** the cap: head of the body and where the rest is: the report's file when it has one, else the child's session */
+export function capBody(body: string, sessionID: string, max = REPORT_MAX_CHARS, file?: string): string {
 	if (body.length <= max) return body;
-	return `${body.slice(0, max)}\n(${body.length - max} more characters; the full text is in session ${sessionID})`;
+	return `${body.slice(0, max)}\n(${body.length - max} more characters; the full text is in ${file ?? `session ${sessionID}`})`;
+}
+
+/** what a report's file holds: who wrote it and how its turn ended, then the whole body */
+export function reportFileText(opts: { path: string; childID: string; label: string; body: string }): string {
+	return `report from ${opts.path} (session ${opts.childID}), status ${opts.label}\n\n${opts.body}\n`;
 }
 
 /** paths a turn wrote or edited, from its tool calls (native and run helpers) */
@@ -94,8 +99,8 @@ export function filesTouched(turn: any[]): string[] {
 const WARNING = "warning: no deliverable. the child ended its turn without a substantive final text or a message to you; its last text follows:";
 
 /** header first so a client (and the pool collector) can key on it; the audit tail names the transcript */
-export function reportBody(opts: { header: string; body: string; warn: boolean; childID: string; footer?: string }): string {
-	const tail = `[child session: ${opts.childID}; transcript kept on disk. to continue: message("${opts.childID}")]`;
+export function reportBody(opts: { header: string; body: string; warn: boolean; childID: string; footer?: string; file?: string }): string {
+	const tail = `[child session: ${opts.childID}; transcript kept on disk.${opts.file ? ` full report: ${opts.file}.` : ""} to continue: message("${opts.childID}")]`;
 	const main = opts.warn ? [WARNING, "", opts.body.length ? opts.body : "<no text emitted>", "", opts.header].join("\n") : opts.body.length ? `${opts.header}\n\n${opts.body}` : opts.header;
 	return [main, ...(opts.footer ? [opts.footer] : []), tail].join("\n\n");
 }

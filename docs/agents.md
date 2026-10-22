@@ -8,8 +8,8 @@ and transcript, a path in the tree (`/root/<name>[/<child>]`) and a model from t
 
 | verb | what it does |
 |---|---|
-| `spawn` | starts an agent on a brief and returns its id at once. options: `model` (a name from the table, required unless the agent type names one), `effort` (within the model's limits), `after` (the id, path or name of an earlier helper whose attempt this one takes over. its brief and last report ride along, and it keeps running unless you close it), `name`, `agent_type` (`general`, `explore` for read and search only, `review` for read, search and run commands without editing, or a type from `.cmx2/agent/*.md`; the built-in names win over a file with the same name, and the daemon logs a warning once), `files` (contents ride with the brief), `fork_turns`, `on_failure` (`escalate`, `respawn` up to 3 times, `ignore`), `pool` (`n`, `collect`: `all`, `first` or `any_n`; `strategy`: `one_for_one`, `one_for_all`, `rest_for_one`; `briefs`), `cache_ttl`, `why` (one line on why this model and effort: stored on the agent and on its `step_up` or `retry` metric, shown by `agents` on the agents below you, never sent to the helper) |
-| `message` | a note to any agent in the tree by id, path, name or `parent`. a running agent reads it at its next step; with `wake` (default) an idle one starts a turn. `correlation_id` pairs replies |
+| `spawn` | starts an agent on a brief and returns its id at once. options: `model` (a name from the table, required unless the agent type names one), `effort` (within the model's limits), `after` (the id, path or name of an earlier helper whose attempt this one takes over. its brief and last report ride along, and it keeps running unless you close it), `name`, `agent_type` (`general`, `explore` for read and search only, `review` for read, search and run commands without editing, or a type from `.cmx2/agent/*.md`; the built-in names win over a file with the same name, and the daemon logs a warning once; explore and review cannot write files, so their final reply is the deliverable, and the tool description and their prompt say so), `files` (contents ride with the brief, each cut at 20,000 characters; a report's file passes a helper's whole report on this way), `fork_turns`, `on_failure` (`escalate`, `respawn` up to 3 times, `ignore`), `pool` (`n`, `collect`: `all`, `first` or `any_n`; `strategy`: `one_for_one`, `one_for_all`, `rest_for_one`; `briefs`), `cache_ttl`, `why` (one line on why this model and effort: stored on the agent and on its `step_up` or `retry` metric, shown by `agents` on the agents below you, never sent to the helper) |
+| `message` | a note to any agent in the tree by id, path, name or `parent`. a running agent reads it at its next step; with `wake` (default) an idle one starts a turn. `correlation_id` pairs replies. `files` attaches files the way `spawn` does (same 20,000-character cut, relative paths from the sender's directory), so a report's file reaches an agent that is already running |
 | `wait` | blocks until mail arrives (or a matching `correlation_id`), 1 s to 10 min; ending the turn is usually cheaper, because reports wake you |
 | `agents` | the roster, with each agent's model, effort, context size and cost per step; `close` (for good, children too, transcripts stay), `interrupt` (stops the turn, keeps it resumable), `return_to` (a follow-up) |
 | `run` | scripts reach the same verbs as `agents.spawn`, `agents.message`, `agents.wait`, `agents.list`, `agents.close`, `agents.interrupt` |
@@ -35,12 +35,21 @@ and transcript, a path in the tree (`/root/<name>[/<child>]`) and a model from t
   the default used to be 4, which meant 3 helpers at a time. that was a mistake by a coding agent and
   went unnoticed. see the caps section of [routing.md](routing.md).
 - **reports are bounded.** the deliverable comes from the turn that just ended, never from an earlier
-  task, and is cut at 12,000 characters (the rest stays in the child's transcript). a report with no
+  task, and is cut at 12,000 characters (4,000 per member in a pool report). a report with no
   substantive text says so first. a failed turn's text comes with a line that says what it is: what the
   failing message had written when it broke, or the child's last note from earlier in the turn, never a
   report. a last line `ABORT(<reason>): <details>` (spec_wrong,
   transient_tool_error, out_of_scope, context_full, approach_failed, user_question) is parsed, and
   behaviour contracts per agent type flag a missing deliverable or an undeclared reason.
+- **every report is also a file.** the daemon saves each report's whole body (failed and partial ones too, when
+  they have text) to `<data dir>/reports/<root session id>/<child id>-<turn end>.md`, and the report names it:
+  `full report: <path>` in its last line, each member's line in a pool report, the cut note of a long body, the
+  mail's `meta.report_file` and the `agent.report` event's `file`. agents in that tree read the directory without
+  an ask (a rule after the saved ones allows `external_directory` there), nobody edits it, and the path can be
+  passed on with `files` in `spawn` or `message` instead of asking anyone to retype the text. the files are copies
+  of the transcript, owned by the daemon's agent runtime and pruned oldest first once they pass 64 MiB or 5,000
+  files together (`REPORT_FILES_MAX_BYTES`, `REPORT_FILES_MAX_COUNT` in `packages/actors/src/report-files.ts`);
+  the transcript keeps the text either way.
 - **a helper's questions go to its spawner.** a helper's `question` tool sends the questions to the agent that
   started it as a message with a `correlation_id` (waking it when it is parked) and waits. any `message` from that
   agent to the helper is the answer and comes back as the tool result. the spawner answers from what it knows or

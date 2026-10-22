@@ -8,7 +8,8 @@ import type { AgentAnswer, QuestionPrompt } from "@cmx2/tools";
 import { computeViolations, resolveContract } from "./contracts.ts";
 import { childPath, isAncestor, nameFrom, ROOT_PATH, validName } from "./paths.ts";
 import { attemptAttachment, helperFragment, taskEnvelope } from "./prompt.ts";
-import { capBody, extractDeliverable, failedTurnBody, filesTouched, looksLikeMissingDeliverable, parseAbort, reportBody } from "./report.ts";
+import { capBody, extractDeliverable, failedTurnBody, filesTouched, looksLikeMissingDeliverable, parseAbort, reportBody, reportFileText } from "./report.ts";
+import type { ReportFiles } from "./report-files.ts";
 
 /**
  * the agent runtime: a port of cmx's `AgentControl` onto cmx2's sessions. an agent is a session with
@@ -107,6 +108,8 @@ export interface ActorsOptions {
 	warmHorizonMs?: number;
 	/** whether the profile blacklists a model for work in a directory (providers.<id>.blacklist) */
 	blacklisted?: (directory: string, model: string) => boolean;
+	/** where every helper report is saved in full; without it reports name the child's session for the rest of a cut body */
+	reports?: ReportFiles;
 }
 
 export interface PoolSpec {
@@ -219,7 +222,7 @@ interface PoolState {
 	collect: "all" | "first" | "any_n";
 	anyN: number;
 	strategy: "one_for_one" | "one_for_all" | "rest_for_one";
-	reports: Map<string, { path: string; label: string; body: string; failed: boolean }>;
+	reports: Map<string, { path: string; label: string; body: string; failed: boolean; file?: string }>;
 	done: boolean;
 }
 
@@ -868,11 +871,16 @@ export class Actors {
 		this.post(this.rows.get(a.id)!, { kind: "task", from: spawner, body: envelope, wake: true, system: true });
 	}
 
-	async message(senderID: string, input: { to: string; body: string; wake?: boolean; correlation_id?: string; kind?: MailKind }): Promise<{ to: string; id: string; state: AgentState; woke: boolean; pending: number }> {
+	async message(senderID: string, input: { to: string; body: string; wake?: boolean; correlation_id?: string; kind?: MailKind; files?: string[] }): Promise<{ to: string; id: string; state: AgentState; woke: boolean; pending: number }> {
 		const sender = this.rowOf(senderID);
 		if (!input.body?.trim()) throw new ActorError("BadRequestError", 400, "a message needs a body");
 		const t = this.resolve(sender, input.to);
 		if (t.id === sender.id) throw new ActorError("BadRequestError", 400, "that is you; message another agent");
+		// attached files ride along with the note, as they do with a spawn's brief
+		if (input.files?.length) {
+			const home = this.host.directory(sender.id) ?? process.cwd();
+			input = { ...input, body: [input.body.trim(), "", ...this.attach(home, input.files)].join("\n") };
+		}
 		// a helper blocked on its question reads nothing else until it is answered, so any note from the agent it asked is the answer
 		const ask = this.askFor(t.id, sender.id, input.correlation_id);
 		if (ask) {
@@ -1153,11 +1161,13 @@ export class Actors {
 		const contract = resolveContract(a.agent_type ?? undefined, opts.behavior_version);
 		const violations = computeViolations(contract, { delivered: explicit || substantive, ...(abort ? { abort } : {}) });
 		const shown = failed ? failedTurnBody(turn, raw) : raw;
-		const body = capBody(shown, a.id);
-		const content = reportBody({ header: lines.join("\n"), body, warn, childID: a.id });
+		const file = this.saveReport(a, e.to, label, shown);
+		const body = capBody(shown, a.id, undefined, file);
+		const content = reportBody({ header: lines.join("\n"), body, warn, childID: a.id, ...(file ? { file } : {}) });
 		const meta: Record<string, unknown> = {
 			label,
 			child: a.id,
+			...(file ? { report_file: file } : {}),
 			...(abort ? { abort_reason: abort } : {}),
 			...(contract && violations.length ? { behavior_violation: { contract_version: contract.version, violations } } : {}),
 		};
@@ -1165,12 +1175,29 @@ export class Actors {
 		const source = explicit ? "explicit_send" : warn ? "safety_net" : "extracted";
 		this.metric(parent, "deliverable_arrived", a, { source, body_length: raw.length, child_path: a.path });
 		if (warn) this.metric(parent, "safety_net_fired", a, { child_path: a.path });
-		this.host.publish(a.root_id, "agent.report", { sessionID: parent.id, from: a.path, childID: a.id, label, body_length: raw.length, ...(abort ? { abort_reason: abort } : {}), ...(meta.behavior_violation ? { behavior_violation: meta.behavior_violation } : {}) });
+		this.host.publish(a.root_id, "agent.report", { sessionID: parent.id, from: a.path, childID: a.id, label, body_length: raw.length, ...(file ? { file } : {}), ...(abort ? { abort_reason: abort } : {}), ...(meta.behavior_violation ? { behavior_violation: meta.behavior_violation } : {}) });
 		if (opts.pool) {
-			this.poolReport(a, parent, opts.pool, { label, body: capBody(shown, a.id, 4000), failed });
+			this.poolReport(a, parent, opts.pool, { label, body: capBody(shown, a.id, 4000, file), failed, ...(file ? { file } : {}) });
 			return;
 		}
 		this.post(parent, { kind: "report", from: a, body: content, wake: true, system: true, meta });
+	}
+
+	/** the whole report body as a file the parent can read and pass on; nothing when there is no body or no store for them */
+	private saveReport(a: AgentRow, seq: number, label: string, body: string): string | undefined {
+		if (!this.opts.reports || !body) return undefined;
+		try {
+			return this.opts.reports.write(a.root_id, a.id, seq, reportFileText({ path: a.path, childID: a.id, label, body }));
+		} catch (err) {
+			console.error(`cmx2: agent ${a.path} report file: ${err instanceof Error ? err.message : String(err)}`);
+			return undefined;
+		}
+	}
+
+	/** the directory a session's tree keeps its report files in, for the read rule that lets its agents open them */
+	reportsDirFor(sessionID: string): string | undefined {
+		if (!this.opts.reports) return undefined;
+		return this.opts.reports.treeDir(this.rows.get(sessionID)?.root_id ?? sessionID);
 	}
 
 	private async respawn(a: AgentRow, parent: AgentRow, error: string) {
@@ -1205,7 +1232,7 @@ export class Actors {
 	}
 
 	/** pool members report to the collector; the spawner gets one combined report when the collect rule is met */
-	private poolReport(a: AgentRow, parent: AgentRow, spec: NonNullable<AgentOptions["pool"]>, rep: { label: string; body: string; failed: boolean }) {
+	private poolReport(a: AgentRow, parent: AgentRow, spec: NonNullable<AgentOptions["pool"]>, rep: { label: string; body: string; failed: boolean; file?: string }) {
 		const p = this.poolOf(spec.id, parent);
 		if (p.done) return;
 		p.reports.set(a.id, { path: a.path, ...rep });
@@ -1239,7 +1266,7 @@ export class Actors {
 		p.done = true;
 		const reports = p.members.filter((m) => p.reports.has(m)).map((m) => p.reports.get(m)!);
 		const header = `pool ${p.name} (${p.members.length} agents, collect ${p.collect}, ${p.strategy}): ${reports.length} reported${note ? `; ${note}` : ""}`;
-		const body = reports.map((r) => `agent ${r.path} reached status: ${r.label}\n${r.body || "<no text emitted>"}`).join("\n\n");
+		const body = reports.map((r) => `agent ${r.path} reached status: ${r.label}${r.file ? ` (full report: ${r.file})` : ""}\n${r.body || "<no text emitted>"}`).join("\n\n");
 		this.post(parent, { kind: "report", from: null, body: `${header}\n\n${body}`, wake: true, system: true, meta: { label: "pool", pool: { id: p.id, name: p.name, reported: reports.length, members: p.members.length } } });
 	}
 

@@ -636,6 +636,8 @@ export function createClient(opts: ClientOptions) {
 			body: string;
 			wake?: boolean;
 			correlation_id?: string;
+			/** files whose contents ride along with the note, cut like a spawn's (relative paths resolve against the sender's directory); a report's file can be passed on this way */
+			files?: Array<string>;
 		}, o?: CallOptions) =>
 			call<{
 				to: string;

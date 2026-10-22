@@ -5684,6 +5684,10 @@
 							"body_length": {
 								"type": "integer"
 							},
+							"file": {
+								"type": "string",
+								"description": "the file holding the whole report body, under the daemon's data dir; absent when the body was empty"
+							},
 							"abort_reason": {
 								"type": "object",
 								"required": [
@@ -10292,6 +10296,13 @@
 									},
 									"correlation_id": {
 										"type": "string"
+									},
+									"files": {
+										"type": "array",
+										"items": {
+											"type": "string"
+										},
+										"description": "files whose contents ride along with the note, cut like a spawn's (relative paths resolve against the sender's directory); a report's file can be passed on this way"
 									}
 								}
 							}

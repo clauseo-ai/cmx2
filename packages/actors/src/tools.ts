@@ -71,8 +71,8 @@ export function agentTools(actors: Actors, sessionID: string): Tool[] {
 			name: Type.Optional(Type.String({ description: "lowercase name for its path; made from the brief when omitted" })),
 			effort: Type.Optional(EFFORT),
 			after: Type.Optional(Type.String({ description: "id, path or name of an earlier helper whose attempt this one takes over; its brief and last report ride along, and it keeps running unless you close it" })),
-			agent_type: Type.Optional(Type.String({ description: "general (default), explore (reads and searches), review (reads and runs commands, does not edit), or a type from .cmx2/agent" })),
-			files: Type.Optional(Type.Array(Type.String(), { description: "files whose contents ride along with the brief" })),
+			agent_type: Type.Optional(Type.String({ description: "general (default), explore (reads and searches), review (reads and runs commands), or a type from .cmx2/agent. explore and review cannot write files: their final reply is their deliverable, and the daemon saves it to a file the report names" })),
+			files: Type.Optional(Type.Array(Type.String(), { description: "files whose contents ride along with the brief. a helper's report names a file holding its whole text, and that path can be passed on here" })),
 			fork_turns: Type.Optional(Type.Integer({ minimum: 1, maximum: 20, description: "copy your last n exchanges into its brief as context" })),
 			on_failure: Type.Optional(Type.Union([Type.Literal("escalate"), Type.Literal("respawn"), Type.Literal("ignore")], { description: "when its turn fails: report it (default), start it again in a fresh session up to 3 times, or say nothing" })),
 			pool: Type.Optional(
@@ -110,6 +110,7 @@ export function agentTools(actors: Actors, sessionID: string): Tool[] {
 			body: Type.String(),
 			wake: Type.Optional(Type.Boolean({ description: "start its turn if it has ended; default true" })),
 			correlation_id: Type.Optional(Type.String()),
+			files: Type.Optional(Type.Array(Type.String(), { description: "files whose contents ride along with the note, cut like spawn's. a helper's report names a file holding its whole text, and that path can be passed on here" })),
 		}),
 		async execute(_id, params) {
 			try {

@@ -16,8 +16,9 @@ export function helperFragment(opts: { typeBody?: string; readOnly?: boolean; re
 		"",
 		`if you cannot go on, make the last line of your final text ABORT(<reason>): <details>, with reason one of ${ABORT_REASONS.join(", ")}.`,
 	];
-	if (opts.readOnly) lines.push("", "your tools read and search; you do not change files or run commands.");
-	else if (opts.review) lines.push("", "your tools read, search and run commands; you do not change files.");
+	const deliverable = "your final reply is your deliverable: the daemon saves it in full to a file your spawner's report names, so when a brief asks you to write something to a file, put it in your final reply instead.";
+	if (opts.readOnly) lines.push("", `your tools read and search; you do not change files or run commands. ${deliverable}`);
+	else if (opts.review) lines.push("", `your tools read, search and run commands; you do not change files. ${deliverable}`);
 	if (opts.typeBody) lines.push("", opts.typeBody.trim());
 	return lines.join("\n");
 }

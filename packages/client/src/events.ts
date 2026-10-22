@@ -1227,6 +1227,8 @@ export interface EventMap {
 		/** parked, failed, partial */
 		label: string;
 		body_length: number;
+		/** the file holding the whole report body, under the daemon's data dir; absent when the body was empty */
+		file?: string;
 		abort_reason?: {
 			reason: string;
 			details: string;

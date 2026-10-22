@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync
 import { readdir, realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { CONTRACT_VERSION, EVENTS, type EventType } from "@cmx2/contract";
-import { ActorError, Actors, agentTools, type Host, type SpawnInput } from "@cmx2/actors";
+import { ActorError, Actors, agentTools, type Host, ReportFiles, type SpawnInput } from "@cmx2/actors";
 import { type Config, ConfigError, configDir, dataDir as defaultDataDir, type Effort, loadConfig, loadConfigAsync, machineName, userNotes } from "@cmx2/engine/config";
 import { Routing } from "@cmx2/routing";
 import type { RequestAsk } from "@cmx2/engine/gates";
@@ -390,12 +390,23 @@ export function serve(opts: ServeOptions) {
 		.map((f) => f.trim())
 		.filter((f) => f.startsWith("first_turn:"))
 		.map((f) => f.slice("first_turn:".length));
+	/** every helper report in full, as files the parent's report names (copies of the transcript, pruned oldest first past a cap) */
+	const reportFiles = new ReportFiles(join(data, "reports"));
+	/**
+	 * a session's agents read their own tree's report files without an ask (they sit outside every working directory),
+	 * and nobody edits report files: they are the daemon's copies. after every saved rule, so an "always" cannot widen it
+	 */
+	const reportRules = (id: string): PermissionRule[] => {
+		const dir = actors.reportsDirFor(id);
+		return dir ? [{ permission: "external_directory", pattern: `${dir}/*`, action: "allow" }, { permission: "edit", pattern: `${reportFiles.dir}/*`, action: "deny" }] : [];
+	};
 	const actors = new Actors({
 		store,
 		host,
 		routing,
 		faults: faultNames,
 		blacklisted: (directory, model) => blacklisted(configFor(directory), model),
+		reports: reportFiles,
 		agentType: (directory, name) => {
 			const def = catalog.agent(directory, name);
 			if (!def || def.path === "(built in)") return undefined;
@@ -2081,7 +2092,7 @@ export function serve(opts: ServeOptions) {
 			beforeTurn: () => locks.acquire(id),
 			afterTurn: () => locks.release(id),
 			askPermission: (ask: Parameters<Asks["permission"]>[2], signal?: AbortSignal) => asks.permission(id, directory, ask, signal),
-			savedRules: () => store.rules([project, id]) as PermissionRule[],
+			savedRules: () => [...(store.rules([project, id]) as PermissionRule[]), ...reportRules(id)],
 			// a helper asks the agent that started it; only the root (or a session outside any tree) asks the user
 			askQuestion: (ask: Parameters<Asks["question"]>[2], signal?: AbortSignal) => (child && actors.isChild(id) ? actors.ask(id, ask.questions, signal) : asks.question(id, directory, ask, signal)),
 		};
@@ -3286,7 +3297,7 @@ export function serve(opts: ServeOptions) {
 			return json({ agents: await actors.spawn(r[1]!, b) }, 201);
 		}
 		if ((r = m(/^\/session\/([^/]+)\/agents\/message$/)) && method === "POST") {
-			const b = await bodyOf<{ to: string; body: string; wake?: boolean; correlation_id?: string }>(req, "messageAgent");
+			const b = await bodyOf<{ to: string; body: string; wake?: boolean; correlation_id?: string; files?: string[] }>(req, "messageAgent");
 			row(r[1]!);
 			return json(await actors.message(r[1]!, b), 202);
 		}
