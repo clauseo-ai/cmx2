@@ -110,7 +110,7 @@ const MAX_CONTINUATIONS = 3;
  * declares every tool (dropping them would change the cached prefix), so it says why it is not a task
  */
 export const BTW_FRAMING =
-	"btw: a side question from the user, asked while you work. answer it from this conversation, in a few sentences, without calling tools. your answer is shown to the user beside the conversation; it is not added to it, and the task you are on does not change.";
+	"btw: the user breaks in with a side question. this reply is not a step of the task: tools are off for it, so a tool call here fails and runs nothing, and nothing you were about to do happens in it. answer the question below in plain text, in a few sentences, from what this conversation already shows. the task carries on from where it was after this, and this exchange is not added to it.";
 /** the result a btw's tool call gets instead of running */
 export const BTW_NO_TOOLS = "btw answers cannot use tools. answer the question from the conversation so far, in words.";
 /** a btw's answer stops here (about 4k tokens of text); the request's max_tokens stays the session's */
