@@ -2,7 +2,7 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
-## unreleased
+## 0.9.1 - 2026-10-22
 
 contract version 7. additive: session infos carry `forkedFrom`; btw routes (`POST`/`GET /session/:id/btw`, `/btw/:btwID/dismiss`, `/btw/:btwID/promote`), the `Btw` schema, `btw.updated` and `btw.delta` events, and `btw` on a promoted user message's info; `POST /session/:id/agents/message` takes `files`; `agent.report` carries `file`; `POST /session/:id/fork` takes `clientID`.
 
