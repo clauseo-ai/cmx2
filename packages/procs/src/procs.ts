@@ -118,6 +118,8 @@ const HEAD = 64 * 1024;
 const TAIL = 256 * 1024;
 const READ_LIMIT = 64 * 1024;
 const SETTLE_MS = 150;
+/** how often a group taken over from a command is checked for having exited */
+const ADOPTED_POLL_MS = 1000;
 /** an on_port watch probes every PORT_PROBE_MS for its first PORT_FAST_MS, then every PORT_SLOW_MS */
 export const PORT_PROBE_MS = 250;
 export const PORT_FAST_MS = 30_000;
@@ -671,6 +673,10 @@ export class Procs {
 				void this.kill(id);
 			},
 			list: () => this.list({ sessionID }).map(summaryOf),
+			adoptGroup: (o) => {
+				const r = this.adoptGroup({ ...o, sessionID, origin: "model" });
+				return r && { job: summaryOf(r.info), output: r.output };
+			},
 		};
 	}
 
@@ -758,6 +764,52 @@ export class Procs {
 		}
 		this.writeJournal();
 		return result;
+	}
+
+	/**
+	 * a process group a command left running after its shell exited, its output pipes still held: listed,
+	 * read and stopped like a job of the session. its output from now on is `output`'s; what it wrote before
+	 * is the command's own result. undefined when the group is already empty (nothing is registered).
+	 */
+	adoptGroup(opts: { pgid: number; command: string; cwd: string; sessionID: string | null; origin: "model" | "user" }): { info: ProcInfo; output: (bytes: Uint8Array) => void } | undefined {
+		if (this.stopped || !groupAlive(opts.pgid)) return undefined;
+		const id = randomId("job");
+		const info: ProcInfo = {
+			id,
+			pid: opts.pgid,
+			command: opts.command,
+			cwd: opts.cwd,
+			title: opts.command.trim() || "shell",
+			tty: false,
+			status: "running",
+			exitCode: null,
+			cursor: 0,
+			ports: [],
+			origin: opts.origin,
+			startedAt: Date.now(),
+			sessionID: opts.sessionID,
+		};
+		const e: Entry = {
+			info,
+			// the leader has exited, so there is no start time to check: the group is what is watched
+			pgid: opts.pgid,
+			lstart: "",
+			buffer: new OutputBuffer(this.head, this.tail),
+			subscribers: new Set(),
+			waiters: new Set(),
+			lastDataAt: 0,
+			partial: "",
+			decoder: new TextDecoder(),
+		};
+		// not our child, so no exit event arrives: look every ADOPTED_POLL_MS
+		e.liveTimer = setInterval(() => {
+			if (!groupAlive(opts.pgid)) this.markExited(e, null);
+		}, ADOPTED_POLL_MS);
+		e.liveTimer.unref?.();
+		this.entries.set(id, e);
+		this.writeJournal();
+		this.emit({ type: "proc.started", info: { ...info } });
+		return { info: { ...info }, output: (bytes) => this.onData(e, bytes) };
 	}
 
 	/** a kept or detached process of a dead daemon: listed and killable, its old output is gone */

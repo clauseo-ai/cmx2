@@ -16,7 +16,7 @@ export { toolSearchTool, websearchUrl, type DeferredEntry, type SearchResult } f
 export { pickSearch, SEARCH_ENV_KEYS, SEARCH_PROVIDERS, type SearchHit, type SearchProviderName, type WebOptions } from "./web.ts";
 export type { RunDetails, NestedCallRecord } from "./run.ts";
 export { RUN_DESCRIPTION } from "./run.ts";
-export { runCommand, outputImages, type ShellResult } from "./shell.ts";
+export { runCommand, outputImages, shellTool, type ShellResult } from "./shell.ts";
 export { type AgentAnswer, type AskQuestions, type QuestionAudience, type QuestionDetails, type QuestionPrompt, QuestionDismissedError } from "./question.ts";
 export { hostHeicDecoders, imageMimeOf, imageParts, isHeicMime, MAX_EDGE, MAX_IMAGE_BYTES, readDimensions, resizeDataUrl, resizeImage, sniffHeic, sniffImage, type Dimensions, type ResizedImage } from "./image.ts";
 export { defaultSkillDirs, frontmatter, listSkills, Skills, type SkillInfo } from "./skills.ts";
