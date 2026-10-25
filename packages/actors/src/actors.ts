@@ -6,7 +6,7 @@ import { type Effort, modelId, type Routing, RoutingError } from "@cmx2/routing"
 import type { AgentRow, AgentState, MailKind, MailRow, Store } from "@cmx2/store";
 import type { AgentAnswer, QuestionPrompt } from "@cmx2/tools";
 import { computeViolations, resolveContract } from "./contracts.ts";
-import { childPath, isAncestor, nameFrom, ROOT_PATH, validName } from "./paths.ts";
+import { childPath, isAncestor, nameFrom, normalName, ROOT_PATH, validName } from "./paths.ts";
 import { attemptAttachment, helperFragment, taskEnvelope } from "./prompt.ts";
 import { capBody, extractDeliverable, failedTurnBody, filesTouched, looksLikeMissingDeliverable, parseAbort, reportBody, reportFileText } from "./report.ts";
 import type { ReportFiles } from "./report-files.ts";
@@ -406,7 +406,7 @@ export class Actors {
 	 * agent answers the same as one that does not exist
 	 */
 	resolve(sender: AgentRow, to: string, opts: { closed?: boolean } = {}): AgentRow {
-		const t = to.trim();
+		const t = to.trim().startsWith("ses_") ? to.trim() : normalName(to);
 		let found: AgentRow | undefined;
 		if (t === "parent" || t === "spawner") {
 			found = sender.parent_id ? this.rows.get(sender.parent_id) : undefined;
@@ -660,16 +660,20 @@ export class Actors {
 		if (agentType !== "general" && !typeDef) throw new ActorError("BadRequestError", 400, `no agent type ${agentType}; the built-in ones are general, explore and review, others come from .cmx2/agent/*.md`);
 		// the spawn's own model wins; an agent type may bring one; otherwise a spawn is a cost decision the caller has to make
 		// the model-facing verb names an alias from the table; a provider/model-id is for rest and an agent type's frontmatter
-		if (from.model && input.model?.includes("/")) {
-			throw new ActorError("UnknownModelError", 400, `no model named ${input.model.trim()} in routing.jsonc; the models are ${Object.keys(r.models).join(", ")}`, { code: "unknown_model" });
+		// a model id from the table (claude-haiku-5-5, anthropic/claude-haiku-5-5) stands for the one alias that runs it;
+		// rest keeps a provider/model-id as written, since there it picks the provider
+		const raw = input.model?.trim() || undefined;
+		const wanted = raw && (from.model || !raw.includes("/")) ? (this.routing.aliasForId(raw) ?? raw) : raw;
+		if (from.model && wanted?.includes("/")) {
+			throw new ActorError("UnknownModelError", 400, `no model named ${wanted} in routing.jsonc; the models are ${Object.keys(r.models).join(", ")}`, { code: "unknown_model" });
 		}
-		const named = input.model?.trim() || typeDef?.model;
+		const named = wanted || typeDef?.model;
 		if (!named) throw new ActorError("BadRequestError", 400, `a spawn needs a model: one of ${Object.keys(r.models).join(", ")}`);
 		const { model, effort, label } = this.pick(named, input.effort);
 		if (this.opts.blacklisted?.(directory, model)) {
 			throw new ActorError("BadRequestError", 400, `${model} is on the blacklist in your profile (providers.<id>.blacklist); pick another model`);
 		}
-		const name = input.name ?? nameFrom(input.brief);
+		const name = input.name !== undefined ? normalName(input.name) : nameFrom(input.brief);
 		if (!validName(name)) throw new ActorError("BadRequestError", 400, `agent names are lowercase letters, digits and _ (up to 40), starting with a letter; got ${JSON.stringify(name)}`);
 		const prior = input.after ? this.priorAttempt(sender, input.after) : undefined;
 		const why = input.why?.trim() || undefined;
@@ -1020,7 +1024,7 @@ export class Actors {
 			t = this.resolve(sender, target, { closed: true });
 		} catch (e) {
 			if (e instanceof ActorError && e.name === "AgentClosedError") {
-				const last = target.startsWith("/") ? this.rows.lastAtPath(sender.root_id, target) : this.rows.get(target);
+				const last = target.trim().startsWith("/") ? this.rows.lastAtPath(sender.root_id, normalName(target)) : this.rows.get(target.trim());
 				if (last) return { path: last.path, previous_state: "closed", already_terminated: true, closed: [] };
 			}
 			throw e;

@@ -35,7 +35,7 @@ import {
 	toolSearchTool,
 	type WebOptions,
 } from "@cmx2/tools";
-import { type GateOptions, gateCall, nestedCall } from "./calls.ts";
+import { ARG_ALIASES, aliasArgs, type GateOptions, gateCall, nestedCall, toolAlias } from "./calls.ts";
 import { Value } from "typebox/value";
 import type { Config, Effort, TurnMessageMode } from "./config.ts";
 import {
@@ -847,18 +847,21 @@ export class EngineSession {
 	 * response are two open asks at once, each answered on its own. a refusal reads as a blocked call does.
 	 */
 	private agentTools(): AgentTool[] {
-		return this.executableTools().map((t) =>
-			t.executionMode === "sequential"
-				? t
+		return this.executableTools().map((t) => {
+			// argument names models bring from other harnesses (ARG_ALIASES) are renamed before pi validates them
+			const prepare = (t as { prepareArguments?: (a: unknown) => unknown }).prepareArguments;
+			const a = Object.hasOwn(ARG_ALIASES, t.name) ? { ...t, prepareArguments: (args: unknown) => aliasArgs(t.name, prepare ? prepare(args) : args) } : t;
+			return t.executionMode === "sequential"
+				? a
 				: {
-						...t,
+						...a,
 						execute: async (id: string, params: never, signal?: AbortSignal, onUpdate?: never) => {
 							const reason = await this.gate(t.name, params, id, signal);
 							if (reason) return { content: [{ type: "text" as const, text: reason }], details: {}, isError: true, ...(reason === PERMISSION_REJECTED ? { terminate: true } : {}) };
 							return t.execute(id, params, signal, onUpdate);
 						},
-					},
-		) as unknown as AgentTool[];
+					};
+		}) as unknown as AgentTool[];
 	}
 
 	/** the agent's tool list brought up to date when its names changed; the current list either way */
@@ -1102,6 +1105,10 @@ export class EngineSession {
 			}
 			case "message_end": {
 				const m = e.message as any;
+				// a call to a tool alias (TOOL_ALIASES: bash for shell) is renamed here, before pi looks the tool up and runs it
+				if (m?.role === "assistant" && Array.isArray(m.content)) {
+					for (const b of m.content) if (b?.type === "toolCall" && typeof b.name === "string") b.name = toolAlias(b.name, (n) => this.toolByName(n) !== undefined);
+				}
 				// when each streamed text and reasoning part started and ended, by content position, so the projection (and a rebuild of it) carries them
 				if (m?.role === "assistant" && this.streamParts.size) {
 					const now = Date.now();

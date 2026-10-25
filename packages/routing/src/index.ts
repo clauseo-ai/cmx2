@@ -351,6 +351,7 @@ export class Routing {
 	/** alias → model and effort; a spawn's effort must be one the model runs at */
 	resolve(alias: string, opts: { effort?: Effort } = {}): Resolved {
 		const c = this.current();
+		if (!Object.hasOwn(c.models, alias)) alias = this.aliasForId(alias) ?? alias;
 		const entry = Object.hasOwn(c.models, alias) ? c.models[alias] : undefined;
 		if (!entry) throw new RoutingError("unknown_model", `no model named ${alias} in routing.jsonc; the models are ${Object.keys(c.models).join(", ")}`);
 		const effort = opts.effort ?? entry.effort;
@@ -359,6 +360,18 @@ export class Routing {
 			throw new RoutingError("effort_not_allowed", `${modelId(entry.ref)} never runs at ${effort}; it runs at ${this.allowedEfforts(entry.ref).join(", ")}`);
 		}
 		return { alias, model: entry.ref, effort };
+	}
+
+	/**
+	 * the alias a model id stands for when the name is not an alias itself: the one alias whose model has
+	 * that id, with or without a provider prefix; undefined when none or several match
+	 */
+	aliasForId(name: string): string | undefined {
+		const models = this.current().models;
+		if (Object.hasOwn(models, name)) return name;
+		const id = modelId(name);
+		const hits = Object.entries(models).filter(([, m]) => modelId(m.ref) === id);
+		return hits.length === 1 ? hits[0]![0] : undefined;
 	}
 
 	/** the first alias that names this model: by exact ref, then by bare id; for labels */

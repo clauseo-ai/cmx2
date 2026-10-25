@@ -207,3 +207,15 @@ test("the gate: tools with no check of their own, path checks outside the direct
 	expect(bad.isError).toBe(true);
 	expect(bad.result.content[0]).toMatchObject({ text: expect.stringContaining("invalid arguments") });
 });
+
+test("fs.edit inside run takes old_str and new_str, and a nested call to bash runs shell", async () => {
+	writeFileSync(join(root, "alias.txt"), "one\n");
+	const { run, lookup } = harness({ "*": "allow" });
+	const r = await run(`return await fs.edit({ path: "alias.txt", old_str: "one", new_str: "two" });`);
+	expect(r.isError).toBeFalsy();
+	expect(await Bun.file(join(root, "alias.txt")).text()).toBe("two\n");
+	const base = { cwd: root, rules: () => rulesFromConfig({ "*": "allow" }) };
+	const sh = await nestedCall(base, lookup, "bash", { command: "echo via-bash" }, undefined);
+	expect(sh.isError).toBe(false);
+	expect(JSON.stringify(sh.result.content)).toContain("via-bash");
+});

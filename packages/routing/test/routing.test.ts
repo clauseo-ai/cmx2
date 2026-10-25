@@ -131,6 +131,20 @@ describe("routing", () => {
 		expect(r.resolve("sonnet").model).toBe("anthropic/claude-sonnet-5-5");
 	});
 
+	test("a model id stands for the one alias that runs it, with or without a provider", () => {
+		expect(routing.resolve("claude-haiku-5-5")).toMatchObject({ alias: "haiku", model: "anthropic/claude-haiku-5-5", effort: "high" });
+		expect(routing.resolve("vertex/claude-opus-5-5").alias).toBe("opus");
+		expect(routing.aliasForId("claude-nothing-1")).toBeUndefined();
+		expect(errorOf(() => routing.resolve("claude-nothing-1")).code).toBe("unknown_model");
+		// two aliases on one model: the id names neither
+		const project = join(dir, "proj");
+		mkdirSync(join(project, ".cmx2"), { recursive: true });
+		writeFileSync(join(project, ".cmx2", "routing.jsonc"), JSON.stringify({ models: { haiku: { ref: "anthropic/claude-fable-5-1", effort: "medium" } } }));
+		const r = new Routing({ configDir: () => dir, machine: "testhost", projectDir: project });
+		expect(r.aliasForId("claude-fable-5-1")).toBeUndefined();
+		expect(errorOf(() => r.resolve("claude-fable-5-1")).code).toBe("unknown_model");
+	});
+
 	test("invalid jsonc names the file and the last good config stays in force", () => {
 		write("routing.jsonc", { models: { opus: { effort: "high" } } });
 		expect(routing.current().models.opus!.effort).toBe("high");

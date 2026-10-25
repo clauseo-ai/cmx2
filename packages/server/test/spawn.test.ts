@@ -44,7 +44,7 @@ function script(body: any): Block[] {
 	const idOf = (name: string) => all.match(new RegExp(`/root/${name} \\(id (ses_[0-9a-f]+)\\)`))?.[1] ?? "ses_missing";
 	const steps: Block[] = [
 		{ type: "tool_use", name: "spawn", input: { name: "nomodel", brief: "no model named" } },
-		{ type: "tool_use", name: "spawn", input: { name: "slash", model: "anthropic/claude-opus-5-5", brief: "a provider/model-id from the model" } },
+		{ type: "tool_use", name: "spawn", input: { name: "slash", model: "anthropic/claude-nothing-1", brief: "a provider/model-id no alias runs" } },
 		{ type: "tool_use", name: "spawn", input: { name: "blocked", model: "fable", brief: "a model the profile blacklists" } },
 		{ type: "tool_use", name: "spawn", input: { name: "first", model: "sonnet", brief: "first try" } },
 		{ type: "tool_use", name: "wait", input: { timeout_ms: 20000 } },
@@ -139,8 +139,8 @@ describe("the spawn verb takes a model", () => {
 		// a spawn with no model and no agent type to bring one is an error that names the aliases
 		expect(out(spawns[0])).toBe("BadRequestError: a spawn needs a model: one of haiku, sonnet, opus, fable");
 		expect(spawns[0].state.status).toBe("error");
-		// the model-facing verb takes aliases: a provider/model-id would step around the table
-		expect(out(spawns[1])).toBe("UnknownModelError: no model named anthropic/claude-opus-5-5 in routing.jsonc; the models are haiku, sonnet, opus, fable");
+		// the model-facing verb takes aliases, or a model id one alias runs; anything else would step around the table
+		expect(out(spawns[1])).toBe("UnknownModelError: no model named anthropic/claude-nothing-1 in routing.jsonc; the models are haiku, sonnet, opus, fable");
 		// the profile's blacklist holds for the model a spawn ends up on
 		expect(out(spawns[2])).toBe("BadRequestError: anthropic/claude-fable-5-1 is on the blacklist in your profile (providers.<id>.blacklist); pick another model");
 		expect(out(spawns[3])).toMatch(/^spawned \/root\/first \(id ses_[0-9a-f]+\): sonnet on claude-sonnet-5-5 at high, (queued|working)\.\nits report arrives as a message when it ends its turn\. to continue it later: message\("ses_[0-9a-f]+"\)\.$/);

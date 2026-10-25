@@ -67,6 +67,35 @@ export async function gateCall(o: GateOptions, tool: string, args: unknown, call
 	return { decision };
 }
 
+/**
+ * names models reach for from their training, accepted at dispatch and never declared: a call to a tool
+ * named on the left runs the tool on the right, and an argument named on the left is read as the one on
+ * the right (str_replace's old_str and new_str for edit's old_text and new_text)
+ */
+export const TOOL_ALIASES: Readonly<Record<string, string>> = { bash: "shell" };
+export const ARG_ALIASES: Readonly<Record<string, Readonly<Record<string, string>>>> = { edit: { old_str: "old_text", new_str: "new_text" } };
+
+/** the tool a call's name stands for: itself when a tool has that name, else its alias */
+export function toolAlias(name: string, exists: (name: string) => boolean): string {
+	const to = Object.hasOwn(TOOL_ALIASES, name) ? TOOL_ALIASES[name]! : undefined;
+	return to && !exists(name) ? to : name;
+}
+
+/** a call's arguments with aliased names renamed; when the call gives both names, the real one wins */
+export function aliasArgs(tool: string, args: unknown): unknown {
+	const map = Object.hasOwn(ARG_ALIASES, tool) ? ARG_ALIASES[tool] : undefined;
+	if (!map || !args || typeof args !== "object" || Array.isArray(args)) return args;
+	const a = args as Record<string, unknown>;
+	if (!Object.keys(map).some((k) => Object.hasOwn(a, k))) return args;
+	const out: Record<string, unknown> = {};
+	for (const [k, v] of Object.entries(a)) {
+		const to = Object.hasOwn(map, k) ? map[k]! : undefined;
+		if (to && !Object.hasOwn(a, to)) out[to] = v;
+		else if (!to) out[k] = v;
+	}
+	return out;
+}
+
 /** a helper call from inside `run`: the same tool object, schema check, permission gate and error shape as a direct call */
 export async function nestedCall(
 	o: GateOptions,
@@ -76,6 +105,8 @@ export async function nestedCall(
 	signal?: AbortSignal,
 ): Promise<{ result: ToolResult; isError: boolean; decision?: CallDecision }> {
 	const fail = (t: string, decision?: CallDecision) => ({ result: { content: [{ type: "text" as const, text: t }], details: {} }, isError: true, decision });
+	name = toolAlias(name, (n) => lookup(n) !== undefined);
+	args = aliasArgs(name, args);
 	const tool = lookup(name);
 	if (!tool) return fail(`no tool named ${name}`);
 	if (!Value.Check(tool.parameters, args)) {

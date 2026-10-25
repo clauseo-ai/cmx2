@@ -8,6 +8,11 @@ export function validName(name: string): boolean {
 	return NAME.test(name);
 }
 
+/** a name or path as models tend to write it (`PR17-Review`, `/root/pr17 review`) in the form agent names take: lowercase, with - and spaces as _ */
+export function normalName(ref: string): string {
+	return ref.trim().toLowerCase().replace(/[-\s]+/g, "_");
+}
+
 export function childPath(parent: string, name: string): string {
 	return `${parent}/${name}`;
 }
