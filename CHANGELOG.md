@@ -2,6 +2,16 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
+## 0.9.3 - 2026-10-25
+
+contract version 7. no shape changes.
+
+### changed
+- names models bring from training are accepted instead of failing the call: a call to `bash` runs `shell` (bash is never declared), `edit` takes `old_str`/`new_str` for `old_text`/`new_text` (direct and `fs.edit` in run), agent names are lowercased with `-` and spaces read as `_` wherever a name is given or looked up, and spawn takes a model id (with or without a provider prefix) that matches exactly one routing alias. why: across 654 local sessions about 145 calls failed on these names alone.
+- `fs.read` inside run returns the file's raw text (offset and limit count lines); the read tool still shows line numbers. why: scripts that `JSON.parse`d it failed.
+- run's description and helpers follow the tools the session has: an agent without `write` sees no `fs.write`, and calling one says it is not available to this agent. scripts run in an inner scope, so `const tools`, `let text` and the like no longer collide with the sandbox's own names.
+- shell returns 300 ms after bash exits even when a background process still holds its output; that process group is adopted as a job of the session (the result names its `job_id`, later output goes to the job, and session cleanup reaps it). a call killed at its timeout says to use `background: true` for long builds, tests and servers. why: commands with `&` sat until the timeout and then the server they started was killed.
+
 ## 0.9.2 - 2026-10-22
 
 contract version 7. no shape changes: the `session.warmed` description now says how a refresh works.
