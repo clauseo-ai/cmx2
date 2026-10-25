@@ -33,7 +33,7 @@ interface Helper {
 }
 
 const HELPERS: Helper[] = [
-	{ name: "fs.read", tool: "read", returns: "text", signature: "fs.read({ path, offset?, limit? }): Promise<string>" },
+	{ name: "fs.read", tool: "read", returns: "structured", signature: "fs.read({ path, offset?, limit? }): Promise<string>" },
 	{ name: "fs.write", tool: "write", returns: "text", signature: "fs.write({ path, content }): Promise<string>" },
 	{ name: "fs.edit", tool: "edit", returns: "text", signature: "fs.edit({ path, old_text, new_text, replace_all? }): Promise<string>" },
 	{ name: "fs.list", tool: "glob", returns: "structured", signature: "fs.list({ pattern, path?, limit? }): Promise<{ paths, total, truncated }>" },
@@ -76,15 +76,51 @@ const HELPERS: Helper[] = [
 	{ name: "agents.interrupt", tool: "agents", returns: "structured", extra: { action: "interrupt" }, signature: "agents.interrupt({ target })" },
 ];
 
-export const RUN_DESCRIPTION = `run a javascript script in a confined interpreter and get back only what it prints and returns. the code is the body of an async function, so top-level await and return work. intermediate results stay inside the script, which makes one run the cheap way to read several files, search, run commands and keep only what matters.
+/** which tools this agent has; a helper over a tool it lacks is left out of the description and refuses when called */
+export type ToolCheck = (tool: string) => boolean;
+
+/** a helper is there when its tool is; shell.spawn and pty.* run commands, so they also need shell */
+function helperAvailable(h: Helper, has: ToolCheck): boolean {
+	return has(h.tool) && (!h.tool.startsWith("proc_") || has("shell"));
+}
+
+/** run's description for an agent with these tools; it depends only on the tool set, so one agent type gets one prefix */
+export function runDescription(has: ToolCheck = () => true): string {
+	const on = new Set(HELPERS.filter((h) => !h.alias && helperAvailable(h, has)).map((h) => h.name));
+	const signatures = HELPERS.filter((h) => on.has(h.name)).map((h) => `  ${h.signature}`);
+	const imageFile = on.has("fs.read") ? "; an image file needs no helper, fs.read it" : "";
+	const notes = ["paths resolve against the working directory."];
+	if (on.has("fs.read")) notes.push("fs.read returns the file's text as it is on disk, without line numbers; offset and limit count lines.");
+	if (on.has("shell.exec")) notes.push("shell.exec resolves with a non-zero exit_code instead of throwing.");
+	if (on.has("shell.spawn")) notes.push("shell.spawn starts a background job this session owns and returns at once; with notify, a message arrives in the session when it fires and starts a new turn if yours has ended, so nothing needs to wait on it.");
+	if (on.has("pty.spawn")) notes.push("pty.* drives a terminal: write input with a trailing \\n, then read from the last cursor with wait_ms to get the reply.");
+	if ([...on].some((n) => n.startsWith("agents."))) notes.push("agents.* are the agent verbs, for fanning out work from a script.");
+	const imaging = ["fs.read", "shell.exec"].filter((n) => on.has(n));
+	if (imaging.length) notes.push(`images that ${imaging.join(" or ")} return${imaging.length > 1 ? "" : "s"} are attached to the run's result.`);
+	notes.push(
+		"there is no fetch, process, require, module or timer. the script may declare any name, these globals included. every helper call is checked by the same permission rules as the direct tool; a refused or failed call rejects with the reason, which the script can catch and carry on from.",
+	);
+	return `run a javascript script in a confined interpreter and get back only what it prints and returns. the code is the body of an async function, so top-level await and return work. intermediate results stay inside the script, which makes one run the cheap way to read several files, search, run commands and keep only what matters.
 
 helpers (all return promises):
-${HELPERS.filter((h) => !h.alias)
-	.map((h) => `  ${h.signature}`)
-	.join("\n")}
-  text(value) and console.log(value) add output; image("data:image/png;base64,...") attaches an image the script made (a data url, or an mcp image block); an image file needs no helper, fs.read it; a returned value is appended as json.
+${signatures.join("\n")}
+  text(value) and console.log(value) add output; image("data:image/png;base64,...") attaches an image the script made (a data url, or an mcp image block)${imageFile}; a returned value is appended as json.
 
-paths resolve against the working directory. shell.exec resolves with a non-zero exit_code instead of throwing. shell.spawn starts a background job this session owns and returns at once; with notify, a message arrives in the session when it fires and starts a new turn if yours has ended, so nothing needs to wait on it. pty.* drives a terminal: write input with a trailing \\n, then read from the last cursor with wait_ms to get the reply. agents.* are the agent verbs, for fanning out work from a script. images that fs.read or shell.exec return are attached to the run's result. there is no fetch, process, require, module or timer. every helper call is checked by the same permission rules as the direct tool; a refused or failed call rejects with the reason, which the script can catch and carry on from.`;
+${notes.join(" ")}`;
+}
+
+/** the description for an agent with every tool */
+export const RUN_DESCRIPTION = runDescription();
+
+/**
+ * the script as the sandbox runs it. pi-codemode wraps it as `(async (tools, console) => {code})`,
+ * so a top-level `const tools` would redeclare a parameter; an inner block lets the script declare
+ * any name. its undocumented globals are shadowed, so only the documented ones are visible. the
+ * prefix stays on the first line, so line numbers in errors match the script as written
+ */
+export function wrapScript(code: string): string {
+	return `tools = undefined; var store, load, ALL_TOOLS, exit; {${code}\n}`;
+}
 
 function textOf(content: ToolResult["content"]): string {
 	return content
@@ -126,11 +162,18 @@ export interface RunDetails {
 /** how long one script may run */
 export const RUN_TIMEOUT_MS = 10 * 60_000;
 
-export function runTool(call: NestedCall, opts: { timeoutMs?: number } = {}): Tool {
+export interface RunOptions {
+	timeoutMs?: number;
+	/** the tools this agent has; every tool when absent */
+	has?: ToolCheck;
+}
+
+export function runTool(call: NestedCall, opts: RunOptions = {}): Tool {
+	const has = opts.has ?? (() => true);
 	return defineTool({
 		name: "run",
 		label: "run",
-		description: RUN_DESCRIPTION,
+		description: runDescription(has),
 		parameters: Type.Object({
 			code: Type.String({ description: "script body; top-level await and return work" }),
 		}),
@@ -151,6 +194,10 @@ export function runTool(call: NestedCall, opts: { timeoutMs?: number } = {}): To
 					const t0 = performance.now();
 					const record: NestedCallRecord = { helper: h.name, tool: h.tool, ok: false, ms: 0 };
 					nested.push(record);
+					if (!helperAvailable(h, has)) {
+						record.error = `${h.name} is not available to this agent`;
+						throw new Error(record.error);
+					}
 					try {
 						const input = h.extra ? { ...((args ?? {}) as object), ...h.extra } : (args ?? {});
 						record.title = titleLine(toolTitle(h.tool, input));
@@ -189,7 +236,7 @@ export function runTool(call: NestedCall, opts: { timeoutMs?: number } = {}): To
 			}));
 			const sandbox = new CodemodeSandbox({ tools: [], globals, timeoutMs: opts.timeoutMs ?? RUN_TIMEOUT_MS, wasm: loadQuickJSWasm(quickjsWasm), workerUrl: WORKER });
 			try {
-				const result = await sandbox.execute(params.code, { signal });
+				const result = await sandbox.execute(wrapScript(params.code), { signal });
 				if (!result.ok && result.error.kind === "timeout") stop.abort(new Error(result.error.message));
 				const content: ToolResult["content"] = [];
 				let fromScript = 0;
