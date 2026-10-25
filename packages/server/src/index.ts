@@ -3191,7 +3191,7 @@ export function serve(opts: ServeOptions) {
 				await reachFor(stored.directory, id);
 				await commitRevert(id);
 				const startedAt = Date.now();
-				const out = await runCommand({ cwd: stored.directory, spillDir: join(data, "tool-output") }, b.command, SHELL_LINE_TIMEOUT_S);
+				const out = await runCommand({ cwd: stored.directory, spillDir: join(data, "tool-output"), procs: procs.host(id, stored.directory) }, b.command, SHELL_LINE_TIMEOUT_S);
 				await admit(id, (s) => {
 					s.recordShell({ command: b.command, cwd: stored.directory, output: out.output, exitCode: out.exit_code, timedOut: out.timed_out, startedAt, ...(b.clientID ? { clientID: b.clientID } : {}) });
 					if (s.state !== "busy") locks.release(id);

@@ -122,6 +122,11 @@ export interface ProcHost {
 	read(id: string, opts?: { cursor?: number; limit?: number; wait_ms?: number }): Promise<ProcRead>;
 	kill(id: string): void;
 	list(): ProcSummary[];
+	/**
+	 * a process group a command left running with its output pipes still held: listed, read and stopped like a job.
+	 * undefined when nothing of the group is left. `output` takes what the group writes from now on.
+	 */
+	adoptGroup?(o: { pgid: number; command: string; cwd: string }): { job: ProcSummary; output: (bytes: Uint8Array) => void } | undefined;
 }
 
 /** how the permission check for one call came out, in words a transcript reader follows */

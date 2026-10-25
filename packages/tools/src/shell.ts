@@ -13,6 +13,12 @@ const MAX_OUTPUT_IMAGES = 4;
 /** while a command runs, its output tail is reported at most this often, and this much of it */
 const PROGRESS_MS = 1000;
 const PROGRESS_TAIL_CHARS = 2048;
+/**
+ * once the command's shell has exited, how long its output pipes may take to close before the call
+ * returns without them: a background process started with `&` that inherited them keeps them open
+ */
+const PIPE_DRAIN_MS = 300;
+const TIMEOUT_HINT = "; for long builds, tests or servers, run with background: true and notify";
 
 export interface ShellResult {
 	exit_code: number | null;
@@ -20,6 +26,13 @@ export interface ShellResult {
 	truncated: boolean;
 	wall_time_seconds: number;
 	timed_out: boolean;
+	/**
+	 * a process the command started still holds its output pipes: the call returned without the rest
+	 * of the output, and that process keeps running
+	 */
+	output_held: boolean;
+	/** the job the held process was taken over as (env.procs), when there was one still running */
+	job_id?: string;
 	spill_path?: string;
 	/** image files the command wrote and named in its output, attached to the result */
 	images?: string[];
@@ -80,12 +93,20 @@ export async function runCommand(env: ToolEnv, command: string, timeoutS: number
 	const chunks: string[] = [];
 	let reported = 0;
 	let tail = "";
+	// set when the call returns: a process still holding the pipes may keep writing. the pipe is still read to its
+	// end, not closed (a child that writes after that would take SIGPIPE); its bytes go to the job taking it over, if any
+	let closed = false;
+	let late: ((bytes: Uint8Array) => void) | undefined;
 	const pump = async (s: ReadableStream<Uint8Array>) => {
 		const dec = new TextDecoder();
 		const reader = s.getReader();
 		for (;;) {
 			const { done, value } = await reader.read();
 			if (done) break;
+			if (closed) {
+				late?.(value);
+				continue;
+			}
 			const piece = dec.decode(value, { stream: true });
 			chunks.push(piece);
 			if (!onProgress) continue;
@@ -96,12 +117,34 @@ export async function runCommand(env: ToolEnv, command: string, timeoutS: number
 			}
 		}
 	};
+	let held = false;
+	let jobID: string | undefined;
 	try {
-		await Promise.all([pump(proc.stdout), pump(proc.stderr), proc.exited]);
+		const pumped = Promise.all([pump(proc.stdout), pump(proc.stderr)]);
+		// the timeout and an abort still kill the group while bash runs; once bash has exited, its pipes get a short grace
+		await proc.exited;
+		let graceTimer: ReturnType<typeof setTimeout> | undefined;
+		const drained = await Promise.race([
+			pumped.then(() => true),
+			new Promise<boolean>((ok) => {
+				graceTimer = setTimeout(() => ok(false), PIPE_DRAIN_MS);
+			}),
+		]);
+		clearTimeout(graceTimer);
+		held = !drained;
 	} finally {
 		clearTimeout(timer);
 		signal?.removeEventListener("abort", onAbort);
 	}
+	if (held) {
+		// the group is taken over as a job of the session; an empty group is not (the holder is outside it)
+		const adopted = env.procs?.adoptGroup?.({ pgid: proc.pid, command, cwd: env.cwd });
+		if (adopted) {
+			jobID = adopted.job.id;
+			late = adopted.output;
+		}
+	}
+	closed = true;
 	const full = chunks.join("");
 	const c = clip(full, { keep: "tail", spillDir: env.spillDir, label: "shell" });
 	const images = outputImages(full, env.cwd, startedAt);
@@ -111,9 +154,17 @@ export async function runCommand(env: ToolEnv, command: string, timeoutS: number
 		truncated: c.truncated,
 		wall_time_seconds: Math.round((performance.now() - t0) / 100) / 10,
 		timed_out: timedOut,
+		output_held: held,
+		...(jobID ? { job_id: jobID } : {}),
 		...(c.spillPath ? { spill_path: c.spillPath } : {}),
 		...(images.length ? { images } : {}),
 	};
+}
+
+/** what the model is told when a command left a process holding its output */
+function heldNote(jobID: string | undefined): string {
+	if (jobID) return `a background process is still holding this command's output; it keeps running as job ${jobID}. read it or stop it with pty.read or pty.kill in run.`;
+	return "a background process is still holding this command's output; it keeps running. use background: true to run it as a job you can read and stop.";
 }
 
 export function shellTool(env: ToolEnv): Tool {
@@ -148,11 +199,12 @@ with background, notify, keep or tty the command starts as a job this session ow
 			const r = await runCommand(env, params.command, timeout, signal, progress);
 			const status = r.timed_out ? `killed after ${timeout}s` : r.exit_code === null ? "aborted" : `exit ${r.exit_code}`;
 			const body = r.output.trim() ? r.output.replace(/\n+$/, "") : "(no output)";
-			const content: Array<TextPart | ImagePart> = [text(`${body}\n\n(${status}, ${r.wall_time_seconds}s)`)];
+			const held = r.output_held ? `\n\n${heldNote(r.job_id)}` : "";
+			const content: Array<TextPart | ImagePart> = [text(`${body}${held}\n\n(${status}, ${r.wall_time_seconds}s${r.timed_out ? TIMEOUT_HINT : ""})`)];
 			for (const path of r.images ?? []) content.push(...(await imageParts(new Uint8Array(readFileSync(path)), imageMimeOf(path)!, path)));
 			return {
 				content,
-				details: { exit_code: r.exit_code, timed_out: r.timed_out, truncated: r.truncated, spill_path: r.spill_path, images: r.images },
+				details: { exit_code: r.exit_code, timed_out: r.timed_out, output_held: r.output_held, truncated: r.truncated, spill_path: r.spill_path, images: r.images },
 				structuredContent: r,
 				isError: r.exit_code !== 0,
 			};

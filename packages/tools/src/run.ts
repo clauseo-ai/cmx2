@@ -52,7 +52,7 @@ const HELPERS: Helper[] = [
 		name: "shell.exec",
 		tool: "shell",
 		returns: "structured",
-		signature: "shell.exec({ command, timeout? }): Promise<{ exit_code, output, truncated, wall_time_seconds, timed_out, images? }>",
+		signature: "shell.exec({ command, timeout? }): Promise<{ exit_code, output, truncated, wall_time_seconds, timed_out, output_held, images? }>",
 	},
 	{
 		name: "shell.spawn",
