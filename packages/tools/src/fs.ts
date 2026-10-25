@@ -118,9 +118,23 @@ export function readTool(env: ToolEnv): Tool {
 			const cutNote = cutLines ? `\n\n(${cutLines} long line${cutLines > 1 ? "s" : ""} cut at ${MAX_LINE_CHARS} characters; grep or shell reach the rest)` : "";
 			const note = (truncated ? `\n\n(lines ${start}-${end} of ${lines.length}; continue with offset ${end + 1})` : "") + cutNote;
 			const details: ReadDetails | ImageReadDetails = { path: abs, startLine: start, endLine: end, totalLines: lines.length, truncated, cutLines };
-			return { content: [text(lines.length === 0 ? "(empty file)" : out.join("\n") + note)], details };
+			return { content: [text(lines.length === 0 ? "(empty file)" : out.join("\n") + note)], details, structuredContent: rawLines(raw, lines, start, params.limit) };
 		},
 	});
+}
+
+/**
+ * the file's own text for `run`'s fs.read: offset and limit count lines, with no line numbers and
+ * none of the display caps. the whole file comes back byte for byte when neither is given
+ */
+function rawLines(raw: Buffer, lines: string[], start: number, limit?: number): string {
+	const whole = raw.toString("utf8");
+	if (start === 1 && limit === undefined) return whole;
+	const end = limit === undefined ? lines.length : Math.min(lines.length, start - 1 + Math.max(1, Math.floor(limit)));
+	if (end < start) return "";
+	// every line but a final one without a newline ends with one
+	const newline = end < lines.length || whole.endsWith("\n");
+	return lines.slice(start - 1, end).join("\n") + (newline ? "\n" : "");
 }
 
 export function writeTool(env: ToolEnv): Tool {

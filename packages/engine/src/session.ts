@@ -689,7 +689,10 @@ export class EngineSession {
 		};
 		const exclude = this.exclude;
 		const memory = [notesTool(this.notesFile), recallTool((query, limit) => this.recall(query, limit))];
-		this.hot = [...hotTools(env, (tool, args, signal) => this.nestedCall(tool, args, signal), ask, this.opts.child ? "spawner" : "user"), search, ...memory, ...(this.opts.extraTools ?? [])]
+		// run lists only the helpers whose tools this agent has, so a read-only agent's script is not told about fs.write
+		const others = [...(this.opts.extraTools ?? []).map((t) => t.name), ...this.deferred.keys(), ...this.runOnly.keys()];
+		const hot = hotTools(env, (tool, args, signal) => this.nestedCall(tool, args, signal), ask, this.opts.child ? "spawner" : "user", { exclude, others });
+		this.hot = [...hot, search, ...memory, ...(this.opts.extraTools ?? [])]
 			.filter((t) => !exclude.has(t.name))
 			.sort((a, b) => a.name.localeCompare(b.name));
 
