@@ -2,7 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { mcpText, webfetchTool, websearchTool } from "../src/deferred.ts";
-import { defaultSkillDirs, frontmatter, Skills, skillTool } from "../src/skills.ts";
+import { defaultSkillDirs, frontmatter, Skills, skillsContext, skillTool } from "../src/skills.ts";
 import { liveTest } from "../../eval/src/harness.ts";
 import { scratch, textOf } from "./helpers.ts";
 
@@ -81,4 +81,44 @@ test("skills: frontmatter with folded blocks, first dir wins, flush picks up a n
 	expect(skills.list().map((s) => s.name)).not.toContain("triage");
 	skills.flush();
 	expect(skills.list().map((s) => s.name)).toContain("triage");
+});
+
+test("skills the frontmatter keeps from the model are left out of its list and still load by name", async () => {
+	const env = scratch("skills-invocable");
+	const root = join(env.cwd, "skills");
+	const put = (dir: string, body: string) => {
+		mkdirSync(join(root, dir), { recursive: true });
+		writeFileSync(join(root, dir, "SKILL.md"), body);
+	};
+	put("deploy", "---\nname: deploy\ndescription: |\n  ship the app.\n  use when asked to release.\n---\nrun ./deploy.sh\n");
+	put("release", "---\nname: release\ndescription: cut a tag\ndisable-model-invocation: true\n---\ntag it\n");
+	put("legacy", "---\nname: legacy\ndescription: an opencode skill\nautoinvoke: false\n---\nold\n");
+	put("bare", "---\nname: bare\n---\nno description\n");
+	put("long", `---\nname: long\ndescription: ${"word ".repeat(300)}\n---\nbody\n`);
+	const skills = new Skills([root]);
+	expect(skills.list().map((s) => [s.name, s.invocable])).toEqual([
+		["bare", true],
+		["deploy", true],
+		["legacy", false],
+		["long", true],
+		["release", false],
+	]);
+
+	const block = skillsContext(skills.list())!;
+	const lines = block.split("\n");
+	expect(lines[0]).toStartWith("skills: instructions written for a kind of task.");
+	// a block description reads as one line; no description means nothing to match on
+	expect(lines.slice(1).map((l) => l.split(":")[0])).toEqual(["- deploy", "- long"]);
+	expect(lines[1]).toBe("- deploy: ship the app. use when asked to release.");
+	// the spec's 1024 character limit, marked where it was cut
+	expect(lines[2]!.length).toBe("- long: ".length + 1024);
+	expect(lines[2]).toEndWith("...");
+	expect(skillsContext(skills.list().filter((s) => !s.invocable))).toBeUndefined();
+
+	const tool = skillTool(skills, env);
+	const listing = textOf(await tool.execute("c", {}));
+	expect(listing).toContain("deploy:");
+	expect(listing).not.toContain("release:");
+	expect(listing).not.toContain("legacy:");
+	expect(textOf(await tool.execute("c", { name: "release" }))).toContain("tag it");
 });

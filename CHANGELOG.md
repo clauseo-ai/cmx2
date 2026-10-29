@@ -2,6 +2,15 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
+## 0.9.4 - 2026-10-30
+
+contract version 7. no shape changes.
+
+### changed
+- the model picks up skills by itself. the turn context lists each skill the session can load, as `- name: description` under one line saying to load a matching skill with the skill tool before starting on the task. it is sent on the first turn, again when the list changes (a config reload re-reads the skills dirs) and in the state block after a compaction, and never in the prefix. why: the list lived only behind `skill` with no name, so a skill was loaded only when the user named it.
+- `skill` is declared from the first request instead of behind `tool_search`, so a matching skill takes one call. an agent without the tool gets no list either.
+- a skill whose frontmatter says `disable-model-invocation: true` (or `autoinvoke: false`, as opencode writes it) is left out of the list and out of `skill`'s own listing; the user's `/name` and a call by name still load it. a skill with no description is not listed, since there is nothing to match on, and descriptions are cut at 1024 characters.
+
 ## 0.9.3 - 2026-10-25
 
 contract version 7. no shape changes.

@@ -30,6 +30,8 @@ import {
 	type RunDetails,
 	runOnlyTools,
 	Skills,
+	skillsContext,
+	skillTool,
 	type Tool,
 	type ToolResult,
 	toolSearchTool,
@@ -511,6 +513,8 @@ export class EngineSession {
 	private model!: Model<Api>;
 	private transcript: Transcript;
 	private hot: Tool[] = [];
+	/** the skills this session's directory can see; the turn context lists them and the skill tool loads them */
+	private skills!: Skills;
 	private deferred = new Map<string, Tool>();
 	private loaded = new Set<string>();
 	/** tools only run helpers reach (shell.spawn, pty.*), never declared */
@@ -677,7 +681,8 @@ export class EngineSession {
 		const lsp = this.opts.lsp ?? new LspPool();
 		const env = { cwd, spillDir: join(dataDir, "tool-output"), ...(this.opts.procs ? { procs: this.opts.procs } : {}), afterWrite: (abs: string, before?: Before) => this.afterWrite(abs, lsp, before), ...(this.opts.child ? { env: subagentEnv() } : {}) };
 		const skills = this.opts.skills ?? new Skills(() => defaultSkillDirs(cwd, configDir()));
-		for (const t of deferredTools(env, { skills, lsp, web: webOptions(config) })) this.deferred.set(t.name, t);
+		this.skills = skills;
+		for (const t of deferredTools(env, { lsp, web: webOptions(config) })) this.deferred.set(t.name, t);
 		for (const t of runOnlyTools(env)) this.runOnly.set(t.name, t);
 		const search = toolSearchTool(
 			() => [...this.deferredAll().values()].filter((t) => !this.loaded.has(t.name)).map((t) => ({ name: t.name, description: t.description })),
@@ -692,7 +697,8 @@ export class EngineSession {
 		// run lists only the helpers whose tools this agent has, so a read-only agent's script is not told about fs.write
 		const others = [...(this.opts.extraTools ?? []).map((t) => t.name), ...this.deferred.keys(), ...this.runOnly.keys()];
 		const hot = hotTools(env, (tool, args, signal) => this.nestedCall(tool, args, signal), ask, this.opts.child ? "spawner" : "user", { exclude, others });
-		this.hot = [...hot, search, ...memory, ...(this.opts.extraTools ?? [])]
+		// skill is declared from request one, beside the list the turn context carries: a model that sees a matching skill calls it without a tool_search first
+		this.hot = [...hot, search, skillTool(skills, env), ...memory, ...(this.opts.extraTools ?? [])]
 			.filter((t) => !exclude.has(t.name))
 			.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -1381,6 +1387,15 @@ export class EngineSession {
 	}
 
 	/**
+	 * the turn-context blocks by key: the embedder's (routing, helpers) and the skills this session can
+	 * load. each rides when its text changed since it was last sent, and all of them after a compaction.
+	 */
+	private appendix(): Array<[key: string, text: string | undefined]> {
+		const skills = this.exclude.has("skill") ? undefined : skillsContext(this.skills.list());
+		return [...(this.opts.appendix?.() ?? []), ["skills", skills]];
+	}
+
+	/**
 	 * turn-scoped text: the turn context when it changed, the batching nudge, the stand-in for a forced
 	 * tool choice. appended to the transcript after the user message and never edited afterwards, so the
 	 * cache and the thinking-block binding both see an append-only history.
@@ -1398,8 +1413,8 @@ export class EngineSession {
 			if (this.lastLedger !== undefined || ledger !== "no processes running") lines.push(ledger);
 			this.lastLedger = ledger;
 		}
-		for (const [key, text] of this.opts.appendix?.() ?? []) {
-			// roster and routing blocks ride only when they changed since the last turn
+		for (const [key, text] of this.appendix()) {
+			// roster, routing and skills blocks ride only when they changed since the last turn
 			// a block that has gone away is sent again if it comes back, even as the same words
 			if (text === undefined) {
 				this.lastAppendix.delete(key);
@@ -2503,7 +2518,7 @@ export class EngineSession {
 		const ledger = this.opts.ledger?.() ?? "no processes running";
 		lines.push(ledger);
 		this.lastLedger = ledger;
-		for (const [key, text] of this.opts.appendix?.() ?? []) {
+		for (const [key, text] of this.appendix()) {
 			if (text === undefined) continue;
 			lines.push(text);
 			this.lastAppendix.set(key, text);

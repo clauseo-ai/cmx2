@@ -424,6 +424,12 @@ format: slug, what happened, the fix or the rule.
 - **re-rendered prefix.** date, skills list, agents.md, canonical path in
   the system prompt = a cache miss risk on every step. record once, append
   deltas.
+- **a list the model never sees.** cmx2 shipped the skill tool behind
+  tool_search with no skills list anywhere in context, so the model only
+  loaded a skill when the user named it. every other harness (claude code,
+  opencode, pi, goose, codex cli) shows each skill's name and description
+  up front; that is what auto pickup runs on. keeping volatile text out of
+  the prefix means appending it, not leaving it out.
 - **identity in memory only.** a serve restart orphaned every parked child.
   rehydrate from the db.
 - **unbounded deliverable extraction.** the watcher walked the whole

@@ -7,8 +7,9 @@ import { text, type Tool, defineTool, type ToolEnv, type ToolResult } from "./ty
 
 /**
  * skills: a folder with a SKILL.md whose frontmatter names it and says what it is for, and whose body
- * is the instructions. they are loaded on demand by the skill tool and listed as commands for clients;
- * the list never enters the prompt prefix.
+ * is the instructions. each session's turn context lists their names and descriptions (`skillsContext`),
+ * so the model can pick one up when a task matches; the skill tool loads the body. the list never enters
+ * the prompt prefix. clients list them as commands.
  */
 
 export interface SkillInfo {
@@ -20,6 +21,12 @@ export interface SkillInfo {
 	dir: string;
 	/** the skills dir it was found in */
 	root: string;
+	/**
+	 * false when the frontmatter keeps it from the model (`disable-model-invocation: true`, or
+	 * `autoinvoke: false` as opencode writes it): it is left out of the list the model sees, and the
+	 * user's `/name` or a request by name still loads it
+	 */
+	invocable: boolean;
 }
 
 /**
@@ -70,7 +77,8 @@ export function listSkills(dirs: string[]): SkillInfo[] {
 			const { meta } = frontmatter(readFileSync(path, "utf8"));
 			const name = meta.name || entry;
 			if (seen.has(name)) continue;
-			seen.set(name, { name, description: meta.description ?? "", path, dir: dirname(path), root });
+			const invocable = meta["disable-model-invocation"]?.toLowerCase() !== "true" && meta.autoinvoke?.toLowerCase() !== "false";
+			seen.set(name, { name, description: meta.description ?? "", path, dir: dirname(path), root, invocable });
 		}
 	}
 	return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -101,6 +109,24 @@ export class Skills {
 	}
 }
 
+/** the longest description the list carries, the agent skills spec's own limit */
+const DESCRIPTION_MAX = 1024;
+
+/**
+ * the turn-context block that lets the model pick a skill up by itself: every skill it may invoke that
+ * has a description, as `- name: description`. undefined when there is none to list.
+ */
+export function skillsContext(all: SkillInfo[]): string | undefined {
+	const lines = all
+		.filter((s) => s.invocable && s.description.trim())
+		.map((s) => {
+			const d = s.description.replace(/\s+/g, " ").trim();
+			return `- ${s.name}: ${d.length > DESCRIPTION_MAX ? `${d.slice(0, DESCRIPTION_MAX - 3)}...` : d}`;
+		});
+	if (!lines.length) return undefined;
+	return ["skills: instructions written for a kind of task. when the task at hand matches a description below, load that skill with the skill tool before starting on it.", ...lines].join("\n");
+}
+
 export function skillTool(skills: Skills, env: ToolEnv): Tool {
 	return defineTool({
 		name: "skill",
@@ -111,8 +137,9 @@ export function skillTool(skills: Skills, env: ToolEnv): Tool {
 			name: Type.Optional(Type.String({ description: "the skill's name; leave it out to list them" })),
 		}),
 		async execute(_id, params): Promise<ToolResult<Record<string, unknown>>> {
-			const all = skills.list();
-			const listing = all.map((s) => `${s.name}: ${s.description || "(no description)"}`).join("\n");
+			// the listing is the model's view: a skill kept from the model is loaded only by name
+			const all = skills.list().filter((s) => s.invocable);
+			const listing = all.map((s) => `${s.name}: ${s.description.replace(/\s+/g, " ").trim() || "(no description)"}`).join("\n");
 			if (!params.name) {
 				return { content: [text(all.length ? `installed skills:\n${listing}` : "no skills are installed")], details: { skills: all.map((s) => ({ name: s.name, description: s.description, dir: s.dir })) } };
 			}

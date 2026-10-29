@@ -5,7 +5,6 @@ import { procTools } from "./procs.ts";
 import { type AskQuestions, type QuestionAudience, questionTool } from "./question.ts";
 import { runTool } from "./run.ts";
 import { shellTool } from "./shell.ts";
-import { type Skills, skillTool } from "./skills.ts";
 import type { NestedCall, Tool, ToolEnv } from "./types.ts";
 import type { WebOptions } from "./web.ts";
 
@@ -19,7 +18,7 @@ export { RUN_DESCRIPTION, runDescription, wrapScript, type ToolCheck } from "./r
 export { runCommand, outputImages, shellTool, type ShellResult } from "./shell.ts";
 export { type AgentAnswer, type AskQuestions, type QuestionAudience, type QuestionDetails, type QuestionPrompt, QuestionDismissedError } from "./question.ts";
 export { hostHeicDecoders, imageMimeOf, imageParts, isHeicMime, MAX_EDGE, MAX_IMAGE_BYTES, readDimensions, resizeDataUrl, resizeImage, sniffHeic, sniffImage, type Dimensions, type ResizedImage } from "./image.ts";
-export { defaultSkillDirs, frontmatter, listSkills, Skills, type SkillInfo } from "./skills.ts";
+export { defaultSkillDirs, frontmatter, listSkills, Skills, skillsContext, skillTool, type SkillInfo } from "./skills.ts";
 export { formatFile, formatterFor, type Formatted } from "./format.ts";
 export { DEFAULT_LSP_SERVERS, errorsAfterWrite, LspPool, type LspDiagnostic, type LspLocation, type LspServerConfig, type LspSymbol } from "./lsp.ts";
 export { FileOAuthStore, McpPool, mcpSignIn, mcpToolName, OAUTH_REDIRECT, oauthProvider, type McpServerConfig, type McpState, type McpStatus } from "./mcp.ts";
@@ -51,8 +50,6 @@ function reachable(core: Tool[], reach: RunReach): (tool: string) => boolean {
 }
 
 export interface DeferredOptions {
-	/** the session's skills; without them there is no skill tool */
-	skills?: Skills;
 	/** the daemon's language servers; without them there is no lsp tool */
 	lsp?: LspPool;
 	/** the profile's web provider for websearch, webfetch and webcrawl; without it the first key in the environment picks, else keyless tavily */
@@ -63,7 +60,6 @@ export interface DeferredOptions {
 export function deferredTools(env: ToolEnv, opts: DeferredOptions = {}): Tool[] {
 	const tools = [webfetchTool(env, opts.web), websearchTool(env, opts.web)];
 	if (opts.web?.crawl) tools.push(webcrawlTool(env, opts.web));
-	if (opts.skills) tools.push(skillTool(opts.skills, env));
 	if (opts.lsp) tools.push(lspTool(opts.lsp, env));
 	return tools.sort((a, b) => a.name.localeCompare(b.name));
 }
