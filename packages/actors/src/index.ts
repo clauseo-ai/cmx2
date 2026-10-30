@@ -1,4 +1,4 @@
-export { ActorError, Actors, EXCLUDE_EXPLORE, EXCLUDE_REVIEW, excludeFor, type ActorsOptions, type AgentInfo, type AgentType, type ChildSpec, type Host, MAILBOX_CAPACITY, MAX_WAIT_MS, type PoolSpec, type SpawnInput } from "./actors.ts";
+export { ActorError, Actors, EXCLUDE_EXPLORE, EXCLUDE_REVIEW, excludeFor, IDLE_WAIT_MS, type ActorsOptions, type AgentInfo, type AgentType, type ChildSpec, type Host, MAILBOX_CAPACITY, MAX_WAIT_MS, type PoolSpec, type SpawnInput } from "./actors.ts";
 export { ABORT_REASONS, computeViolations, DEFAULT_CONTRACTS, resolveContract } from "./contracts.ts";
 export { childPath, depthOf, isAncestor, nameFrom, normalName, ROOT_PATH, validName } from "./paths.ts";
 export { attemptAttachment, helperFragment, taskEnvelope } from "./prompt.ts";

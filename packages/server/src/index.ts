@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync
 import { readdir, realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { CONTRACT_VERSION, EVENTS, type EventType } from "@cmx2/contract";
-import { ActorError, Actors, agentTools, type Host, ReportFiles, type SpawnInput } from "@cmx2/actors";
+import { ActorError, Actors, agentTools, type Host, IDLE_WAIT_MS, ReportFiles, type SpawnInput } from "@cmx2/actors";
 import { type Config, ConfigError, configDir, dataDir as defaultDataDir, type Effort, loadConfig, loadConfigAsync, machineName, userNotes } from "@cmx2/engine/config";
 import { Routing } from "@cmx2/routing";
 import type { RequestAsk } from "@cmx2/engine/gates";
@@ -192,6 +192,8 @@ export interface ServeOptions {
 	warmHorizonMs?: number;
 	/** how long a parked root on the 1h ttl is kept warm (4 hours) */
 	rootWarmHorizonMs?: number;
+	/** how long close, interrupt and abort wait for a stopped turn to go idle before ending its session (5 s) */
+	idleWaitMs?: number;
 }
 
 /** a request body over this is refused with 413 (photos arrive resized; a transcript import is the biggest body) */
@@ -325,6 +327,7 @@ export function serve(opts: ServeOptions) {
 	 */
 	const idleSince = new Map<string, number>();
 	const idleSinceMax = opts.idleSinceMax ?? IDLE_SINCE_MAX;
+	const idleWaitMs = opts.idleWaitMs ?? IDLE_WAIT_MS;
 
 	const host: Host = {
 		createSession: (spec) => createChild(spec),
@@ -413,6 +416,7 @@ export function serve(opts: ServeOptions) {
 		reports: reportFiles,
 		warmHorizonMs: opts.warmHorizonMs,
 		rootWarmHorizonMs: opts.rootWarmHorizonMs,
+		idleWaitMs,
 		agentType: (directory, name) => {
 			const def = catalog.agent(directory, name);
 			if (!def || def.path === "(built in)") return undefined;
@@ -2456,7 +2460,7 @@ export function serve(opts: ServeOptions) {
 		btws.stopSession(id);
 		const s = sessions.get(id);
 		if (s) {
-			await s.abort().catch(() => {});
+			await s.abort(idleWaitMs).catch(() => {});
 			s.dispose();
 			sessions.delete(id);
 		}
@@ -3379,7 +3383,17 @@ export function serve(opts: ServeOptions) {
 				const wasBusy = s.state === "busy";
 				// a person stopping a subagent: its spawner hears it; the root's children keep running and the root hears who is out
 				if (wasBusy && actors.isChild(id)) actors.userInterrupt(id);
-				await s.abort();
+				// a turn that does not go idle in time (a tool that ignores the signal) is ended: a helper is marked
+				// interrupted, a root leaves memory, and either reopens from its transcript on the next message
+				if (!(await s.abort(idleWaitMs))) {
+					console.error(`cmx2: ${id} did not stop within ${idleWaitMs} ms; its session is ended`);
+					if (actors.isChild(id)) await actors.forceInterrupted(id, "user");
+					else if (sessions.get(id) === s) {
+						s.dispose();
+						sessions.delete(id);
+						locks.release(id);
+					}
+				}
 				if (wasBusy && !actors.isChild(id)) actors.onUserAbort(id);
 			}
 			// asks the stopped turn left open are rejected, each with its event, so no surface keeps a dead card (a6)
@@ -3726,7 +3740,7 @@ export function serve(opts: ServeOptions) {
 		watcher?.close();
 		await btws.stopAll();
 		for (const s of sessions.values()) {
-			await s.abort().catch(() => {});
+			await s.abort(idleWaitMs).catch(() => {});
 			s.dispose();
 		}
 		sessions.clear();
