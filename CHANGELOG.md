@@ -2,7 +2,7 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
-## unreleased
+## 0.9.5 - 2026-10-30
 
 contract version 7. additive: `ProcessInfo` carries `serve` (boolean) and `notify` (what can still fire, or null); `POST /session/:id/procs` takes `serve`; `process.updated` also goes out when a running job's listening ports change. older daemons also report contract 7 and send neither field: read a missing `serve` as false and a missing `notify` as unknown. `McpStatus` (`GET /mcp`, `mcp.status`, the reload answer) carries `sessions`, `caller` and `instructions`. `POST /session/:id/agents/close` answers 400 for a target that is the session itself or one of its ancestors; `/interrupt` answers as before.
 
