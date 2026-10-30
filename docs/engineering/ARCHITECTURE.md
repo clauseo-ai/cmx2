@@ -414,7 +414,10 @@ every session (`McpPool` in `packages/tools/src/mcp.ts`); their tools are
 deferred as `<server>_<tool>`. a session asks for them with a scope (whether it
 is a helper, and who it is): `sessions: "root"` servers are left out for
 helpers, and `caller: true` servers get wrappers that send the session in
-`_meta["cmx2/caller"]` on each call (D29).
+`_meta["cmx2/caller"]` on each call. an entry with `instructions: true` adds
+the server's initialize instructions to the turn context of sessions that see
+it (appendix key `mcp:<name>`, at most 4096 characters, sent when it changes)
+(D29).
 
 ## security
 

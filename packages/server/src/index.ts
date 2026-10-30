@@ -2047,6 +2047,14 @@ export function serve(opts: ServeOptions) {
 					// without spawn there is nobody to route to (eval arm c); the table would only invite a call that cannot be made
 					["routing", !child && evalExclude.includes("spawn") ? undefined : actors.routingText(id)],
 					["agents", actors.helpersText(id)],
+					// an mcp server's own instructions, for sessions that see the server (instructions: true in its entry)
+					...(() => {
+						try {
+							return mcp.instructionsFor(Object.keys(configFor(directory).mcp ?? {}), mcpScope);
+						} catch {
+							return mcp.instructionsFor(Object.keys(config.mcp ?? {}), mcpScope);
+						}
+					})(),
 				];
 			},
 			// the main session's model and effort are the user's dial; only helpers escalate on failure signals (and come back down)
@@ -2345,7 +2353,7 @@ export function serve(opts: ServeOptions) {
 		dataDir: data,
 		version: VERSION,
 		cwd: real(process.env.HOME ?? process.cwd()),
-		onChange: (st) => publish("global", "mcp.status", { name: st.name, status: st.status, transport: st.transport, tools: st.tools, ...(st.error ? { error: scrubText(st.error) } : {}), ...(st.sessions ? { sessions: st.sessions } : {}), ...(st.caller !== undefined ? { caller: st.caller } : {}) }),
+		onChange: (st) => publish("global", "mcp.status", { name: st.name, status: st.status, transport: st.transport, tools: st.tools, ...(st.error ? { error: scrubText(st.error) } : {}), ...(st.sessions ? { sessions: st.sessions } : {}), ...(st.caller !== undefined ? { caller: st.caller } : {}), ...(st.instructions !== undefined ? { instructions: st.instructions } : {}) }),
 		log: (line) => console.error(line),
 	});
 	mcp.configure(config.mcp);

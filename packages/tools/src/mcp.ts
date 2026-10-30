@@ -35,7 +35,12 @@ export interface McpServerConfig {
 	sessions?: "all" | "root";
 	/** true sends the calling session with every tools/call, in `_meta["cmx2/caller"]`; off by default, since it names sessions and folders */
 	caller?: boolean;
+	/** true puts the instructions the server sent at initialize in the turn context of sessions that see it; off by default */
+	instructions?: boolean;
 }
+
+/** the most of a server's instructions that reaches the turn context, in characters */
+export const MCP_INSTRUCTIONS_CAP = 4096;
 
 /** the session behind a tools/call, sent as `_meta["cmx2/caller"]` to a server with `caller: true` */
 export interface McpCaller {
@@ -76,6 +81,8 @@ export interface McpStatus {
 	sessions?: "all" | "root";
 	/** whether its calls carry the calling session */
 	caller?: boolean;
+	/** whether its instructions reach the turn context (the entry says so and the server sent some) */
+	instructions?: boolean;
 }
 
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -139,6 +146,8 @@ interface Entry {
 	tools: Tool[];
 	/** the server's tool list as it sent it, for wrappers bound to a caller */
 	listed: McpTool[];
+	/** what the server sent as `instructions` at initialize */
+	instructions?: string;
 	toLlm?: ToLlm;
 	ready: Promise<void>;
 	/** failed redials since the connection was last up; 0 for a first dial */
@@ -200,6 +209,21 @@ export class McpPool {
 			if (e.status.status !== "connected" || (names && !names.includes(e.name))) continue;
 			if (!scope) out.push(...e.tools);
 			else if (!(scope.child && e.config.sessions === "root")) out.push(...(e.config.caller === true ? this.boundTools(e, scope) : e.tools));
+		}
+		return out;
+	}
+
+	/**
+	 * turn-context entries for the servers among these names whose profile entry says `instructions: true`:
+	 * `["mcp:<name>", text]` when the server is connected, sent instructions and is offered to this scope;
+	 * `["mcp:<name>", undefined]` otherwise, so the session drops the entry and sends it again if it comes back
+	 */
+	instructionsFor(names?: string[], scope?: McpScope): Array<[string, string | undefined]> {
+		const out: Array<[string, string | undefined]> = [];
+		for (const e of this.entries.values()) {
+			if (e.config.instructions !== true || (names && !names.includes(e.name))) continue;
+			const offered = e.status.status === "connected" && !!e.instructions && !(scope?.child && e.config.sessions === "root");
+			out.push([`mcp:${e.name}`, offered ? mcpInstructionsText(e.name, e.instructions!) : undefined]);
 		}
 		return out;
 	}
@@ -326,6 +350,8 @@ export class McpPool {
 			});
 			this.adopt(e, listed, toLlmContent);
 			e.status.server = { name: init.serverInfo.name, version: init.serverInfo.version };
+			e.instructions = typeof init.instructions === "string" && init.instructions.trim() ? init.instructions.trim() : undefined;
+			e.status.instructions = config.instructions === true && !!e.instructions;
 			this.set(e, { status: "connected" });
 		} catch (err) {
 			void client.close().catch(() => {});
@@ -346,6 +372,12 @@ export class McpPool {
 		if (!e?.client || e.status.status !== "connected") throw new Error(`mcp server ${name} is ${e ? e.status.status : "no longer configured"}${e?.status.error ? `: ${e.status.error}` : ""}`);
 		return e.client;
 	}
+}
+
+/** a server's instructions as one turn-context block, cut at MCP_INSTRUCTIONS_CAP characters with a note saying so */
+export function mcpInstructionsText(server: string, text: string): string {
+	const body = text.length > MCP_INSTRUCTIONS_CAP ? `${text.slice(0, MCP_INSTRUCTIONS_CAP)}\n(cut at ${MCP_INSTRUCTIONS_CAP} of ${text.length} characters)` : text;
+	return `instructions from mcp server ${server} (its tools load through tool_search as ${mcpToolName(server, "")}*):\n${body}`;
 }
 
 /** one mcp tool as a cmx2 tool: same schema, output under the shared limits */

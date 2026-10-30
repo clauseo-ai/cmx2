@@ -139,6 +139,8 @@ export interface McpServerEntry {
 	sessions?: "all" | "root";
 	/** true sends the calling session with each tool call, in `_meta["cmx2/caller"]`. default false */
 	caller?: boolean;
+	/** true puts the server's own instructions in the turn context of sessions that see it. default false */
+	instructions?: boolean;
 	[key: string]: unknown;
 }
 
@@ -248,6 +250,7 @@ function validate(c: Config): Config {
 		if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new ConfigError(`mcp server names are letters, digits, - and _ (they prefix tool names); rename "${name}"`);
 		if (m.sessions !== undefined && m.sessions !== "all" && m.sessions !== "root") throw new ConfigError(`mcp.${name}.sessions must be "all" or "root", got ${JSON.stringify(m.sessions)}`);
 		if (m.caller !== undefined && typeof m.caller !== "boolean") throw new ConfigError(`mcp.${name}.caller must be true or false, got ${JSON.stringify(m.caller)}`);
+		if (m.instructions !== undefined && typeof m.instructions !== "boolean") throw new ConfigError(`mcp.${name}.instructions must be true or false, got ${JSON.stringify(m.instructions)}`);
 	}
 	if (typeof c.format !== "boolean") throw new ConfigError(`format must be true or false, got ${JSON.stringify(c.format)}`);
 	if (typeof c.diagnostics !== "boolean") throw new ConfigError(`diagnostics must be true or false, got ${JSON.stringify(c.diagnostics)}`);

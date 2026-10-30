@@ -48,12 +48,21 @@ function script(body: any): Block[] {
 	return [steps[answered] ?? { type: "text", text: "done" }];
 }
 
+/** every request the stand-in provider got, as sent */
+const requests: string[] = [];
+const GUIDE = `guide-words-${nonce()}`;
+const roleOf = (body: string) => {
+	const first = JSON.stringify((JSON.parse(body).messages ?? []).find((m: any) => m.role === "user") ?? "");
+	return first.includes("[grand]") ? "grand" : first.includes("[kid]") ? "kid" : first.includes("[top]") ? "top" : "other";
+};
+
 const provider = Bun.serve({
 	port: 0,
 	hostname: "127.0.0.1",
 	idleTimeout: 0,
 	async fetch(req) {
 		const body = await req.json();
+		requests.push(JSON.stringify(body));
 		const blocks = script(body);
 		const stream = new ReadableStream<Uint8Array>({
 			start(c) {
@@ -79,7 +88,7 @@ const provider = Bun.serve({
 	},
 });
 
-const config = () => ({ ...structuredClone(DEFAULTS), providers: { anthropic: { baseUrl: `http://127.0.0.1:${provider.port}`, apiKey: "unused" } }, mcp: { box: { command: ECHO, caller: true } }, sources: [] });
+const config = () => ({ ...structuredClone(DEFAULTS), providers: { anthropic: { baseUrl: `http://127.0.0.1:${provider.port}`, apiKey: "unused" } }, mcp: { box: { command: ECHO, caller: true }, guide: { command: ECHO, env: { ECHO_INSTRUCTIONS: GUIDE }, instructions: true, sessions: "root" as const } }, sources: [] });
 let d: ReturnType<typeof serve>;
 
 beforeAll(() => {
@@ -119,7 +128,7 @@ async function until<T>(what: string, get: () => Promise<T | undefined>, ms = 60
 }
 
 test("the caller is built from the agent tree: a root, its helper and the helper's helper each name themselves, their parent and their root", async () => {
-	await until("the echo server", async () => ((await api("/mcp")) as any[]).find((m) => m.name === "box" && m.status === "connected"));
+	await until("the echo servers", async () => ((await api("/mcp")) as any[]).filter((m) => m.status === "connected").length === 2);
 	const top = (await api("/session", { directory: WORK, title: `it-mcp-caller-${nonce()}`, model: "anthropic/claude-opus-5-5" })).id as string;
 	await api(`/session/${top}/prompt`, { text: "[top] call the echo tool" });
 	const kid = await until("the helper", async () => ((await api(`/session/${top}/children`)) as any[])[0]?.id as string | undefined);
@@ -130,3 +139,14 @@ test("the caller is built from the agent tree: a root, its helper and the helper
 	expect(b!.caller).toEqual({ sessionID: kid, rootID: top, parentID: top, depth: 1, path: "/root/kid", directory: WORK, host, callID: b!.callID });
 	expect(c!.caller).toEqual({ sessionID: grand, rootID: top, parentID: kid, depth: 2, path: "/root/kid/grand", directory: WORK, host, callID: c!.callID });
 }, 90_000);
+
+test("a root-only server's instructions reach the root's turn context once and never a helper's", () => {
+	const by = (role: string) => requests.filter((r) => roleOf(r) === role);
+	const top = by("top");
+	expect(top.length).toBeGreaterThan(1);
+	// one user-turn block carries them; every later request of the root repeats that history, not a second copy
+	expect(top.at(-1)!.split(`instructions from mcp server guide (its tools load through tool_search as guide_*):\\n${GUIDE}`).length - 1).toBe(1);
+	for (const r of [...by("kid"), ...by("grand")]) expect(r).not.toContain(GUIDE);
+	expect(by("kid").length).toBeGreaterThan(0);
+	expect(by("grand").length).toBeGreaterThan(0);
+});

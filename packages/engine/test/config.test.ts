@@ -115,10 +115,12 @@ test("web: a provider with its key, url and search fields; auto takes none of th
 	expect(() => load(`{ "web": { "provider": "tavily", "crawl": "yes" } }`)).toThrow(/web.crawl must be true or false/);
 });
 
-test("mcp: sessions is all or root, caller is true or false, and bad values name the fix", () => {
+test("mcp: sessions is all or root, caller and instructions are true or false, and bad values name the fix", () => {
 	const load = (mcp: string) => loadConfig({ env: { CMX2_CONFIG_DIR: profile({ "cmx2.jsonc": `{ "mcp": ${mcp} }` }) } });
 	expect(load(`{ "box": { "url": "http://127.0.0.1:1/mcp", "sessions": "root", "caller": true } }`).mcp.box).toMatchObject({ sessions: "root", caller: true });
 	expect(load(`{ "box": { "command": "sh", "sessions": "all", "caller": false } }`).mcp.box).toMatchObject({ sessions: "all", caller: false });
 	expect(() => load(`{ "box": { "command": "sh", "sessions": "helpers" } }`)).toThrow('mcp.box.sessions must be "all" or "root", got "helpers"');
 	expect(() => load(`{ "box": { "command": "sh", "caller": "yes" } }`)).toThrow('mcp.box.caller must be true or false, got "yes"');
+	expect(load(`{ "box": { "command": "sh", "instructions": true } }`).mcp.box).toMatchObject({ instructions: true });
+	expect(() => load(`{ "box": { "command": "sh", "instructions": 1 } }`)).toThrow("mcp.box.instructions must be true or false, got 1");
 });

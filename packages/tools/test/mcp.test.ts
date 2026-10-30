@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { McpPool, type McpScope, type McpServerConfig, mcpContent, wrap } from "../src/mcp.ts";
+import { MCP_INSTRUCTIONS_CAP, McpPool, type McpScope, type McpServerConfig, mcpContent, mcpInstructionsText, wrap } from "../src/mcp.ts";
 import { MAX_EDGE, readDimensions } from "../src/image.ts";
 import type { ImagePart, TextPart } from "../src/types.ts";
 import { makePng } from "./helpers.ts";
@@ -129,4 +129,32 @@ test("a scope's caller-bound tools are made once and reused, and each scope gets
 	} finally {
 		await p.close();
 	}
+});
+
+test("instructionsFor: a server with instructions: true that sent some reaches a root; off, silent or root-only for a helper, it does not", async () => {
+	const env = { ECHO_INSTRUCTIONS: "start a thread only when the person asks for one" };
+	const p = await echoPool({
+		on: { command: ECHO, env, instructions: true },
+		off: { command: ECHO, env },
+		roots: { command: ECHO, env, instructions: true, sessions: "root" },
+		silent: { command: ECHO, instructions: true },
+	});
+	try {
+		const text = (name: string) => mcpInstructionsText(name, env.ECHO_INSTRUCTIONS);
+		expect(p.instructionsFor(undefined, rootScope)).toEqual([["mcp:on", text("on")], ["mcp:roots", text("roots")], ["mcp:silent", undefined]]);
+		expect(p.instructionsFor(undefined, childScope)).toEqual([["mcp:on", text("on")], ["mcp:roots", undefined], ["mcp:silent", undefined]]);
+		expect(p.instructionsFor(["off", "silent"], rootScope)).toEqual([["mcp:silent", undefined]]);
+		expect(text("on")).toBe("instructions from mcp server on (its tools load through tool_search as on_*):\nstart a thread only when the person asks for one");
+		expect(Object.fromEntries(p.status().map((s) => [s.name, s.instructions]))).toEqual({ on: true, off: false, roots: true, silent: false });
+	} finally {
+		await p.close();
+	}
+});
+
+test("instructions past the cap are cut, with a note that says how long they were", () => {
+	const long = "x".repeat(MCP_INSTRUCTIONS_CAP + 904);
+	const out = mcpInstructionsText("big", long);
+	expect(out).toContain(`\n${"x".repeat(MCP_INSTRUCTIONS_CAP)}\n(cut at ${MCP_INSTRUCTIONS_CAP} of ${MCP_INSTRUCTIONS_CAP + 904} characters)`);
+	expect(out).not.toContain("x".repeat(MCP_INSTRUCTIONS_CAP + 1));
+	expect(mcpInstructionsText("small", "short")).not.toContain("cut at");
 });

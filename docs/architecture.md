@@ -96,12 +96,14 @@ five layers merge in order: shipped defaults, your profile (`~/.config/cmx2/cmx2
     // only sessions with no parent see its tools: forks and sessions you start, never spawned helpers. default "all"
     "sessions": "root",
     // each tool call carries _meta["cmx2/caller"]: sessionID, rootID, parentID, depth, path, directory, host, callID. default false
-    "caller": true
+    "caller": true,
+    // the instructions the server sends when it connects go in the turn context of sessions that see it, up to 4096 characters. default false
+    "instructions": true
   }
 }
 ```
 
-leave `caller` off for servers you did not write: it sends session ids and folder paths. `GET /mcp` and `cmx2 mcp` show each server's `sessions` and `caller`.
+leave `caller` off for servers you did not write: it sends session ids and folder paths. `GET /mcp` and `cmx2 mcp` show each server's `sessions`, `caller` and `instructions`. turn on `instructions` for a server whose tools the model should know about before it searches; the text rides the turn context, never the system prompt, so the prompt cache is untouched.
 
 ## glossary
 

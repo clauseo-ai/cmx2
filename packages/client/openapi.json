@@ -1873,6 +1873,10 @@
 					"caller": {
 						"type": "boolean",
 						"description": "true when each tools/call carries the calling session in _meta[\"cmx2/caller\"]"
+					},
+					"instructions": {
+						"type": "boolean",
+						"description": "true when the entry sets instructions: true and the server sent instructions; they reach the turn context of sessions that see the server"
 					}
 				},
 				"description": "one mcp server from the profile"
@@ -2185,6 +2189,10 @@
 							"caller": {
 								"type": "boolean",
 								"description": "true when each tools/call carries the calling session in _meta[\"cmx2/caller\"]"
+							},
+							"instructions": {
+								"type": "boolean",
+								"description": "true when the entry sets instructions: true and the server sent instructions; they reach the turn context of sessions that see the server"
 							}
 						}
 					},

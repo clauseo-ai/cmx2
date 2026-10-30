@@ -4,11 +4,12 @@ notable changes to cmx2, newest first. the format follows keep a changelog. "con
 
 ## unreleased
 
-contract version 7. additive: `McpStatus` (`GET /mcp`, `mcp.status`, the reload answer) carries `sessions` and `caller`.
+contract version 7. additive: `McpStatus` (`GET /mcp`, `mcp.status`, the reload answer) carries `sessions`, `caller` and `instructions`.
 
 ### added
 - an mcp server in the profile can say `"caller": true`: each `tools/call` to it then carries the calling session in `_meta["cmx2/caller"]`, as `{ sessionID, rootID, parentID, depth, path, directory, host, callID }`. it is off by default, so session ids and folder paths never reach a server that did not ask. a `_meta` key the model puts in a tool's arguments stays in `arguments`. why: a server that acts as the calling session (boxbox's thread tools) has to know which session called, and one connection per server leaves no room for a per-session header.
 - `"sessions": "root"` on an mcp server offers its tools to top-level sessions only: forks and sessions made with `POST /session` see them, spawned helpers do not. the filter sits where a session's tools come from, so for a helper the tools are not in `tool_search`, not loadable and not reachable from `run`, and switching a server to root takes a tool a helper already loaded away from it. the default, `"all"`, is unchanged. why: tools that start or message top-level threads must never reach a helper, where they would stand in for spawn.
+- `"instructions": true` on an mcp server puts the instructions it sent at initialize in the turn context of each session that sees the server (so a root-only server's reach roots only), as one block headed `instructions from mcp server <name>`. it rides the first turn, again when the text changes, and after a compaction; past 4096 characters it is cut with a note. off by default. why: a server's tools are deferred behind tool_search, so the model rarely learned they existed: in boxbox's thread-tools eval the model started a thread in 3 of 12 cases that called for one with the tool descriptions alone, and 11 of 12 with the server's instructions in front of it, still 0 of 14 where a helper was right.
 
 ## 0.9.4 - 2026-10-30
 

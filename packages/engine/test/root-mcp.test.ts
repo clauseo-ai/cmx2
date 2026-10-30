@@ -23,6 +23,7 @@ function config(): Config {
 
 async function session(pool: McpPool, scope: McpScope) {
 	return EngineSession.create({
+		appendix: () => pool.instructionsFor(undefined, scope),
 		cwd: mkdtempSync(join(tmpdir(), "cmx2-rootmcp-")),
 		config: config(),
 		dataDir: mkdtempSync(join(tmpdir(), "cmx2-rootmcp-data-")),
@@ -142,6 +143,32 @@ test("an unchanged tool set keeps the agent's tool list as it is, step to step",
 		expect((top as any).syncTools()).toBe(first);
 	} finally {
 		top.dispose();
+		await p.close();
+	}
+}, 20_000);
+
+test("a server's instructions ride the turn context once, again only when they change, and never for a helper on a root-only server", async () => {
+	const p = pool();
+	const guide = (text: string): Record<string, McpServerConfig> => ({ guide: { command: ECHO, env: { ECHO_INSTRUCTIONS: text }, instructions: true, sessions: "root" } });
+	p.configure(guide("first words"));
+	await p.ready();
+	const top = await session(p, rootScope);
+	const kid = await session(p, childScope);
+	try {
+		const turn = (s: unknown) => String((s as any).turnText() ?? "");
+		expect(turn(top)).toContain("instructions from mcp server guide (its tools load through tool_search as guide_*):\nfirst words");
+		expect(turn(top)).not.toContain("first words");
+		expect(turn(kid)).not.toContain("instructions from mcp server");
+		p.configure(guide("second words"));
+		await p.ready();
+		const again = turn(top);
+		expect(again).toContain("second words");
+		expect(again).not.toContain("first words");
+		expect(turn(top)).not.toContain("second words");
+		expect(turn(kid)).not.toContain("instructions from mcp server");
+	} finally {
+		top.dispose();
+		kid.dispose();
 		await p.close();
 	}
 }, 20_000);
