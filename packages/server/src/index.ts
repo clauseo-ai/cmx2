@@ -1580,8 +1580,8 @@ export function serve(opts: ServeOptions) {
 		onTitle: (id, title, model, cost) => {
 			const live = sessions.get(id);
 			if (live) live.title = title;
-			publishSession("session.updated", id);
 			console.error(`cmx2: titled ${id} "${title}" (${model}, cost ${cost.toFixed(5)})`);
+			return publishSession("session.updated", id);
 		},
 	});
 
@@ -3153,8 +3153,10 @@ export function serve(opts: ServeOptions) {
 		if ((r = m(/^\/session\/([^/]+)\/title$/)) && method === "POST") {
 			const stored = row(r[1]!);
 			if (stored.source === "cmx") throw new HttpError(409, "ConflictError", `session ${r[1]} is history imported from cmx; it is read only here`);
-			const t = await titles.regenerate(r[1]!, req.signal);
-			if (!t) throw new HttpError(502, "TitleError", "no title model gave a title (or the session has no text yet); the title is unchanged");
+			// the reply follows session.updated: regenerate resolves once it is published
+			const t = await titles.regenerate(r[1]!);
+			if (t === "no_text") throw new HttpError(409, "ConflictError", `session ${r[1]} has no text to name yet; the title is unchanged`);
+			if (!t) throw new HttpError(502, "TitleError", "the session's model gave no title; the title is unchanged");
 			await loadVcs([row(r[1]!)]);
 			return json(info(row(r[1]!)));
 		}

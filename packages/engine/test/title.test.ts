@@ -9,7 +9,7 @@
  */
 import { afterAll, describe, expect, test } from "bun:test";
 import { type Config, DEFAULTS } from "../src/config.ts";
-import { cleanTitle, generateTitle, structuredTitle, TITLE_TOOL, validTitle } from "../src/title.ts";
+import { cleanTitle, generateTitle, structuredTitle, TITLE_TOOL, titleMechanism, validTitle } from "../src/title.ts";
 
 type Reply = { text: string } | { tool: { name: string; args: unknown } } | { status: number };
 type Wire = "anthropic" | "google" | "openai";
@@ -74,10 +74,10 @@ const ANTHROPIC = config({ anthropic: { baseUrl: BASE, apiKey: "unused" } });
 const GOOGLE = config({ google: { baseUrl: `${BASE}/v1beta`, apiKey: "unused" }, anthropic: { baseUrl: BASE, apiKey: "unused" } });
 const OPENAI = config({ compat: { api: "openai-completions", baseUrl: `${BASE}/v1`, apiKey: "unused", models: { "small-1": { name: "small" } } } });
 
-async function run(cfg: Config, sessionModel: string, r: Reply[]) {
+async function run(cfg: Config, sessionModel: string, r: Reply[], sessionOnly = false) {
 	seen.length = 0;
 	replies = [...r];
-	const t = await generateTitle(cfg, { text: "the login form submits twice when you press enter, find out why", sessionModel });
+	const t = await generateTitle(cfg, { text: "the login form submits twice when you press enter, find out why", sessionModel, sessionOnly });
 	return { t, seen: [...seen], left: replies.length };
 }
 
@@ -134,6 +134,25 @@ describe("structured title per provider", () => {
 		expect(seen.map((s) => s.wire)).toEqual(["google", "anthropic"]);
 	});
 
+	test("a structured title over 60 characters is cut at a word boundary, not rejected", async () => {
+		const long = "refactor the authentication middleware for multitenant deployments";
+		const { t } = await run(ANTHROPIC, "anthropic/claude-opus-5-5", [{ text: JSON.stringify({ title: long }) }]);
+		expect(t?.title).toBe("refactor the authentication middleware for multitenant");
+		expect(t!.title.length).toBeLessThanOrEqual(60);
+	});
+
+	test("a reply cut off inside its json is not stored as a title", async () => {
+		const { t, seen } = await run(ANTHROPIC, "anthropic/claude-opus-5-5", [{ text: '{"title":"fix' }]);
+		expect(t).toBeUndefined();
+		expect(seen).toHaveLength(1);
+	});
+
+	test("sessionOnly skips the title model on another provider", async () => {
+		const { t, seen } = await run(GOOGLE, "anthropic/claude-sonnet-5-5", [{ text: '{"title":"fix double login submit"}' }], true);
+		expect(t).toMatchObject({ model: "anthropic/claude-sonnet-5-5" });
+		expect(seen.map((x) => x.wire)).toEqual(["anthropic"]);
+	});
+
 	test("every model failing is no title", async () => {
 		const { t } = await run(ANTHROPIC, "anthropic/claude-opus-5-5", [{ status: 400 }, { status: 400 }]);
 		expect(t).toBeUndefined();
@@ -145,7 +164,10 @@ describe("parsing", () => {
 		expect(validTitle("  Fix Login  Bug. ")).toBe("fix login bug");
 		expect(validTitle("")).toBeUndefined();
 		expect(validTitle(42)).toBeUndefined();
-		expect(validTitle("x".repeat(61))).toBeUndefined();
+		expect(validTitle("x".repeat(61))).toBe("x".repeat(60));
+		expect(titleMechanism("anthropic-messages")).toBe("json_schema");
+		expect(titleMechanism("openai-completions")).toBe("tool");
+		expect(titleMechanism("openai-responses")).toBeUndefined();
 		expect(validTitle("one two three four five six seven eight nine")).toBeUndefined();
 	});
 

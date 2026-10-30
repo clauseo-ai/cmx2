@@ -974,7 +974,7 @@ export const ROUTES: RouteDef[] = [
 		path: "/session/:sessionID/title",
 		operationId: "regenerateTitle",
 		summary:
-			"give the session a new title from what it is about now: one small structured request (the cheap title model, else the session's model) over its first user message and latest text. it replaces any title, given or generated, and answers with the session once session.updated is out. 502 when no title model gave one; the title is unchanged",
+			"give the session a new title from what it is about now: one small structured request on the session's own model (never another provider, so the thread's content stays where it already goes) over its first user message and latest text. it replaces any title, given or generated, and answers with the session once session.updated is out. concurrent calls for one session share one request. 409 when the session has no text yet or is history imported from cmx, 502 when the model gave no title; the title is unchanged either way",
 		response: SessionInfo,
 		errors: [409, 502],
 	},

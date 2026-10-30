@@ -25,17 +25,24 @@ const sse = (type: string, data: unknown) => `event: ${type}\ndata: ${JSON.strin
 /** what the title requests saw, and what the next one answers: a json title, or a 400 */
 const asked: string[] = [];
 let titleReply: string | number = '{"title":"Fix Double Login Submit"}';
+let google = 0;
 
 const provider = Bun.serve({
 	port: 0,
 	hostname: "127.0.0.1",
 	idleTimeout: 0,
 	async fetch(req) {
+		if (new URL(req.url).pathname.includes(":streamGenerateContent")) {
+			google++;
+			return new Response("{}", { status: 500 });
+		}
 		const body = await req.json();
 		const isTitle = !!body.output_config?.format;
 		let text = "done, the form now submits once";
 		if (isTitle) {
 			asked.push(JSON.stringify(body.messages));
+			// slow enough that a second call arrives while the first is in flight
+			await Bun.sleep(300);
 			if (typeof titleReply === "number") return new Response(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "no" } }), { status: titleReply, headers: { "content-type": "application/json" } });
 			text = titleReply;
 		} else if (!body.tools?.length) {
@@ -53,7 +60,7 @@ const provider = Bun.serve({
 	},
 });
 
-const config = () => ({ ...structuredClone(DEFAULTS), providers: { anthropic: { baseUrl: `http://127.0.0.1:${provider.port}`, apiKey: "unused" } }, sources: [] });
+const config = () => ({ ...structuredClone(DEFAULTS), providers: { anthropic: { baseUrl: `http://127.0.0.1:${provider.port}`, apiKey: "unused" }, google: { baseUrl: `http://127.0.0.1:${provider.port}/v1beta`, apiKey: "unused" } }, sources: [] });
 let d: ReturnType<typeof serve>;
 
 beforeAll(() => {
@@ -91,9 +98,14 @@ describe("POST /session/:id/title", () => {
 		await call(`/session/${id}/prompt`, { text: "the login form submits twice when you press enter" });
 		await settled(id);
 		asked.length = 0;
+		google = 0;
 		titleReply = '{"title":"Fix Double Login Submit"}';
-		const r = await call(`/session/${id}/title`, {});
+		// two at once share one request
+		const [r, r2] = await Promise.all([call(`/session/${id}/title`, {}), call(`/session/${id}/title`, {})]);
 		expect(r.status).toBe(200);
+		expect(r2.json.title).toBe("fix double login submit");
+		// the session's own model only: its context does not go to the google title model
+		expect(google).toBe(0);
 		expect(r.json).toMatchObject({ id, title: "fix double login submit" });
 		expect((await call(`/session/${id}`)).json.title).toBe("fix double login submit");
 		expect(asked).toHaveLength(1);
@@ -111,6 +123,14 @@ describe("POST /session/:id/title", () => {
 		titleReply = '{"title":"Fix Double Login Submit"}';
 		expect(r.status).toBe(502);
 		expect(r.json.name).toBe("TitleError");
+		expect((await call(`/session/${id}`)).json.title).toBe(given);
+	});
+
+	test("409 and the title unchanged when the session has no text yet", async () => {
+		const given = `it-regen-${nonce()}`;
+		const id = (await call("/session", { directory: WORK, title: given })).json.id as string;
+		const r = await call(`/session/${id}/title`, {});
+		expect(r.status).toBe(409);
 		expect((await call(`/session/${id}`)).json.title).toBe(given);
 	});
 

@@ -18,13 +18,14 @@ export function isDefaultTitle(title: string): boolean {
  */
 export class Titles {
 	private readonly running = new Set<string>();
+	private readonly regenerating = new Map<string, Promise<GeneratedTitle | "no_text" | undefined>>();
 
 	constructor(
 		private readonly deps: {
 			store: Store;
 			configFor: (directory: string) => Config;
 			/** the new title is on the session row; tell clients and the live session */
-			onTitle: (id: string, title: string, model: string, cost: number) => void;
+			onTitle: (id: string, title: string, model: string, cost: number) => void | Promise<void>;
 		},
 	) {}
 
@@ -49,18 +50,28 @@ export class Titles {
 
 	/**
 	 * a new title for a session from what it is about now, asked for by a client: the same structured
-	 * request, over the session's first user message and its latest text. it replaces any title, given or
-	 * generated. undefined when the session is read-only history or every title model failed.
+	 * request, on the session's own model only (its context never goes to another provider), over its
+	 * first user message and its latest text. it replaces any title, given or generated, and resolves once
+	 * the update is published. "no_text" when the session has nothing to name yet; undefined when it is
+	 * read-only history or the model gave no title. concurrent calls for one session share one request.
 	 */
-	async regenerate(id: string, signal?: AbortSignal): Promise<GeneratedTitle | undefined> {
+	regenerate(id: string): Promise<GeneratedTitle | "no_text" | undefined> {
+		const inflight = this.regenerating.get(id);
+		if (inflight) return inflight;
+		const p = this.regenerateOnce(id).finally(() => this.regenerating.delete(id));
+		this.regenerating.set(id, p);
+		return p;
+	}
+
+	private async regenerateOnce(id: string): Promise<GeneratedTitle | "no_text" | undefined> {
 		const row = this.deps.store.session(id);
 		if (!row || row.source === "cmx") return undefined;
 		const text = digest(this.deps.store, id);
-		if (!text) return undefined;
-		const t = await generateTitle(this.deps.configFor(row.directory), { text, sessionModel: row.model, ...(signal ? { signal } : {}) });
+		if (!text) return "no_text";
+		const t = await generateTitle(this.deps.configFor(row.directory), { text, sessionModel: row.model, sessionOnly: true });
 		if (!t || !this.deps.store.setSessionTitle(id, t.title)) return undefined;
 		this.deps.store.addSessionCost(id, t.cost);
-		this.deps.onTitle(id, t.title, t.model, t.cost);
+		await this.deps.onTitle(id, t.title, t.model, t.cost);
 		return t;
 	}
 }

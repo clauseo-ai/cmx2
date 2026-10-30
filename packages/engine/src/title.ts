@@ -43,9 +43,11 @@ export interface GeneratedTitle {
 	via: TitleVia;
 }
 
-/** the structured mechanism a wire format gets */
-export function titleMechanism(api: string): "json_schema" | "tool" {
-	return api === "openai-completions" ? "tool" : "json_schema";
+/** the structured mechanism a wire format gets; undefined where cmx2 has no gate for it, and the text request runs */
+export function titleMechanism(api: string): "json_schema" | "tool" | undefined {
+	if (api === "openai-completions") return "tool";
+	if (api === "anthropic-messages" || api === "google-generative-ai") return "json_schema";
+	return undefined;
 }
 
 /** the ask applied to the title request's payload */
@@ -53,7 +55,15 @@ export function titleAsk(api: string): RequestAsk {
 	return titleMechanism(api) === "tool" ? { toolChoice: { name: TITLE_TOOL } } : { format: { schema: TITLE_SCHEMA as unknown as Record<string, unknown>, name: "title" } };
 }
 
-/** a structured title, or undefined when it is not a usable one: a string, 1 to 60 characters, lowercased, at most 8 words */
+/** at most 60 characters, cut at a word boundary when there is one */
+function fit(t: string): string {
+	if (t.length <= TITLE_MAX) return t;
+	const cut = t.slice(0, TITLE_MAX + 1);
+	const at = cut.lastIndexOf(" ");
+	return (at > 0 ? cut.slice(0, at) : t.slice(0, TITLE_MAX)).replace(/[\s.!?:;,-]+$/, "");
+}
+
+/** a structured title, or undefined when it is not a usable one: a string, trimmed, lowercased, at most 8 words, cut to 60 characters at a word boundary */
 export function validTitle(v: unknown): string | undefined {
 	if (typeof v !== "string") return undefined;
 	const t = v
@@ -62,8 +72,8 @@ export function validTitle(v: unknown): string | undefined {
 		.replace(/[.!?:;,]+$/, "")
 		.trim()
 		.toLowerCase();
-	if (!t || t.length > TITLE_MAX || t.split(" ").length > 8) return undefined;
-	return t;
+	if (!t || t.split(" ").length > 8) return undefined;
+	return fit(t) || undefined;
 }
 
 // a label in front of the title, with or without emphasis: "title:", "**title:**", "*session title*:", "__title__ -"
@@ -81,9 +91,8 @@ export function cleanTitle(raw: string): string {
 			.replace(/[.!?:;,]+$/, "")
 			.replace(/[\s"'`*_\u201d\u2019]+$/, "")
 			.toLowerCase()
-			.slice(0, TITLE_MAX)
 			.trim();
-		if (line && !LABEL_ONLY.test(line)) return line;
+		if (line && !LABEL_ONLY.test(line)) return fit(line);
 	}
 	return "";
 }
@@ -110,9 +119,9 @@ function textOf(content: any[]): string {
 		.join("\n");
 }
 
-async function candidates(config: Config, sessionModel: string): Promise<Array<{ ref: string; model: Model<Api> }>> {
+async function candidates(config: Config, sessionModel: string, sessionOnly: boolean): Promise<Array<{ ref: string; model: Model<Api> }>> {
 	const out: Array<{ ref: string; model: Model<Api> }> = [];
-	if (config.providers.google || process.env.GEMINI_API_KEY) {
+	if (!sessionOnly && (config.providers.google || process.env.GEMINI_API_KEY)) {
 		try {
 			out.push({ ref: TITLE_MODEL, model: await resolveModel(config, TITLE_MODEL) });
 		} catch {}
@@ -153,15 +162,18 @@ const failed = (msg: any) => !msg || msg.stopReason === "error" || msg.stopReaso
 export async function titleWith(config: Config, ref: string, model: Model<Api>, text: string, signal?: AbortSignal): Promise<GeneratedTitle | undefined> {
 	let cost = 0;
 	let reply = "";
-	try {
-		const { msg } = await request(config, model, text, true, signal);
-		cost += msg?.usage?.cost?.total ?? 0;
-		if (!failed(msg)) {
-			const s = structuredTitle(msg.content ?? []);
-			if (s) return s.title ? { title: s.title, model: ref, cost, via: s.via } : undefined;
-			reply = textOf(msg.content ?? []);
-		}
-	} catch {}
+	// a wire format with no structured gate goes straight to the text request
+	if (titleMechanism(model.api)) {
+		try {
+			const { msg } = await request(config, model, text, true, signal);
+			cost += msg?.usage?.cost?.total ?? 0;
+			if (!failed(msg)) {
+				const s = structuredTitle(msg.content ?? []);
+				if (s) return s.title ? { title: s.title, model: ref, cost, via: s.via } : undefined;
+				reply = textOf(msg.content ?? []);
+			}
+		} catch {}
+	}
 	if (signal?.aborted) return undefined;
 	// no structured answer: a text reply is cleaned as it is; a refused request is asked again in plain text
 	if (!reply.trim()) {
@@ -174,16 +186,22 @@ export async function titleWith(config: Config, ref: string, model: Model<Api>, 
 			return undefined;
 		}
 	}
+	// a reply cut off inside its json (`{"title":"fix`) is not a title
+	if (reply.trim().startsWith("{")) return undefined;
 	const title = cleanTitle(reply);
 	// more than a handful of words is an answer to the message, not a name for it
 	if (title && title.split(/\s+/).length <= 8) return { title, model: ref, cost, via: "text" };
 	return undefined;
 }
 
-export async function generateTitle(config: Config, opts: { text: string; sessionModel: string; signal?: AbortSignal }): Promise<GeneratedTitle | undefined> {
+/**
+ * `sessionOnly` asks the session's own model and no other: for a title over the session's context, so a
+ * thread's content never goes to another provider. a first-message title tries gemini flash first.
+ */
+export async function generateTitle(config: Config, opts: { text: string; sessionModel: string; sessionOnly?: boolean; signal?: AbortSignal }): Promise<GeneratedTitle | undefined> {
 	const text = opts.text.trim().slice(0, 4000);
 	if (!text) return undefined;
-	for (const { ref, model } of await candidates(config, opts.sessionModel)) {
+	for (const { ref, model } of await candidates(config, opts.sessionModel, opts.sessionOnly ?? false)) {
 		const t = await titleWith(config, ref, model, text, opts.signal);
 		if (t) return t;
 		if (opts.signal?.aborted) return undefined;
