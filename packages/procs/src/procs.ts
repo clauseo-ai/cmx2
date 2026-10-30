@@ -186,20 +186,23 @@ export async function listenersOf(port: number): Promise<Array<{ pid: number; pg
 }
 
 /**
- * the tcp ports each of these process groups listens on, from one lsof. "missing" when lsof cannot start, "slow" when it
+ * the tcp ports each of these process groups listens on, from one lsof. "missing" when there is no lsof to start, "failed"
+ * when it exists but could not start this time (EAGAIN, EMFILE: the next sweep tries again), "slow" when it
  * did not answer by the timeout (it is sent SIGKILL, and the answer is given up on even if a child it left holds the
  * pipe), so a failed look never reads as "listens on nothing"
  */
-export async function listeningPorts(pgids: number[], opts: { timeoutMs?: number; lsof?: string } = {}): Promise<Map<number, Set<number>> | "missing" | "slow"> {
+export async function listeningPorts(pgids: number[], opts: { timeoutMs?: number; lsof?: string } = {}): Promise<Map<number, Set<number>> | "missing" | "failed" | "slow"> {
 	const out = new Map<number, Set<number>>();
 	if (!pgids.length) return out;
 	const timeoutMs = opts.timeoutMs ?? SWEEP_LSOF_TIMEOUT_MS;
+	const exe = opts.lsof ?? "lsof";
 	let proc: ReturnType<typeof Bun.spawn>;
 	try {
 		// -a ands the tcp filter with the group filter; lsof exits 1 when any listed group has no match, so its code says nothing
-		proc = Bun.spawn([opts.lsof ?? "lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-g", pgids.join(","), "-Fgn"], { stdout: "pipe", stderr: "ignore" });
+		proc = Bun.spawn([exe, "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-g", pgids.join(","), "-Fgn"], { stdout: "pipe", stderr: "ignore" });
 	} catch {
-		return "missing";
+		// only a missing lsof turns the sweep off; a start that failed for a passing reason is tried again next sweep
+		return Bun.which(exe) ? "failed" : "missing";
 	}
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const deadline = new Promise<undefined>((done) => {
@@ -323,6 +326,8 @@ export class Procs {
 	private noLsof = false;
 	/** an lsof ran past its timeout once already (said once; the sweep goes on) */
 	private slowSaid = false;
+	/** an lsof that exists failed to start once already (said once; the sweep goes on) */
+	private failSaid = false;
 	/** sweeps run so far, for tests and the budget check */
 	sweeps = 0;
 
@@ -622,7 +627,12 @@ export class Procs {
 		this.sweeps++;
 		if (found === "missing") {
 			this.noLsof = true;
-			console.error("cmx2: lsof could not be started, so job ports are looked up only when asked for");
+			console.error("cmx2: lsof is not installed, so job ports are looked up only when asked for");
+			return;
+		}
+		if (found === "failed") {
+			if (!this.failSaid) console.error("cmx2: lsof could not be started this time; job ports keep their last value until a sweep answers");
+			this.failSaid = true;
 			return;
 		}
 		if (found === "slow") {

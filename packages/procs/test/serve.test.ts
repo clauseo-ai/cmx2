@@ -185,6 +185,33 @@ test("an lsof that hangs is killed at the timeout, said once, and the sweep keep
 	}
 });
 
+test("an lsof that exists but fails to start is tried again next sweep; only a missing lsof turns the sweep off", async () => {
+	// a bad interpreter makes the start fail (ENOENT from the spawn) while the file is there, as EAGAIN or EMFILE would
+	const broken = fakeLsof("lsof-broken", "");
+	writeFileSync(broken, "#!/nonexistent/interpreter\n");
+	const said: string[] = [];
+	const error = console.error;
+	console.error = (...a: unknown[]) => void said.push(a.join(" "));
+	const p5 = new Procs({ dataDir: join(root, "data-broken"), killGrace: 500, portSweepMs: 50, lsof: broken });
+	const p6 = new Procs({ dataDir: join(root, "data-missing"), killGrace: 500, portSweepMs: 50, lsof: join(root, "no-such-lsof") });
+	try {
+		const a = p5.spawn({ command: "sleep 30", sessionID: "ses_x", origin: "model" });
+		const b = p6.spawn({ command: "sleep 30", sessionID: "ses_y", origin: "model" });
+		started.push(a.pid, b.pid);
+		await until(() => p5.sweeps >= 3, "three sweeps past a failed start", 3000);
+		expect(p5.sweeping).toBe(true);
+		expect(said.filter((s) => s.includes("could not be started this time")).length).toBe(1);
+		await until(() => !p6.sweeping, "the sweep to turn off without lsof", 3000);
+		await Bun.sleep(200);
+		expect(p6.sweeps).toBe(1);
+		expect(said.filter((s) => s.includes("lsof is not installed")).length).toBe(1);
+	} finally {
+		console.error = error;
+		await p5.stopAll();
+		await p6.stopAll();
+	}
+});
+
 test("stop during a sweep: the answer that lands after stop changes nothing and no sweep follows", async () => {
 	const lsof = fakeLsof("lsof-slow", 'sleep 0.4; exec lsof "$@"');
 	const own: ProcEvent[] = [];

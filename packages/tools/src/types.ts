@@ -99,7 +99,7 @@ export interface ProcSummary {
 	exitCode: number | null;
 	/** total output bytes so far; pass as cursor to read only what is new */
 	cursor: number;
-	/** tcp ports the process group listens on (looked up on demand) */
+	/** tcp ports the process group listens on: a job's are swept every few seconds while it runs, a pty's looked up when its session's processes are read */
 	ports: number[];
 	/** started with serve: a dev server or preview the person will open, not waited on */
 	serve: boolean;
