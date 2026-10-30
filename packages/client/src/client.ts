@@ -445,7 +445,7 @@ export function createClient(opts: ClientOptions) {
 				parked?: {
 					/** agents under it still working or queued */
 					agents: number;
-					/** background jobs that will notify it */
+					/** background jobs that will notify it; serve jobs never count */
 					jobs: number;
 				};
 			} | {
@@ -914,6 +914,8 @@ export function createClient(opts: ClientOptions) {
 				on_pattern?: string;
 				on_port?: number;
 			};
+			/** a dev server or preview the person will open, left running; never counts in parked.jobs */
+			serve?: boolean;
 		}, o?: CallOptions) =>
 			call<ProcessInfo>("POST", `/session/${encodeURIComponent(params.sessionID)}/procs`, undefined, body, o),
 		/** the session's jobs and ptys, ports refreshed */

@@ -81,6 +81,11 @@ export interface ProcSpawn {
 	/** survives daemon restart; the pid is journaled and reported at the next start */
 	detach?: boolean;
 	notify?: ProcNotify;
+	/**
+	 * a dev server or preview the person will open, left running (a server started only to test against is a plain job):
+	 * it gets no default notify and never counts as a job the session waits on, even with a notify still armed
+	 */
+	serve?: boolean;
 }
 
 export interface ProcSummary {
@@ -94,8 +99,10 @@ export interface ProcSummary {
 	exitCode: number | null;
 	/** total output bytes so far; pass as cursor to read only what is new */
 	cursor: number;
-	/** tcp ports the process group listens on (looked up on demand) */
+	/** tcp ports the process group listens on: a job's are swept every few seconds while it runs, a pty's looked up when its session's processes are read */
 	ports: number[];
+	/** started with serve: a dev server or preview the person will open, not waited on */
+	serve: boolean;
 	keep?: string;
 	detached?: boolean;
 	origin: "model" | "user";

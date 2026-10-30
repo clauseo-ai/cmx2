@@ -78,6 +78,8 @@ const PLANS: Record<string, Call[][]> = {
 	spawnmid: [[{ name: "spawn", input: { brief: "mid turn kid", name: "mid_kid", model: "sonnet" } }], []],
 	// a job that will notify the session when it exits
 	bgjob: [[{ name: "shell", input: { command: "sleep 30", background: true, notify: { on_exit: true } } }], []],
+	// a serve job (a dev server for the person), even with a notify armed: nothing waits on it
+	servejob: [[{ name: "shell", input: { command: "sleep 30", serve: true, notify: { on_port: 1 } } }], []],
 	// a parent waiting on its helpers asks for the same wait again and again
 	waits: [[{ name: "wait", input: { timeout_ms: 1000 } }], [{ name: "wait", input: { timeout_ms: 1000 } }], [{ name: "wait", input: { timeout_ms: 1000 } }], []],
 };
@@ -85,7 +87,7 @@ function script(body: any): Block[] {
 	if (!body.tools?.length) return [{ type: "text", text: "a title" }];
 	const messages: any[] = body.messages ?? [];
 	// the newest tag in the conversation
-	const planned = (JSON.stringify(messages).match(/\[(checkonce|checktwice|checkreset|waits|bgjob|spawnmid)\] [\w-]+/g) ?? []).at(-1);
+	const planned = (JSON.stringify(messages).match(/\[(checkonce|checktwice|checkreset|waits|bgjob|servejob|spawnmid)\] [\w-]+/g) ?? []).at(-1);
 	if (planned) {
 		const at = messages.map((m) => JSON.stringify(m)).findLastIndex((t) => t.includes(planned));
 		const step = messages.slice(at + 1).filter((m) => m.role === "assistant").length;
@@ -1012,6 +1014,16 @@ describe("the prompt cache ttl follows the session's waits", () => {
 		const ttls = ttlsFor(`${tag}-job`);
 		expect(ttls[0]!.every((t) => t === "5m")).toBe(true);
 		expect(all(ttls.slice(-1), "1h")).toBe(true);
+	}, 60_000);
+
+	test("a serve job, even with a notify armed, leaves the session at 5m", async () => {
+		const tag = `ttl-${nonce()}`;
+		const id = await newSession("ttl-serve");
+		await prompt(id, `[servejob] ${tag} one`);
+		await prompt(id, `${tag} two`);
+		expect(d.procs.list({ sessionID: id }).some((p) => p.serve && p.status === "running")).toBe(true);
+		expect(all(ttlsFor(tag), "5m")).toBe(true);
+		expect(d.store.session(id)!.cache_ttl).toBeFalsy();
 	}, 60_000);
 
 	test("a context past 100k tokens switches a root session to 1h", async () => {

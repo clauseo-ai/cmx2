@@ -24,7 +24,7 @@ export const SessionStatusIdle = Type.Object(
 			queued: Type.Optional(Type.Integer({ description: "prompts an abort left waiting (GET /session/:id/queue lists them; loop runs them)" })),
 			parked: Type.Optional(
 				Type.Object(
-					{ agents: Type.Integer({ description: "agents under it still working or queued" }), jobs: Type.Integer({ description: "background jobs that will notify it" }) },
+					{ agents: Type.Integer({ description: "agents under it still working or queued" }), jobs: Type.Integer({ description: "background jobs that will notify it; serve jobs never count" }) },
 					{ description: "the turn has ended and the session waits on these; a report or a job notice wakes it" },
 				),
 			),
@@ -303,7 +303,25 @@ export const ProcessInfo = Type.Object(
 		kind: Type.Union([Type.Literal("pty"), Type.Literal("job")]),
 		status: Type.Union([Type.Literal("running"), Type.Literal("exited")]),
 		exitCode: Type.Union([Type.Integer(), Type.Null()]),
-		ports: Type.Array(Type.Integer(), { description: "tcp ports the process group listens on, as last looked up" }),
+		ports: Type.Array(Type.Integer(), {
+			description:
+				"tcp ports the job's own process group listens on, as last looked up (a server in another group, under docker or setsid, shows []). kept fresh for jobs by a sweep every few seconds while any job runs, and a change goes out as process.updated; a pty's are looked up when its session's procs are read",
+		}),
+		serve: Type.Boolean({
+			description:
+				"started with serve: a dev server or preview the person will open, left running. the session is not waiting on it: it never counts in parked.jobs, even with a notify still armed",
+		}),
+		notify: Type.Union(
+			[
+				Type.Object({
+					on_exit: Type.Optional(Type.Boolean()),
+					on_pattern: Type.Optional(Type.String()),
+					on_port: Type.Optional(Type.Integer()),
+				}),
+				Type.Null(),
+			],
+			{ description: "the notifications that can still fire: on_port goes once it fired, everything once the process exited; null when none" },
+		),
 		origin: Type.Union([Type.Literal("model"), Type.Literal("user")]),
 		startedAt: Type.Number(),
 		endedAt: Type.Optional(Type.Number()),
@@ -588,7 +606,7 @@ export const EVENTS = {
 	"pty.exited": event("a terminal's process exited", { id: Type.String(), exitCode: Type.Integer() }),
 	"pty.deleted": event("a terminal was closed and forgotten", { id: Type.String() }),
 	"process.started": event("a job or pty started", { process: ProcessInfo }),
-	"process.updated": event("a process changed (title, size, keep)", { process: ProcessInfo }),
+	"process.updated": event("a process changed (title, size, keep, the ports it listens on, what notify is still armed)", { process: ProcessInfo }),
 	"process.exited": event("a process exited", { process: ProcessInfo }),
 	"process.deleted": event("a process was forgotten", { process: ProcessInfo }),
 	"process.notify": event("a background job reported (exit, a matching line, a port opening); the owning session gets it as a turn message", {
@@ -1163,6 +1181,7 @@ export const ROUTES: RouteDef[] = [
 			keep: Type.Optional(Type.String({ description: "survives session end under this name" })),
 			detach: Type.Optional(Type.Boolean({ description: "survives daemon restart" })),
 			notify: Type.Optional(Type.Object({ on_exit: Type.Optional(Type.Boolean()), on_pattern: Type.Optional(Type.String()), on_port: Type.Optional(Type.Integer()) })),
+			serve: Type.Optional(Type.Boolean({ description: "a dev server or preview the person will open, left running; never counts in parked.jobs" })),
 		}),
 		response: ProcessInfo,
 		status: 201,

@@ -162,6 +162,7 @@ format: slug, what happened, the fix or the rule.
 
 - **bun has native ptys.** `Bun.spawn(argv, { terminal: { cols, rows, data(term, bytes) {} } })` on bun 1.3.14; the child leads its own session, so its pgid is its pid and `process.kill(-pid)` takes the group. piped jobs need `detached: true` for the same. no node-pty, no native addon.
 - **a login shell in a pty is slow to answer.** `$SHELL -l` reads the user's rc files first (hundreds of ms on a typical zsh); a read that waits for 150 ms of quiet returns the echoed input before the answer. tests wait for content, not for quiet.
+- **`lsof -g` takes a list, and its exit code means nothing there.** `-g 1,2,3` covers many groups in one run (the port sweep's one lsof); with `-Fgn` each process's `g` line comes before its `n` lines. it exits 1 when any listed group has no match, even when others printed ports, so read the output and treat only a failed start or a timeout as no answer.
 - **`lsof -g <pgid>` needs `-a`** to and the tcp filter with the group filter: `lsof -nP -iTCP -sTCP:LISTEN -a -g <pgid> -Fn`. without it lsof ors them and lists every listener on the machine.
 - **one process journal per daemon.** two daemons may share a data dir (the run lock allows it), so the journal is `<data>/procs/<daemon pid>.json`, not one shared `procs.json`; the sweep reads only journals whose daemon is dead (pid plus `ps -o lstart` start time, so a reused pid is not mistaken for the old daemon). a journaled child is the same process only when its start time matches too.
 

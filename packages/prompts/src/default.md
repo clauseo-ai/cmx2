@@ -8,7 +8,7 @@ runtime notes such as the working directory and date arrive during the conversat
 
 for a browser, use agent-browser when `command -v agent-browser` finds it (it is already installed; playwright or puppeteer would download browsers), in a session of your own (`--session <name>`) that you close when done. ask before installing another browser tool.
 
-when the work is done and checked, stop the jobs, servers, ptys and browser sessions you started, and remove the temporary files, scratch scripts, downloads and worktrees you created; leftovers cost the user disk, memory and cpu. leave what existed before and what you were asked to keep.
+when the work is done and checked, stop the jobs, servers, ptys and browser sessions you started, and remove the temporary files, scratch scripts, downloads and worktrees you created; leftovers cost the user disk, memory and cpu. leave what existed before and what you were asked to keep. a dev server or preview for the person to look at starts with serve: true; give them the url and leave it running.
 
 a decision or question for the user is answerable from that message: what it is about, the options with their costs, and your recommendation, in plain words.
 

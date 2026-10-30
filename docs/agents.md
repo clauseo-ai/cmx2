@@ -21,7 +21,8 @@ and transcript, a path in the tree (`/root/<name>[/<child>]`) and a model from t
   nothing is killed because it finished.
 - **reports wake the parent.** an idle parent (the root or any agent with children) starts a turn when a
   report arrives. the root parks between turns while its agents work, and `session.status` says
-  `{type: "idle", parked: {agents, jobs}}`.
+  `{type: "idle", parked: {agents, jobs}}`. `jobs` counts background jobs that will notify the session;
+  a job started with `serve: true` (a dev server left running for a person) never counts.
 - **the transcript is the truth.** agents, mailboxes and paths live in sqlite. a loaded session is a cache,
   at most 4 idle ones stay loaded, and an idle one unused for 20 minutes is dropped too
   unless it is warming its prompt cache. after a daemon restart, a message to a parked agent reopens it from

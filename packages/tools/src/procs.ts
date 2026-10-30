@@ -32,7 +32,7 @@ export function describeNotify(n: { on_exit?: boolean; on_pattern?: string; on_p
 export function procLine(p: ProcSummary): string {
 	const state = p.status === "running" ? "running" : `exited ${p.exitCode ?? "?"}`;
 	const ports = p.ports.length ? `, ports ${p.ports.join(",")}` : "";
-	return `${p.id} pid ${p.pid} ${state}${ports}${p.keep ? `, keep ${p.keep}` : ""}: ${p.command}`;
+	return `${p.id} pid ${p.pid} ${state}${p.serve ? ", serve" : ""}${ports}${p.keep ? `, keep ${p.keep}` : ""}: ${p.command}`;
 }
 
 export function procTools(env: ToolEnv): Tool[] {
@@ -52,6 +52,7 @@ export function procTools(env: ToolEnv): Tool[] {
 				keep: Type.Optional(Type.String({ description: "name it to keep it alive after the session ends" })),
 				detach: Type.Optional(Type.Boolean({ description: "keep it alive across a daemon restart" })),
 				notify: Type.Optional(Notify),
+				serve: Type.Optional(Type.Boolean({ description: "a dev server or preview the person will open; not waited on. a server you start only to test against is a plain job; stop it when done." })),
 			}),
 			async execute(_id, params) {
 				const p = host(env).spawn({ ...params, cwd: params.cwd ?? env.cwd });
