@@ -8,7 +8,8 @@ import { EngineSession } from "../src/session.ts";
 
 /**
  * a server offered to top-level sessions only (sessions: "root"), through a real stdio server and the pool:
- * a helper's deferred tools, tool_search catalog, executable tools and run's lookup all go without it
+ * a helper's deferred tools, tool_search catalog, executable tools and nested-call lookup all go without it.
+ * and a flip of a server's caller or sessions setting reaches a session that already loaded its tool
  */
 
 const ECHO = [process.execPath, join(import.meta.dir, "../../tools/test/fixtures/mcp-echo.ts")];
@@ -32,13 +33,23 @@ async function session(pool: McpPool, scope: McpScope) {
 	});
 }
 
-const servers = (sessions: "all" | "root"): Record<string, McpServerConfig> => ({ box: { command: ECHO, sessions }, plain: { command: ECHO } });
+const servers = (sessions: "all" | "root", caller = false): Record<string, McpServerConfig> => ({ box: { command: ECHO, sessions, caller }, plain: { command: ECHO } });
+const pool = () => new McpPool({ dataDir: mkdtempSync(join(tmpdir(), "cmx2-rootmcp-")), version: "test", cwd: tmpdir() });
+/** what the echo server got from the agent's own box_echo, the tool object pi runs */
+async function agentCall(s: unknown): Promise<Record<string, any>> {
+	const t = ((s as any).syncTools() as Array<{ name: string; execute: (id: string, p: unknown) => Promise<any> }>).find((x) => x.name === "box_echo");
+	if (!t) return { missing: true };
+	const r = await t.execute("call_x", {});
+	return JSON.parse(r.content[0].text);
+}
 const mcpNames = (s: unknown, from: "deferredAll" | "executableTools") => {
 	const v = (s as any)[from]();
 	return [...(from === "deferredAll" ? v.keys() : v.map((t: { name: string }) => t.name))].filter((n: string) => n.endsWith("_echo")).sort();
 };
 
-test("a helper never reaches a sessions: root server's tools: not deferred, not searchable, not loadable, not through run", async () => {
+// run's helpers map to fixed tools (packages/tools/src/run.ts HELPERS), so a script cannot name an mcp tool at all
+// today; the nested-call lookup checked here is the path a future generic helper would take
+test("a helper never reaches a sessions: root server's tools: not deferred, not searchable, not loadable, not found by the nested-call lookup", async () => {
 	const pool = new McpPool({ dataDir: mkdtempSync(join(tmpdir(), "cmx2-rootmcp-")), version: "test", cwd: tmpdir() });
 	pool.configure(servers("root"));
 	await pool.ready();
@@ -75,5 +86,62 @@ test("a server switched from all to root drops a tool a helper had already loade
 	} finally {
 		kid.dispose();
 		await pool.close();
+	}
+}, 20_000);
+
+test("a loaded tool follows a caller flip: true to false stops sending the caller, false to true starts", async () => {
+	const p = pool();
+	p.configure(servers("all", true));
+	await p.ready();
+	const top = await session(p, rootScope);
+	try {
+		expect((top as any).loadTools(["box_echo"])).toEqual(["box_echo"]);
+		expect((await agentCall(top))._meta).toEqual({ "cmx2/caller": { ...who, callID: "call_x" } });
+		p.configure(servers("all", false));
+		await p.ready();
+		const off = await agentCall(top);
+		expect(off.name).toBe("echo");
+		expect(off._meta).toBeUndefined();
+		p.configure(servers("all", true));
+		await p.ready();
+		expect((await agentCall(top))._meta).toEqual({ "cmx2/caller": { ...who, callID: "call_x" } });
+	} finally {
+		top.dispose();
+		await p.close();
+	}
+}, 20_000);
+
+test("a helper's loaded tool leaves its agent tools on a switch to root and comes back on a switch to all", async () => {
+	const p = pool();
+	p.configure(servers("all"));
+	await p.ready();
+	const kid = await session(p, childScope);
+	try {
+		expect((kid as any).loadTools(["box_echo"])).toEqual(["box_echo"]);
+		expect((await agentCall(kid)).name).toBe("echo");
+		p.configure(servers("root"));
+		await p.ready();
+		expect(await agentCall(kid)).toEqual({ missing: true });
+		p.configure(servers("all"));
+		await p.ready();
+		expect((await agentCall(kid)).name).toBe("echo");
+	} finally {
+		kid.dispose();
+		await p.close();
+	}
+}, 20_000);
+
+test("an unchanged tool set keeps the agent's tool list as it is, step to step", async () => {
+	const p = pool();
+	p.configure(servers("all", true));
+	await p.ready();
+	const top = await session(p, rootScope);
+	try {
+		(top as any).loadTools(["box_echo", "plain_echo"]);
+		const first = (top as any).syncTools();
+		expect((top as any).syncTools()).toBe(first);
+	} finally {
+		top.dispose();
+		await p.close();
 	}
 }, 20_000);
