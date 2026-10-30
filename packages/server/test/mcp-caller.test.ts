@@ -7,7 +7,7 @@
  * run: bun test packages/server/test/mcp-caller.test.ts
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { DEFAULTS } from "@cmx2/engine/config";
@@ -90,6 +90,7 @@ afterAll(async () => {
 	expect(d.violations()).toBe(0);
 	await d.stop();
 	provider.stop(true);
+	rmSync(ROOT, { recursive: true, force: true });
 	if (CONFIG_DIR_BEFORE === undefined) delete process.env.CMX2_CONFIG_DIR;
 	else process.env.CMX2_CONFIG_DIR = CONFIG_DIR_BEFORE;
 });
