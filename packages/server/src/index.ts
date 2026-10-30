@@ -344,6 +344,8 @@ export function serve(opts: ServeOptions) {
 		s.dispose();
 		sessions.delete(id);
 		locks.release(id);
+		// a disposed session emits nothing, so clients hear here that it is no longer busy
+		publishStatus(id);
 	}
 
 	const host: Host = {
@@ -395,6 +397,7 @@ export function serve(opts: ServeOptions) {
 			if (s) {
 				s.dispose();
 				sessions.delete(id);
+				publishStatus(id);
 			}
 			locks.release(id);
 			await procs.reapSession(id);

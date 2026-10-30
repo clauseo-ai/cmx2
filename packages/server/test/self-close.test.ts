@@ -238,3 +238,45 @@ test("archiving a session stuck in a tool that ignores the abort finishes after 
 	expect((await api("/session/status"))[id]).toBeUndefined();
 	for (const r of held.splice(0)) r();
 }, 20_000);
+
+/** the session.status events for a session on the live stream, until stop() is called */
+function watchStatus(id: string) {
+	const ctl = new AbortController();
+	const seen: any[] = [];
+	const done = (async () => {
+		const res = await fetch(`${BASE}/global/event`, { headers: { "x-cmx2-directory": WORK }, signal: ctl.signal });
+		const reader = res.body!.getReader();
+		const dec = new TextDecoder();
+		let buf = "";
+		for (;;) {
+			const r = await reader.read().catch(() => ({ done: true, value: undefined }));
+			if (r.done) return;
+			buf += dec.decode(r.value, { stream: true });
+			let i: number;
+			while ((i = buf.indexOf("\n\n")) >= 0) {
+				const block = buf.slice(0, i);
+				buf = buf.slice(i + 2);
+				const data = block.split("\n").find((l) => l.startsWith("data: "));
+				if (!data) continue;
+				const parsed = JSON.parse(data.slice(6));
+				const ev = parsed.payload ?? parsed;
+				if (ev.type === "session.status" && ev.properties?.sessionID === id) seen.push(ev.properties.status);
+			}
+		}
+	})();
+	return { seen, stop: async () => (ctl.abort(), await done.catch(() => {})) };
+}
+
+test("a client watching events sees a forced abort turn the session idle", async () => {
+	const id = await newSession();
+	const watch = watchStatus(id);
+	await Bun.sleep(100);
+	const entered = inStuck();
+	await api(`/session/${id}/prompt`, { text: "[stuckonly] go" });
+	await entered;
+	await until("busy is seen", async () => watch.seen.some((st) => st.type === "busy"), 5_000);
+	expect(await api(`/session/${id}/abort`, {})).toBe(true);
+	await until("idle is seen after busy", async () => watch.seen.at(-1)?.type === "idle", 3_000);
+	await watch.stop();
+	for (const r of held.splice(0)) r();
+}, 20_000);
