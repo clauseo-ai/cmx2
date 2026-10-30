@@ -1102,6 +1102,9 @@ export class EngineSession {
 	}
 
 	private onAgentEvent(e: AgentEvent) {
+		// an ended session writes nothing more: a turn that winds down after dispose (a tool that ignored the abort)
+		// would append to a transcript a newer session now owns. its unanswered call reopens as "No result provided"
+		if (this.disposed) return;
 		switch (e.type) {
 			case "message_update": {
 				if (this.firstTokenAt === null) {
@@ -1214,7 +1217,8 @@ export class EngineSession {
 				} else if (outcome !== "aborted") this.maybeEscalate();
 				const from = this.turnFrom;
 				this.setState("idle");
-				this.opts.onTurn?.({ type: "end", from, to: this.transcript.count, outcome, stopReason, ...(error ? { error } : {}), ...(this.refusal ? { refusal: this.refusal.classifier } : {}), files: [...this.touched] });
+				// a session disposed mid-turn (its turn did not stop in time) was ended for good: a late end reports nothing
+				if (!this.disposed) this.opts.onTurn?.({ type: "end", from, to: this.transcript.count, outcome, stopReason, ...(error ? { error } : {}), ...(this.refusal ? { refusal: this.refusal.classifier } : {}), files: [...this.touched] });
 				this.aborting = false;
 				this.turnError = undefined;
 				const media = outcome === "errored" ? mediaRefusal(last?.errorMessage) : undefined;
@@ -1337,7 +1341,8 @@ export class EngineSession {
 		if (state === "idle" && !this.agent.hasQueuedMessages()) this.waiting = this.waiting.filter((w) => this.held.has(w));
 		this.emit("session.status", { status: state === "busy" ? { type: "busy", queued: this.waiting.length } : { type: "idle", ...(this.waiting.length ? { queued: this.waiting.length } : {}) } });
 		if (state === "idle") {
-			this.opts.afterTurn?.();
+			// a disposed session's lock was released when it was ended; it may belong to a newer session by now
+			if (!this.disposed) this.opts.afterTurn?.();
 			this.emit("session.idle", {});
 		}
 	}
@@ -1658,7 +1663,7 @@ export class EngineSession {
 		const from = this.turnFrom;
 		this.returnQueuedMail();
 		this.setState("idle");
-		this.opts.onTurn?.({ type: "end", from, to: this.transcript.count, outcome: "errored", stopReason: "error", error, files: [...this.touched] });
+		if (!this.disposed) this.opts.onTurn?.({ type: "end", from, to: this.transcript.count, outcome: "errored", stopReason: "error", error, files: [...this.touched] });
 		this.aborting = false;
 		this.turnError = undefined;
 	}
@@ -2834,10 +2839,28 @@ export class EngineSession {
 		this.emit("session.model", { model: this.modelRef });
 	}
 
-	async abort() {
+	/**
+	 * stops the turn and waits for it to go idle. with timeoutMs the wait gives up after that long and answers false:
+	 * a tool that ignores the abort signal holds the turn open, and the caller ends the session instead of waiting
+	 */
+	async abort(timeoutMs?: number): Promise<boolean> {
 		if (this.state === "busy") this.aborting = true;
 		this.agent.abort();
-		await this.agent.waitForIdle();
+		if (timeoutMs === undefined) {
+			await this.agent.waitForIdle();
+			return true;
+		}
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				this.agent.waitForIdle().then(() => true),
+				new Promise<boolean>((resolve) => {
+					timer = setTimeout(() => resolve(false), timeoutMs);
+				}),
+			]);
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 
 	async idle() {

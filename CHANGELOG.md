@@ -2,6 +2,16 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
+## unreleased
+
+contract version 7. no shape changes: `POST /session/:id/agents/close` answers 400 for a target that is the session itself or one of its ancestors. `/interrupt` answers as before.
+
+### changed
+- `POST /session/:id/agents/close` answers 400 `BadRequestError` ("you can't close yourself or an ancestor; end your turn instead.") when the target is the calling session or one of its ancestors; close such an agent as a session above it.
+
+### fixed
+- an agent that closed itself or an ancestor deadlocked its tree: its turn never ended, and any close, interrupt or abort that reached it hung too. close now refuses such a target at once ("you can't close yourself or an ancestor; end your turn instead."), and so does the agents tool's interrupt, the root included (the route still lets a client stop the root as before). the agents tool stops waiting when its turn is stopped, and a helper in `wait` or `question` stops without queueing for its slot. close, interrupt, abort, archive and shutdown wait at most 5 s for a stopped turn to go idle (the agents of one depth, and shutdown's sessions, together), then end its session anyway: a helper is closed or marked interrupted (a message reopens it), a root leaves memory with its jobs kept and the questions it read settled, and a turn that finishes late writes nothing and changes nothing.
+
 ## 0.9.4 - 2026-10-30
 
 contract version 7. no shape changes.

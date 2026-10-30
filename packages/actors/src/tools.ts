@@ -32,6 +32,30 @@ function fail(actors: Actors, sessionID: string, tool: string, e: unknown): Tool
 	throw e;
 }
 
+/** a verb's answer, or an error as soon as the turn is stopped: the verb goes on, the stopped turn does not wait for it */
+function orStop<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return work;
+	const stopped = () => new Error("the turn was stopped before the call finished; it goes on without you");
+	if (signal.aborted) {
+		work.catch(() => {});
+		return Promise.reject(stopped());
+	}
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(stopped());
+		signal.addEventListener("abort", onAbort, { once: true });
+		work.then(
+			(v) => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(v);
+			},
+			(e) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(e);
+			},
+		);
+	});
+}
+
 function line(a: AgentInfo): string {
 	return `${a.path} (id ${a.id}): ${a.seat ?? "agent"} on ${a.model?.split("/").pop() ?? "?"} at ${a.effort ?? "?"}, ${a.state}`;
 }
@@ -153,7 +177,7 @@ export function agentTools(actors: Actors, sessionID: string): Tool[] {
 			body: Type.Optional(Type.String({ description: "the follow-up, for return_to" })),
 			path_prefix: Type.Optional(Type.String({ description: "list only this part of the tree" })),
 		}),
-		async execute(_id, params) {
+		async execute(_id, params, signal) {
 			try {
 				const action = params.action ?? "list";
 				if (action === "list") {
@@ -164,11 +188,11 @@ export function agentTools(actors: Actors, sessionID: string): Tool[] {
 				}
 				if (!params.target) return { content: [text(`${action} needs a target`)], details: { error: "BadRequestError" }, isError: true };
 				if (action === "close") {
-					const r = await actors.close(sessionID, params.target);
+					const r = await orStop(actors.close(sessionID, params.target), signal);
 					return ok(r.already_terminated ? `${r.path} was already closed.` : `closed ${r.closed.join(", ")} (was ${r.previous_state}). transcripts stay on disk.`, { ...r, ...(r.already_terminated ? { error: "already_terminated" } : {}) });
 				}
 				if (action === "interrupt") {
-					const r = await actors.interrupt(sessionID, params.target);
+					const r = await orStop(actors.interrupt(sessionID, params.target, { inTurn: true }), signal);
 					return ok(r.interrupted ? `interrupted ${r.path}; it keeps its history and a message continues it.` : `${r.path} was not running (${r.previous_state}).`, r);
 				}
 				if (!params.body) return { content: [text("return_to needs a body: the follow-up")], details: { error: "BadRequestError" }, isError: true };

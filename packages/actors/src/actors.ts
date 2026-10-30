@@ -35,6 +35,8 @@ export function excludeFor(options: { exclude_tools?: string[]; read_only?: bool
 
 /** an attached file larger than this is cut in the brief */
 const ATTACH_MAX = 20_000;
+/** how long close and interrupt wait for a stopped turn to go idle before they end its session anyway */
+export const IDLE_WAIT_MS = 5_000;
 
 export class ActorError extends Error {
 	constructor(
@@ -69,6 +71,8 @@ export interface Host {
 	/** opens the session (reviving it from its transcript) and starts a turn for its waiting mail */
 	wake(id: string): Promise<boolean>;
 	interrupt(id: string): Promise<void>;
+	/** a session whose turn did not stop in time leaves memory, its processes kept; the next message reopens it */
+	evict?(id: string): void;
 	/** transcript entries at positions (from, to] */
 	messages(id: string, from: number, to?: number): Promise<any[]>;
 	directory(id: string): string | undefined;
@@ -106,6 +110,8 @@ export interface ActorsOptions {
 	faults?: string[];
 	/** how long a parked child's cache is kept warm, and a parked root's on the 5m ttl */
 	warmHorizonMs?: number;
+	/** how long close and interrupt wait for a stopped turn to go idle (IDLE_WAIT_MS); tests shorten it */
+	idleWaitMs?: number;
 	/** how long a parked root's cache is kept warm on the 1h ttl */
 	rootWarmHorizonMs?: number;
 	/** whether the profile blacklists a model for work in a directory (providers.<id>.blacklist) */
@@ -615,14 +621,30 @@ export class Actors {
 		}
 	}
 
-	private async reclaim(a: AgentRow) {
+	/** takes a lent slot back, queueing first in line when every slot is taken; a stopped turn does not queue for one */
+	private async reclaim(a: AgentRow, signal?: AbortSignal) {
 		if (!this.lent.delete(a.id)) return;
 		const run = this.runningOf(a.root_id);
 		if (run.size < this.childSlots()) {
 			run.add(a.id);
 			return;
 		}
-		await new Promise<void>((resolve) => this.queueOf(a.root_id).unshift({ id: a.id, resolve }));
+		if (signal?.aborted) return;
+		const q = this.queueOf(a.root_id);
+		await new Promise<void>((resolve) => {
+			const entry = { id: a.id, resolve: () => done() };
+			const onAbort = () => {
+				const i = q.indexOf(entry);
+				if (i >= 0) q.splice(i, 1);
+				done();
+			};
+			const done = () => {
+				signal?.removeEventListener("abort", onAbort);
+				resolve();
+			};
+			signal?.addEventListener("abort", onAbort, { once: true });
+			q.unshift(entry);
+		});
 	}
 
 	// ---------- the five verbs ----------
@@ -952,7 +974,7 @@ export class Actors {
 			};
 			set!.add(w);
 		});
-		await this.reclaim(sender);
+		await this.reclaim(sender, signal);
 		const waited = Date.now() - t0;
 		if (!got) {
 			this.metric(sender, "sibling_deadlock", undefined, { timeout_ms: timeout, tool: "wait", ...(cid ? { correlation_id: cid } : {}) });
@@ -1001,7 +1023,7 @@ export class Actors {
 		} finally {
 			if (onAbort) signal?.removeEventListener("abort", onAbort);
 			this.asking.delete(id);
-			await this.reclaim(a);
+			await this.reclaim(a, signal);
 			const now = this.rows.get(a.id);
 			if (now?.state === "working" && now.cause === "asking" && !this.isAsking(a.id)) this.setState(a.id, "working", { cause: null });
 		}
@@ -1030,14 +1052,15 @@ export class Actors {
 			throw e;
 		}
 		if (t.depth === 0) throw new ActorError("BadRequestError", 400, "the root is the session itself; archive the session to end it");
+		// a close waits for the target's turn to end, and the caller's own turn cannot end while it waits on the close
+		if (t.id === sender.id || isAncestor(t.path, sender.path)) throw new ActorError("BadRequestError", 400, "you can't close yourself or an ancestor; end your turn instead.");
 		if (t.state === "closed") return { path: t.path, previous_state: "closed", already_terminated: true, closed: [] };
 		const previous = t.state;
 		const victims = this.rows
 			.tree(t.root_id)
 			.filter((a) => a.state !== "closed" && (a.id === t.id || isAncestor(t.path, a.path)))
 			.sort((a, b) => b.depth - a.depth);
-		const cause = opts.cause ?? "closed";
-		for (const v of victims) await this.shut(v, sender.id, cause);
+		await this.shutAll(victims, sender.id, opts.cause ?? "closed");
 		const parent = t.parent_id ? this.rows.get(t.parent_id) : undefined;
 		// the closer knows; a parent learns only when someone else (a sibling, the agent itself) closed its child
 		if (parent && !opts.silent && sender.id !== parent.id && !isAncestor(sender.path, t.path)) {
@@ -1048,19 +1071,108 @@ export class Actors {
 		return { path: t.path, previous_state: previous, already_terminated: false, closed: victims.map((v) => v.path) };
 	}
 
+	/** shuts agents leaves first, one depth at a time; the agents of one depth together, so stuck turns cost one wait per depth */
+	private async shutAll(victims: AgentRow[], by: string, cause: string) {
+		const depths = [...new Set(victims.map((v) => v.depth))].sort((x, y) => y - x);
+		for (const d of depths) await Promise.all(victims.filter((v) => v.depth === d).map((v) => this.shut(v, by, cause)));
+	}
+
 	private async shut(v: AgentRow, by: string, cause: string) {
 		const prev = v.state;
+		let forced = false;
 		if (this.host.state(v.id) === "busy") {
 			this.interrupting.set(v.id, { by, cause: "closed" });
-			await this.host.interrupt(v.id).catch(() => {});
+			forced = !(await this.stopTurn(v.id));
 		}
-		this.runningOf(v.root_id).delete(v.id);
-		const q = this.queueOf(v.root_id);
-		for (let i = q.length - 1; i >= 0; i--) if (q[i]!.id === v.id && !q[i]!.resolve) q.splice(i, 1);
+		if (forced) this.forget(v);
+		else {
+			this.runningOf(v.root_id).delete(v.id);
+			const q = this.queueOf(v.root_id);
+			for (let i = q.length - 1; i >= 0; i--) if (q[i]!.id === v.id && !q[i]!.resolve) q.splice(i, 1);
+		}
 		this.setState(v.id, "closed", { cause, previous_state: prev, closed_at: Date.now() });
 		await this.host.end(v.id).catch(() => {});
 		this.host.publish(v.root_id, "agent.closed", { sessionID: v.root_id, agent: this.info(this.rows.get(v.id)!), cause });
+		if (forced) this.refreshParked(v.id);
 		this.grantNext(v.root_id);
+	}
+
+	/**
+	 * stops a busy agent's turn and waits for it to go idle, at most idleWaitMs. false when it did not: a tool that
+	 * ignores the abort signal holds the turn open, and nothing that waits on it may wait for ever
+	 */
+	private async stopTurn(id: string): Promise<boolean> {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const idle = this.host.interrupt(id).then(
+			() => true,
+			() => true,
+		);
+		const late = new Promise<boolean>((resolve) => {
+			timer = setTimeout(() => resolve(false), this.opts.idleWaitMs ?? IDLE_WAIT_MS);
+		});
+		try {
+			const ok = await Promise.race([idle, late]);
+			if (!ok) console.error(`cmx2: ${this.rows.get(id)?.path ?? id} did not stop within ${this.opts.idleWaitMs ?? IDLE_WAIT_MS} ms; its session is ended`);
+			return ok;
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	/**
+	 * drops what the runtime holds for an agent whose turn was abandoned: its slot, its queue entries, its waits and
+	 * questions. the session it ran in is ended right after, and a disposed session reports no turn end, so a turn that
+	 * finishes late changes nothing here
+	 */
+	private forget(a: AgentRow) {
+		this.interrupting.delete(a.id);
+		this.runningOf(a.root_id).delete(a.id);
+		this.lent.delete(a.id);
+		const q = this.queueOf(a.root_id);
+		for (let i = q.length - 1; i >= 0; i--) {
+			if (q[i]!.id !== a.id) continue;
+			const [gone] = q.splice(i, 1);
+			gone!.resolve?.();
+		}
+		for (const w of [...(this.waiters.get(a.id) ?? [])]) w.resolve(undefined);
+		this.waiters.delete(a.id);
+		for (const ask of [...this.asking.values()]) {
+			if (ask.childID !== a.id) continue;
+			this.asking.delete(ask.id);
+			ask.reject(new Error("the turn was stopped while the question waited for an answer"));
+		}
+		this.settleUnanswered(a);
+	}
+
+	/**
+	 * a turn that did not stop within idleWaitMs of an interrupt: the agent is marked interrupted and its session
+	 * ended, so a message reopens it from its transcript. its spawner hears it unless an ancestor stopped it
+	 */
+	async forceInterrupted(id: string, by: string) {
+		const a = this.rows.get(id);
+		if (!a || a.state === "closed") return;
+		if (a.depth === 0) {
+			// the root's turn end is suppressed with its session, so its bookkeeping happens here; its jobs keep running
+			this.interrupting.delete(a.id);
+			this.settleUnanswered(a);
+			this.setState(a.id, "interrupted", { cause: "interrupted" });
+			this.host.evict?.(a.id);
+			this.refreshParked(a.id);
+			this.grantNext(a.root_id);
+			return;
+		}
+		this.forget(a);
+		this.setState(a.id, "interrupted", { cause: "interrupted" });
+		await this.host.end(a.id).catch(() => {});
+		const parent = a.parent_id ? this.rows.get(a.parent_id) : undefined;
+		const stopper = by === "user" ? undefined : this.rows.get(by);
+		if (parent && by !== parent.id && !(stopper && isAncestor(stopper.path, a.path))) {
+			const who = by === "user" ? "the user" : (stopper?.path ?? by);
+			const body = reportBody({ header: `agent ${a.path} reached status: partial\n${who} stopped its turn, and it did not stop within ${Math.round((this.opts.idleWaitMs ?? IDLE_WAIT_MS) / 1000)} s, so its session was ended. message it to continue`, body: "", warn: false, childID: a.id });
+			this.post(parent, { kind: "report", from: this.rows.get(a.id)!, body, wake: true, system: true, meta: { label: "partial", child: a.id, forced: true } });
+		}
+		this.refreshParked(a.id);
+		this.grantNext(a.root_id);
 	}
 
 	/** a person stopped a subagent's turn from a client; its spawner gets a partial report */
@@ -1069,9 +1181,12 @@ export class Actors {
 	}
 
 	/** stops an agent's current turn; it stays parked-resumable with its transcript, and a message continues it */
-	async interrupt(senderID: string, target: string): Promise<{ path: string; previous_state: AgentState; interrupted: boolean }> {
+	async interrupt(senderID: string, target: string, opts: { inTurn?: boolean } = {}): Promise<{ path: string; previous_state: AgentState; interrupted: boolean }> {
 		const sender = this.rowOf(senderID);
 		const t = this.resolve(sender, target);
+		// an interrupt waits for the target's turn to end, and a caller inside its own turn cannot end that turn while it
+		// waits. a client calling the route is outside every turn, so the root may still stop itself there
+		if (opts.inTurn && (t.id === sender.id || isAncestor(t.path, sender.path))) throw new ActorError("BadRequestError", 400, "you can't interrupt yourself or an ancestor; end your turn instead.");
 		if (t.depth === 0 && t.id !== sender.id) throw new ActorError("BadRequestError", 400, "the root's turn is the user's to stop");
 		const previous = t.state;
 		if (this.host.state(t.id) !== "busy") {
@@ -1084,7 +1199,7 @@ export class Actors {
 			return { path: t.path, previous_state: previous, interrupted: false };
 		}
 		this.interrupting.set(t.id, { by: sender.id, cause: "interrupted" });
-		await this.host.interrupt(t.id);
+		if (!(await this.stopTurn(t.id))) await this.forceInterrupted(t.id, sender.id);
 		return { path: t.path, previous_state: previous, interrupted: true };
 	}
 
@@ -1472,7 +1587,7 @@ export class Actors {
 			.tree(a.root_id)
 			.filter((c) => c.state !== "closed" && isAncestor(a.path, c.path))
 			.sort((x, y) => y.depth - x.depth);
-		for (const v of victims) await this.shut(v, a.id, "session_ended");
+		await this.shutAll(victims, a.id, "session_ended");
 	}
 
 	/**
