@@ -3150,6 +3150,15 @@ export function serve(opts: ServeOptions) {
 			await publishSession("session.updated", r[1]!);
 			return json(info(row(r[1]!)));
 		}
+		if ((r = m(/^\/session\/([^/]+)\/title$/)) && method === "POST") {
+			const stored = row(r[1]!);
+			if (stored.source === "cmx") throw new HttpError(409, "ConflictError", `session ${r[1]} is history imported from cmx; it is read only here`);
+			const t = await titles.regenerate(r[1]!, req.signal);
+			if (!t) throw new HttpError(502, "TitleError", "no title model gave a title (or the session has no text yet); the title is unchanged");
+			await loadVcs([row(r[1]!)]);
+			return json(info(row(r[1]!)));
+		}
+		r = m(/^\/session\/([^/]+)$/);
 		if (r && method === "DELETE") {
 			// rule 15: a deleted thread is archived. its rows and transcript stay; listings leave it out
 			return json(await archive(r[1]!));

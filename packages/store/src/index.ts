@@ -906,6 +906,14 @@ export class Store {
 		};
 	}
 
+	/** the session's first message with this role that a read lists, with its parts */
+	firstMessage(sessionId: string, role: string): (MessageRow & { parts: PartRow[] }) | undefined {
+		const archived = this.home(sessionId) === "archive";
+		const r = this.db.query(`select seq from ${archived ? "archive" : "main"}.message where session_id = ? and role = ?${archived ? "" : " and reverted = 0"} order by seq limit 1`).get(sessionId, role) as { seq: number } | null;
+		if (!r) return undefined;
+		return this.messages(sessionId, { limit: 1, before: r.seq + 1 }).rows[0];
+	}
+
 	// ---------- m7: context fill, reverts, snapshots, recall ----------
 
 	/** what a session's context holds now and where it compacts (a10); written after every step and compaction */

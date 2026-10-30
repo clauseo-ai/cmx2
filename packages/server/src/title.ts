@@ -1,5 +1,5 @@
 import type { Config } from "@cmx2/engine/config";
-import { generateTitle } from "@cmx2/engine/title";
+import { type GeneratedTitle, generateTitle } from "@cmx2/engine/title";
 import type { Store } from "@cmx2/store";
 
 /** the title a session gets at create when nobody named it; only these are ever replaced */
@@ -46,4 +46,53 @@ export class Titles {
 			.catch((e) => console.error(`cmx2: title for ${id} failed: ${e instanceof Error ? e.message : String(e)}`))
 			.finally(() => this.running.delete(id));
 	}
+
+	/**
+	 * a new title for a session from what it is about now, asked for by a client: the same structured
+	 * request, over the session's first user message and its latest text. it replaces any title, given or
+	 * generated. undefined when the session is read-only history or every title model failed.
+	 */
+	async regenerate(id: string, signal?: AbortSignal): Promise<GeneratedTitle | undefined> {
+		const row = this.deps.store.session(id);
+		if (!row || row.source === "cmx") return undefined;
+		const text = digest(this.deps.store, id);
+		if (!text) return undefined;
+		const t = await generateTitle(this.deps.configFor(row.directory), { text, sessionModel: row.model, ...(signal ? { signal } : {}) });
+		if (!t || !this.deps.store.setSessionTitle(id, t.title)) return undefined;
+		this.deps.store.addSessionCost(id, t.cost);
+		this.deps.onTitle(id, t.title, t.model, t.cost);
+		return t;
+	}
+}
+
+/** what a session is about, for a title: its first user message, then its latest user and assistant text, newest kept, within `max` characters */
+export function digest(store: Store, id: string, max = 4000): string {
+	const textOf = (parts: Array<{ type: string; data: string }>) =>
+		parts
+			.filter((p) => p.type === "text")
+			.map((p) => {
+				try {
+					const d = JSON.parse(p.data);
+					return d.synthetic || typeof d.text !== "string" ? "" : d.text;
+				} catch {
+					return "";
+				}
+			})
+			.join("\n")
+			.trim();
+	const recent = store.messages(id, { limit: 40 }).rows;
+	const firstUser = store.firstMessage(id, "user");
+	const head = firstUser ? `first message:\n${textOf(firstUser.parts).slice(0, 1500)}` : "";
+	const tail: string[] = [];
+	let room = max - head.length;
+	for (let i = recent.length - 1; i >= 0 && room > 0; i--) {
+		const m = recent[i]!;
+		if (m.id === firstUser?.id) continue;
+		const t = textOf(m.parts);
+		if (!t) continue;
+		const line = `${m.role}: ${t}`.slice(0, room);
+		tail.unshift(line);
+		room -= line.length + 1;
+	}
+	return [head, tail.length ? `latest:\n${tail.join("\n")}` : ""].filter(Boolean).join("\n\n");
 }

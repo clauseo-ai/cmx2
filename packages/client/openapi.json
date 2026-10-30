@@ -9522,6 +9522,84 @@
 				}
 			}
 		},
+		"/session/{sessionID}/title": {
+			"post": {
+				"operationId": "regenerateTitle",
+				"summary": "give the session a new title from what it is about now: one small structured request (the cheap title model, else the session's model) over its first user message and latest text. it replaces any title, given or generated, and answers with the session once session.updated is out. 502 when no title model gave one; the title is unchanged",
+				"parameters": [
+					{
+						"name": "sessionID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "ok",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/SessionInfo"
+								}
+							}
+						}
+					},
+					"400": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"401": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"404": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"409": {
+						"description": "BusyError (a turn is running) or ConflictError (already settled, imported history, a used client id)",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					},
+					"502": {
+						"description": "error",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/ErrorBody"
+								}
+							}
+						}
+					}
+				}
+			}
+		},
 		"/session/{sessionID}/children": {
 			"get": {
 				"operationId": "children",

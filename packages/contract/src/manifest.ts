@@ -969,6 +969,15 @@ export const ROUTES: RouteDef[] = [
 		response: SessionInfo,
 		errors: [409],
 	},
+	{
+		method: "POST",
+		path: "/session/:sessionID/title",
+		operationId: "regenerateTitle",
+		summary:
+			"give the session a new title from what it is about now: one small structured request (the cheap title model, else the session's model) over its first user message and latest text. it replaces any title, given or generated, and answers with the session once session.updated is out. 502 when no title model gave one; the title is unchanged",
+		response: SessionInfo,
+		errors: [409, 502],
+	},
 	{ method: "DELETE", path: "/session/:sessionID", operationId: "deleteSession", summary: "end a session: abort its turn, stop its processes (keep'd ones stay) and archive it. nothing is deleted; listings leave it out", response: Ok },
 	{ method: "GET", path: "/session/:sessionID/children", operationId: "children", summary: "sessions this one started (its subagents), newest first", response: Type.Array(SessionInfo), headers: Seq },
 	{

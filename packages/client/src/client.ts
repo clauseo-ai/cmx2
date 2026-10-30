@@ -488,6 +488,9 @@ export function createClient(opts: ClientOptions) {
 			};
 		}, o?: CallOptions) =>
 			call<SessionInfo>("PATCH", `/session/${encodeURIComponent(params.sessionID)}`, undefined, body, o),
+		/** give the session a new title from what it is about now: one small structured request (the cheap title model, else the session's model) over its first user message and latest text. it replaces any title, given or generated, and answers with the session once session.updated is out. 502 when no title model gave one; the title is unchanged */
+		regenerateTitle: (params: { sessionID: string }, o?: CallOptions) =>
+			call<SessionInfo>("POST", `/session/${encodeURIComponent(params.sessionID)}/title`, undefined, undefined, o),
 		/** end a session: abort its turn, stop its processes (keep'd ones stay) and archive it. nothing is deleted; listings leave it out */
 		deleteSession: (params: { sessionID: string }, o?: CallOptions) =>
 			call<true>("DELETE", `/session/${encodeURIComponent(params.sessionID)}`, undefined, undefined, o),
