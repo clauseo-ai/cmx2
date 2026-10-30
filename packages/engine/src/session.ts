@@ -1102,6 +1102,9 @@ export class EngineSession {
 	}
 
 	private onAgentEvent(e: AgentEvent) {
+		// an ended session writes nothing more: a turn that winds down after dispose (a tool that ignored the abort)
+		// would append to a transcript a newer session now owns. its unanswered call reopens as "No result provided"
+		if (this.disposed) return;
 		switch (e.type) {
 			case "message_update": {
 				if (this.firstTokenAt === null) {

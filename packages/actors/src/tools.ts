@@ -192,7 +192,7 @@ export function agentTools(actors: Actors, sessionID: string): Tool[] {
 					return ok(r.already_terminated ? `${r.path} was already closed.` : `closed ${r.closed.join(", ")} (was ${r.previous_state}). transcripts stay on disk.`, { ...r, ...(r.already_terminated ? { error: "already_terminated" } : {}) });
 				}
 				if (action === "interrupt") {
-					const r = await orStop(actors.interrupt(sessionID, params.target), signal);
+					const r = await orStop(actors.interrupt(sessionID, params.target, { inTurn: true }), signal);
 					return ok(r.interrupted ? `interrupted ${r.path}; it keeps its history and a message continues it.` : `${r.path} was not running (${r.previous_state}).`, r);
 				}
 				if (!params.body) return { content: [text("return_to needs a body: the follow-up")], details: { error: "BadRequestError" }, isError: true };

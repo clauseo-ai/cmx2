@@ -194,7 +194,11 @@ export interface ServeOptions {
 	rootWarmHorizonMs?: number;
 	/** how long close, interrupt and abort wait for a stopped turn to go idle before ending its session (5 s) */
 	idleWaitMs?: number;
+	/** tools every session also declares (tests add one that ignores the abort signal) */
+	extraTools?: () => NonNullable<SessionOptionsOf["extraTools"]>;
 }
+
+type SessionOptionsOf = Parameters<typeof EngineSession.create>[0];
 
 /** a request body over this is refused with 413 (photos arrive resized; a transcript import is the biggest body) */
 export const MAX_BODY_BYTES = 128 * 1024 * 1024;
@@ -329,6 +333,19 @@ export function serve(opts: ServeOptions) {
 	const idleSinceMax = opts.idleSinceMax ?? IDLE_SINCE_MAX;
 	const idleWaitMs = opts.idleWaitMs ?? IDLE_WAIT_MS;
 
+	/**
+	 * a live session whose turn did not stop in time leaves memory without its processes being reaped: disposed (a
+	 * disposed session writes and reports nothing more) and its lock released, so the next message reopens it from its
+	 * transcript. only the session object that was stuck goes, never a newer one
+	 */
+	function evictStuck(id: string, stuck?: EngineSession) {
+		const s = sessions.get(id);
+		if (!s || (stuck && s !== stuck)) return;
+		s.dispose();
+		sessions.delete(id);
+		locks.release(id);
+	}
+
 	const host: Host = {
 		createSession: (spec) => createChild(spec),
 		state: (id) => {
@@ -352,6 +369,7 @@ export function serve(opts: ServeOptions) {
 			const s = sessions.get(id);
 			if (s) await s.abort();
 		},
+		evict: (id) => evictStuck(id),
 		// positions are the transcript's: a compacted or reverted context no longer lines up with them, so the file is read
 		messages: async (id, from, to) => {
 			const file = store.session(id)?.session_file;
@@ -2020,7 +2038,7 @@ export function serve(opts: ServeOptions) {
 					store.setSessionContext(id, c.used, c.limit, c.compactAt);
 				}
 			},
-			extraTools: [...agentTools(actors, id), ...review],
+			extraTools: [...agentTools(actors, id), ...review, ...(opts.extraTools?.() ?? [])],
 			excludeTools: child ? actors.excludedTools(id) : [...actors.excludedTools(id), ...evalExclude],
 			inbox: () => actors.inbox(id),
 			onMailDelivered: (mailID: string, seq: number) => actors.onMailDelivered(id, mailID, seq),
@@ -3387,12 +3405,8 @@ export function serve(opts: ServeOptions) {
 				// interrupted, a root leaves memory, and either reopens from its transcript on the next message
 				if (!(await s.abort(idleWaitMs))) {
 					console.error(`cmx2: ${id} did not stop within ${idleWaitMs} ms; its session is ended`);
-					if (actors.isChild(id)) await actors.forceInterrupted(id, "user");
-					else if (sessions.get(id) === s) {
-						s.dispose();
-						sessions.delete(id);
-						locks.release(id);
-					}
+					await actors.forceInterrupted(id, "user");
+					evictStuck(id, s);
 				}
 				if (wasBusy && !actors.isChild(id)) actors.onUserAbort(id);
 			}
@@ -3739,10 +3753,13 @@ export function serve(opts: ServeOptions) {
 		clearInterval(evictTimer);
 		watcher?.close();
 		await btws.stopAll();
-		for (const s of sessions.values()) {
-			await s.abort(idleWaitMs).catch(() => {});
-			s.dispose();
-		}
+		// at once, so stuck turns cost one wait between them, not one each
+		await Promise.all(
+			[...sessions.values()].map(async (s) => {
+				await s.abort(idleWaitMs).catch(() => {});
+				s.dispose();
+			}),
+		);
 		sessions.clear();
 		locks.releaseAll();
 		lsp.flush();

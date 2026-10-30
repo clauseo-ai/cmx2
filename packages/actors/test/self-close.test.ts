@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Routing } from "@cmx2/routing";
@@ -14,8 +14,9 @@ import { agentTools } from "../src/tools.ts";
 
 const IDLE_WAIT = 100;
 
-function setup() {
+function setup(opts: { runningTurns?: number } = {}) {
 	const dir = mkdtempSync(join(tmpdir(), "cmx2-self-close-"));
+	if (opts.runningTurns) writeFileSync(join(dir, "routing.jsonc"), JSON.stringify({ caps: { running_turns: opts.runningTurns } }));
 	const store = new Store(join(dir, "cmx2.db"));
 	const busy = new Set<string>();
 	/** sessions whose turn never goes idle: interrupt never resolves for them */
@@ -120,13 +121,51 @@ test("a self-close and a close of an ancestor are refused at once, and nothing i
 	expect(JSON.stringify(r.content)).toContain("you can't close yourself or an ancestor");
 });
 
-test("interrupting yourself or an ancestor is refused, the root included", async () => {
+test("from inside a turn, interrupting yourself or an ancestor is refused, the root included; the route keeps its old answers", async () => {
 	const { actors } = setup();
 	const msg = "you can't interrupt yourself or an ancestor; end your turn instead.";
-	expect((await refusal(actors.interrupt("ses_kid", "/root/kid"))).message).toBe(msg);
-	expect((await refusal(actors.interrupt("ses_gk", "/root/kid"))).message).toBe(msg);
-	expect((await refusal(actors.interrupt("ses_root", "/root"))).message).toBe(msg);
-	expect((await refusal(actors.interrupt("ses_kid", "/root"))).message).toBe(msg);
+	const inTurn = { inTurn: true };
+	expect((await refusal(actors.interrupt("ses_kid", "/root/kid", inTurn))).message).toBe(msg);
+	expect((await refusal(actors.interrupt("ses_gk", "/root/kid", inTurn))).message).toBe(msg);
+	expect((await refusal(actors.interrupt("ses_root", "/root", inTurn))).message).toBe(msg);
+	expect((await refusal(actors.interrupt("ses_kid", "/root", inTurn))).message).toBe(msg);
+	// the tool the model calls is inside a turn
+	const agents = agentTools(actors, "ses_root").find((t) => t.name === "agents")!;
+	const r = await agents.execute("call_3", { action: "interrupt", target: "/root" }, new AbortController().signal);
+	expect(r.isError).toBe(true);
+	expect(JSON.stringify(r.content)).toContain(msg);
+	// a client on the route is outside every turn: the root may stop itself (idle here, so nothing to stop), others may not stop the root
+	expect(await actors.interrupt("ses_root", "/root")).toMatchObject({ path: "/root", interrupted: false });
+	expect((await refusal(actors.interrupt("ses_kid", "/root"))).message).toBe("the root's turn is the user's to stop");
+});
+
+test("interrupting a helper in wait when every slot is taken stops it without waiting out the limit", async () => {
+	// one child slot: the grandchild lends it while it waits and the child holds it, so taking it back means queueing
+	const { store, actors, busy, onInterrupt, ended } = setup({ runningTurns: 2 });
+	actors.onTurn("ses_kid", { type: "end", from: 0, to: 1, outcome: "completed", stopReason: "stop", files: [] });
+	expect(actors.runningCount("ses_root")).toBe(1);
+	const ctl = new AbortController();
+	const waiting = actors.wait("ses_gk", { timeout_ms: 600_000 }, ctl.signal);
+	await Bun.sleep(5);
+	expect(actors.runningCount("ses_root")).toBe(0);
+	// the child takes the free slot
+	busy.add("ses_kid");
+	actors.onTurn("ses_kid", { type: "start", from: 1 });
+	expect(actors.runningCount("ses_root")).toBe(1);
+	onInterrupt.set("ses_gk", async () => {
+		ctl.abort();
+		await waiting;
+		busy.delete("ses_gk");
+		actors.onTurn("ses_gk", { type: "end", from: 0, to: 2, outcome: "aborted", stopReason: "aborted", files: [] });
+	});
+	const t0 = Date.now();
+	const r = await actors.interrupt("ses_root", "/root/kid/gk");
+	expect(Date.now() - t0).toBeLessThan(IDLE_WAIT);
+	expect(r.interrupted).toBe(true);
+	expect(store.agents.get("ses_gk")!.state).toBe("interrupted");
+	// not forced: its session (and its jobs) live on
+	expect(ended).not.toContain("ses_gk");
+	expect(actors.runningCount("ses_root")).toBe(1);
 });
 
 test("closing a subtree whose member has a tool call that never returns finishes within the time limit and leaves nothing behind", async () => {
@@ -145,11 +184,19 @@ test("closing a subtree whose member has a tool call that never returns finishes
 	expect(ended.sort()).toEqual(["ses_gk", "ses_kid"]);
 	expect(actors.runningCount("ses_root")).toBe(0);
 	expect(actors.parkedOf("ses_root")).toBeUndefined();
-	// a turn that ends late changes nothing: still closed, no report to anyone
-	actors.onTurn("ses_kid", { type: "end", from: 0, to: 2, outcome: "aborted", stopReason: "aborted", files: [] });
-	await Bun.sleep(10);
-	expect(store.agents.get("ses_kid")!.state).toBe("closed");
 	expect(store.agents.pending("ses_root").filter((m) => m.kind === "report")).toHaveLength(0);
+});
+
+test("closing siblings that are both stuck costs one wait, not two", async () => {
+	const { store, actors, stuck } = setup();
+	const now = Date.now();
+	store.agents.put({ ...store.agents.get("ses_gk")!, id: "ses_gk2", path: "/root/kid/gk2", name: "gk2", created_at: now, updated_at: now });
+	stuck.add("ses_gk");
+	stuck.add("ses_gk2");
+	const t0 = Date.now();
+	const r = await actors.close("ses_root", "/root/kid");
+	expect(Date.now() - t0).toBeLessThan(IDLE_WAIT * 2);
+	expect(r.closed.sort()).toEqual(["/root/kid", "/root/kid/gk", "/root/kid/gk2"]);
 });
 
 test("interrupting a turn that never goes idle marks it interrupted within the time limit, ends its session, and a message reopens it", async () => {

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
@@ -9,7 +9,8 @@ import { EngineSession, type TurnEvent } from "../src/session.ts";
 
 /**
  * a turn held open by a tool that ignores the abort signal: abort with a timeout gives up instead of waiting for ever,
- * and once the session is disposed the turn that finishes late reports no turn end and releases no lock
+ * and once the session is disposed the turn that finishes late reports no turn end, releases no lock and writes nothing
+ * to the transcript; the session reopened from it answers the unanswered call and goes on
  */
 
 const ev = (type: string, data: unknown) => `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -35,11 +36,12 @@ const sseStuck = () =>
 
 let server: ReturnType<typeof Bun.serve>;
 let calls = 0;
+const bodies: any[] = [];
 beforeAll(() => {
 	server = Bun.serve({
 		port: 0,
 		async fetch(req) {
-			await req.text();
+			bodies.push(await req.json().catch(() => null));
 			return new Response(calls++ === 0 ? sseStuck() : sseText("done"), { headers: { "content-type": "text/event-stream" } });
 		},
 	});
@@ -75,15 +77,21 @@ function config(): Config {
 	};
 }
 
-test("abort with a timeout answers false while a tool holds the turn; the disposed session's late turn end reports nothing and releases no lock", async () => {
+test("abort with a timeout answers false while a tool holds the turn; the disposed session's late turn reports nothing, releases no lock and writes nothing", async () => {
 	const turns: TurnEvent[] = [];
 	let afterTurns = 0;
+	let eventsAfterDispose = 0;
+	let disposed = false;
+	const cwd = mkdtempSync(join(tmpdir(), "cmx2-stuck-"));
+	const dataDir = mkdtempSync(join(tmpdir(), "cmx2-stuck-data-"));
 	const s = await EngineSession.create({
-		cwd: mkdtempSync(join(tmpdir(), "cmx2-stuck-")),
+		cwd,
 		config: config(),
-		dataDir: mkdtempSync(join(tmpdir(), "cmx2-stuck-data-")),
+		dataDir,
 		extraTools: [stuck as never],
-		onEvent: () => {},
+		onEvent: () => {
+			if (disposed) eventsAfterDispose++;
+		},
 		onStep: () => {},
 		onTurn: (e) => turns.push(e),
 		afterTurn: () => afterTurns++,
@@ -100,6 +108,10 @@ test("abort with a timeout answers false while a tool holds the turn; the dispos
 	expect(Date.now() - t0).toBeLessThan(1_000);
 	expect(s.state).toBe("busy");
 	s.dispose();
+	disposed = true;
+	const file = join(dataDir, "sessions", `${s.id}.jsonl`);
+	const lines = () => readFileSync(file, "utf8").trim().split("\n").length;
+	const before = lines();
 	// the tool finishes late: the turn winds down in the disposed session
 	release();
 	await turn;
@@ -107,4 +119,17 @@ test("abort with a timeout answers false while a tool holds the turn; the dispos
 	await Bun.sleep(50);
 	expect(turns.map((e) => e.type)).toEqual(["start"]);
 	expect(afterTurns).toBe(0);
+	expect(lines()).toBe(before);
+	expect(eventsAfterDispose).toBe(0);
+
+	// reopened from its transcript, the session answers the dangling call and its next turn completes
+	const again = await EngineSession.create({ id: s.id, resume: {}, cwd, config: config(), dataDir, extraTools: [stuck as never], onEvent: () => {}, onStep: () => {}, onTurn: (e) => turns.push(e) });
+	bodies.length = 0;
+	await again.prompt("go on");
+	await again.idle();
+	expect(turns.at(-1)).toMatchObject({ type: "end", outcome: "completed" });
+	const sent = JSON.stringify(bodies[0]?.messages ?? []);
+	expect(sent).toContain('"tool_use_id":"toolu_stuck_1"');
+	expect(sent).not.toContain("finally");
+	again.dispose();
 }, 15_000);

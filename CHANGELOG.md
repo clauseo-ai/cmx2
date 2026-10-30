@@ -4,10 +4,10 @@ notable changes to cmx2, newest first. the format follows keep a changelog. "con
 
 ## unreleased
 
-contract version 7. no shape changes: `POST /session/:id/agents/close` and `/interrupt` answer 400 for a target that is the session itself or one of its ancestors.
+contract version 7. no shape changes: `POST /session/:id/agents/close` answers 400 for a target that is the session itself or one of its ancestors. `/interrupt` answers as before.
 
 ### fixed
-- an agent that closed itself or an ancestor deadlocked its tree: its turn never ended, and any close, interrupt or abort that reached it hung too. close and interrupt now refuse such a target at once ("you can't close yourself or an ancestor; end your turn instead."), the root included for interrupt; a client stops a session with `POST /session/:id/abort`. the agents tool stops waiting when its turn is stopped. close, interrupt, abort, archive and shutdown wait at most 5 s for a stopped turn to go idle, then end its session anyway: a helper is closed or marked interrupted (a message reopens it), a root leaves memory, and a turn that finishes late changes nothing.
+- an agent that closed itself or an ancestor deadlocked its tree: its turn never ended, and any close, interrupt or abort that reached it hung too. close now refuses such a target at once ("you can't close yourself or an ancestor; end your turn instead."), and so does the agents tool's interrupt, the root included (the route still lets a client stop the root as before). the agents tool stops waiting when its turn is stopped, and a helper in `wait` or `question` stops without queueing for its slot. close, interrupt, abort, archive and shutdown wait at most 5 s for a stopped turn to go idle (the agents of one depth, and shutdown's sessions, together), then end its session anyway: a helper is closed or marked interrupted (a message reopens it), a root leaves memory with its jobs kept and the questions it read settled, and a turn that finishes late writes nothing and changes nothing.
 
 ## 0.9.4 - 2026-10-30
 

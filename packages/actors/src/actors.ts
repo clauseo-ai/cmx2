@@ -71,6 +71,8 @@ export interface Host {
 	/** opens the session (reviving it from its transcript) and starts a turn for its waiting mail */
 	wake(id: string): Promise<boolean>;
 	interrupt(id: string): Promise<void>;
+	/** a session whose turn did not stop in time leaves memory, its processes kept; the next message reopens it */
+	evict?(id: string): void;
 	/** transcript entries at positions (from, to] */
 	messages(id: string, from: number, to?: number): Promise<any[]>;
 	directory(id: string): string | undefined;
@@ -619,14 +621,30 @@ export class Actors {
 		}
 	}
 
-	private async reclaim(a: AgentRow) {
+	/** takes a lent slot back, queueing first in line when every slot is taken; a stopped turn does not queue for one */
+	private async reclaim(a: AgentRow, signal?: AbortSignal) {
 		if (!this.lent.delete(a.id)) return;
 		const run = this.runningOf(a.root_id);
 		if (run.size < this.childSlots()) {
 			run.add(a.id);
 			return;
 		}
-		await new Promise<void>((resolve) => this.queueOf(a.root_id).unshift({ id: a.id, resolve }));
+		if (signal?.aborted) return;
+		const q = this.queueOf(a.root_id);
+		await new Promise<void>((resolve) => {
+			const entry = { id: a.id, resolve: () => done() };
+			const onAbort = () => {
+				const i = q.indexOf(entry);
+				if (i >= 0) q.splice(i, 1);
+				done();
+			};
+			const done = () => {
+				signal?.removeEventListener("abort", onAbort);
+				resolve();
+			};
+			signal?.addEventListener("abort", onAbort, { once: true });
+			q.unshift(entry);
+		});
 	}
 
 	// ---------- the five verbs ----------
@@ -956,7 +974,7 @@ export class Actors {
 			};
 			set!.add(w);
 		});
-		await this.reclaim(sender);
+		await this.reclaim(sender, signal);
 		const waited = Date.now() - t0;
 		if (!got) {
 			this.metric(sender, "sibling_deadlock", undefined, { timeout_ms: timeout, tool: "wait", ...(cid ? { correlation_id: cid } : {}) });
@@ -1005,7 +1023,7 @@ export class Actors {
 		} finally {
 			if (onAbort) signal?.removeEventListener("abort", onAbort);
 			this.asking.delete(id);
-			await this.reclaim(a);
+			await this.reclaim(a, signal);
 			const now = this.rows.get(a.id);
 			if (now?.state === "working" && now.cause === "asking" && !this.isAsking(a.id)) this.setState(a.id, "working", { cause: null });
 		}
@@ -1042,8 +1060,7 @@ export class Actors {
 			.tree(t.root_id)
 			.filter((a) => a.state !== "closed" && (a.id === t.id || isAncestor(t.path, a.path)))
 			.sort((a, b) => b.depth - a.depth);
-		const cause = opts.cause ?? "closed";
-		for (const v of victims) await this.shut(v, sender.id, cause);
+		await this.shutAll(victims, sender.id, opts.cause ?? "closed");
 		const parent = t.parent_id ? this.rows.get(t.parent_id) : undefined;
 		// the closer knows; a parent learns only when someone else (a sibling, the agent itself) closed its child
 		if (parent && !opts.silent && sender.id !== parent.id && !isAncestor(sender.path, t.path)) {
@@ -1052,6 +1069,12 @@ export class Actors {
 		}
 		this.refreshParked(t.root_id);
 		return { path: t.path, previous_state: previous, already_terminated: false, closed: victims.map((v) => v.path) };
+	}
+
+	/** shuts agents leaves first, one depth at a time; the agents of one depth together, so stuck turns cost one wait per depth */
+	private async shutAll(victims: AgentRow[], by: string, cause: string) {
+		const depths = [...new Set(victims.map((v) => v.depth))].sort((x, y) => y - x);
+		for (const d of depths) await Promise.all(victims.filter((v) => v.depth === d).map((v) => this.shut(v, by, cause)));
 	}
 
 	private async shut(v: AgentRow, by: string, cause: string) {
@@ -1128,6 +1151,16 @@ export class Actors {
 	async forceInterrupted(id: string, by: string) {
 		const a = this.rows.get(id);
 		if (!a || a.state === "closed") return;
+		if (a.depth === 0) {
+			// the root's turn end is suppressed with its session, so its bookkeeping happens here; its jobs keep running
+			this.interrupting.delete(a.id);
+			this.settleUnanswered(a);
+			this.setState(a.id, "interrupted", { cause: "interrupted" });
+			this.host.evict?.(a.id);
+			this.refreshParked(a.id);
+			this.grantNext(a.root_id);
+			return;
+		}
 		this.forget(a);
 		this.setState(a.id, "interrupted", { cause: "interrupted" });
 		await this.host.end(a.id).catch(() => {});
@@ -1148,12 +1181,13 @@ export class Actors {
 	}
 
 	/** stops an agent's current turn; it stays parked-resumable with its transcript, and a message continues it */
-	async interrupt(senderID: string, target: string): Promise<{ path: string; previous_state: AgentState; interrupted: boolean }> {
+	async interrupt(senderID: string, target: string, opts: { inTurn?: boolean } = {}): Promise<{ path: string; previous_state: AgentState; interrupted: boolean }> {
 		const sender = this.rowOf(senderID);
 		const t = this.resolve(sender, target);
-		// an interrupt waits for the target's turn to end, and the caller's own turn cannot end while it waits; a client
-		// stops a session with POST /session/:id/abort
-		if (t.id === sender.id || isAncestor(t.path, sender.path)) throw new ActorError("BadRequestError", 400, "you can't interrupt yourself or an ancestor; end your turn instead.");
+		// an interrupt waits for the target's turn to end, and a caller inside its own turn cannot end that turn while it
+		// waits. a client calling the route is outside every turn, so the root may still stop itself there
+		if (opts.inTurn && (t.id === sender.id || isAncestor(t.path, sender.path))) throw new ActorError("BadRequestError", 400, "you can't interrupt yourself or an ancestor; end your turn instead.");
+		if (t.depth === 0 && t.id !== sender.id) throw new ActorError("BadRequestError", 400, "the root's turn is the user's to stop");
 		const previous = t.state;
 		if (this.host.state(t.id) !== "busy") {
 			if (t.state === "queued") {
@@ -1553,7 +1587,7 @@ export class Actors {
 			.tree(a.root_id)
 			.filter((c) => c.state !== "closed" && isAncestor(a.path, c.path))
 			.sort((x, y) => y.depth - x.depth);
-		for (const v of victims) await this.shut(v, a.id, "session_ended");
+		await this.shutAll(victims, a.id, "session_ended");
 	}
 
 	/**
