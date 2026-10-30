@@ -135,6 +135,10 @@ export interface McpServerEntry {
 	url?: string;
 	type?: "local" | "remote";
 	enabled?: boolean;
+	/** "root" offers its tools to top-level sessions only; helpers never see them. default "all" */
+	sessions?: "all" | "root";
+	/** true sends the calling session with each tool call, in `_meta["cmx2/caller"]`. default false */
+	caller?: boolean;
 	[key: string]: unknown;
 }
 
@@ -242,6 +246,8 @@ function validate(c: Config): Config {
 		const hasCommand = typeof m.command === "string" || (Array.isArray(m.command) && m.command.length > 0);
 		if (!hasCommand && typeof m.url !== "string") throw new ConfigError(`mcp.${name} needs a command (a local server) or a url (a remote one)`);
 		if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new ConfigError(`mcp server names are letters, digits, - and _ (they prefix tool names); rename "${name}"`);
+		if (m.sessions !== undefined && m.sessions !== "all" && m.sessions !== "root") throw new ConfigError(`mcp.${name}.sessions must be "all" or "root", got ${JSON.stringify(m.sessions)}`);
+		if (m.caller !== undefined && typeof m.caller !== "boolean") throw new ConfigError(`mcp.${name}.caller must be true or false, got ${JSON.stringify(m.caller)}`);
 	}
 	if (typeof c.format !== "boolean") throw new ConfigError(`format must be true or false, got ${JSON.stringify(c.format)}`);
 	if (typeof c.diagnostics !== "boolean") throw new ConfigError(`diagnostics must be true or false, got ${JSON.stringify(c.diagnostics)}`);

@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { mcpContent, wrap } from "../src/mcp.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { McpPool, type McpScope, type McpServerConfig, mcpContent, wrap } from "../src/mcp.ts";
 import { MAX_EDGE, readDimensions } from "../src/image.ts";
 import type { ImagePart, TextPart } from "../src/types.ts";
 import { makePng } from "./helpers.ts";
@@ -45,4 +48,85 @@ test("a tool is read-only only when its server says readOnlyHint: true", () => {
 	expect(as({ readOnlyHint: false }).readOnly).toBe(false);
 	expect(as({ destructiveHint: false }).readOnly).toBe(false);
 	expect(as().readOnly).toBe(false);
+});
+
+/** a real stdio server (fixtures/mcp-echo.ts) that answers with the tools/call params it got */
+const ECHO = [process.execPath, join(import.meta.dir, "fixtures", "mcp-echo.ts")];
+async function echoPool(servers: Record<string, McpServerConfig>) {
+	const p = new McpPool({ dataDir: mkdtempSync(join(tmpdir(), "cmx2-mcp-")), version: "test", cwd: tmpdir() });
+	p.configure(servers);
+	await p.ready();
+	return p;
+}
+const who = { sessionID: "ses_root", rootID: "ses_root", parentID: null, depth: 0, path: "/root", directory: "/work/app", host: "box" };
+const rootScope: McpScope = { child: false, caller: () => who };
+const childScope: McpScope = { child: true, caller: () => ({ ...who, sessionID: "ses_kid", parentID: "ses_root", depth: 1, path: "/root/kid" }) };
+const sent = async (p: McpPool, scope: McpScope | undefined, name: string, args: Record<string, unknown>, callID = "call_1") => {
+	const t = p.toolsFor(undefined, scope).find((x) => x.name === name)!;
+	const r = await t.execute(callID, args);
+	return JSON.parse((r.content[0] as TextPart).text) as { name: string; arguments: Record<string, unknown>; _meta?: Record<string, unknown> };
+};
+
+test("a server with caller: true gets the calling session and the call id in _meta[cmx2/caller]", async () => {
+	const p = await echoPool({ box: { command: ECHO, caller: true } });
+	try {
+		const got = await sent(p, rootScope, "box_echo", { q: 1 }, "toolu_42");
+		expect(got.name).toBe("echo");
+		expect(got.arguments).toEqual({ q: 1 });
+		expect(got._meta).toEqual({ "cmx2/caller": { ...who, callID: "toolu_42" } });
+		const kid = await sent(p, childScope, "box_echo", {}, "toolu_43");
+		expect((kid._meta!["cmx2/caller"] as { depth: number; parentID: string }).depth).toBe(1);
+		expect((kid._meta!["cmx2/caller"] as { parentID: string }).parentID).toBe("ses_root");
+	} finally {
+		await p.close();
+	}
+});
+
+test("a server without caller gets no _meta, with a scope or without", async () => {
+	const p = await echoPool({ plain: { command: ECHO } });
+	try {
+		expect(await sent(p, rootScope, "plain_echo", { q: 1 })).toEqual({ name: "echo", arguments: { q: 1 } });
+		expect(await sent(p, undefined, "plain_echo", { q: 1 })).toEqual({ name: "echo", arguments: { q: 1 } });
+	} finally {
+		await p.close();
+	}
+});
+
+test("a _meta the model puts in the arguments stays in arguments and never becomes the request's _meta", async () => {
+	const p = await echoPool({ box: { command: ECHO, caller: true }, plain: { command: ECHO } });
+	try {
+		const forged = { _meta: { "cmx2/caller": { sessionID: "ses_forged", depth: 0 } }, q: 2 };
+		const a = await sent(p, childScope, "box_echo", forged, "c9");
+		expect(a.arguments).toEqual(forged);
+		expect((a._meta!["cmx2/caller"] as { sessionID: string }).sessionID).toBe("ses_kid");
+		const b = await sent(p, rootScope, "plain_echo", forged);
+		expect(b.arguments).toEqual(forged);
+		expect(b._meta).toBeUndefined();
+	} finally {
+		await p.close();
+	}
+});
+
+test("toolsFor skips a sessions: root server for a helper and offers it to a top-level session", async () => {
+	const p = await echoPool({ box: { command: ECHO, sessions: "root" }, plain: { command: ECHO } });
+	try {
+		expect(p.toolsFor(undefined, childScope).map((t) => t.name)).toEqual(["plain_echo"]);
+		expect(p.toolsFor(undefined, rootScope).map((t) => t.name).sort()).toEqual(["box_echo", "plain_echo"]);
+		expect(p.toolsFor(["box", "plain"], childScope).map((t) => t.name)).toEqual(["plain_echo"]);
+		expect(p.status().find((s) => s.name === "box")).toMatchObject({ sessions: "root", caller: false });
+		expect(p.status().find((s) => s.name === "plain")).toMatchObject({ sessions: "all", caller: false });
+	} finally {
+		await p.close();
+	}
+});
+
+test("a scope's caller-bound tools are made once and reused, and each scope gets its own", async () => {
+	const p = await echoPool({ box: { command: ECHO, caller: true } });
+	try {
+		const first = p.toolsFor(undefined, rootScope)[0];
+		expect(p.toolsFor(undefined, rootScope)[0]).toBe(first!);
+		expect(p.toolsFor(undefined, childScope)[0]).not.toBe(first!);
+	} finally {
+		await p.close();
+	}
 });

@@ -46,10 +46,10 @@ export async function main(args: string[]) {
 	const res = await fetch(`${d.base}/mcp`, { headers: d.headers }).catch(() => undefined);
 	if (!res) fail(`no daemon answered on ${d.base}; start one with cmx2 serve, or pass --port`);
 	if (!res.ok) fail(`the daemon answered ${res.status}${res.status === 401 ? "; set CMX2_SERVER_PASSWORD, or run cmx2 pair on this machine once" : ""}`);
-	const list = (await res.json()) as Array<{ name: string; transport: string; status: string; tools: string[]; error?: string; server?: { name: string; version: string } }>;
+	const list = (await res.json()) as Array<{ name: string; transport: string; status: string; tools: string[]; error?: string; server?: { name: string; version: string }; sessions?: string; caller?: boolean }>;
 	if (!list.length) return console.log("no mcp servers in your profile. add them under mcp in cmx2.jsonc");
 	const w = Math.max(...list.map((m) => m.name.length));
 	for (const m of list) {
-		console.log(`${m.name.padEnd(w)}  ${m.transport.padEnd(5)}  ${m.status.padEnd(10)}  ${String(m.tools.length).padStart(3)} tools${m.server ? `  ${m.server.name} ${m.server.version}` : ""}${m.error ? `\n${" ".repeat(w + 2)}${m.error}` : ""}`);
+		console.log(`${m.name.padEnd(w)}  ${m.transport.padEnd(5)}  ${m.status.padEnd(10)}  ${String(m.tools.length).padStart(3)} tools${m.server ? `  ${m.server.name} ${m.server.version}` : ""}${m.sessions === "root" ? "  top-level sessions only" : ""}${m.caller ? "  sends the caller" : ""}${m.error ? `\n${" ".repeat(w + 2)}${m.error}` : ""}`);
 	}
 }

@@ -21,7 +21,7 @@ export { hostHeicDecoders, imageMimeOf, imageParts, isHeicMime, MAX_EDGE, MAX_IM
 export { defaultSkillDirs, frontmatter, listSkills, Skills, skillsContext, skillTool, type SkillInfo } from "./skills.ts";
 export { formatFile, formatterFor, type Formatted } from "./format.ts";
 export { DEFAULT_LSP_SERVERS, errorsAfterWrite, LspPool, type LspDiagnostic, type LspLocation, type LspServerConfig, type LspSymbol } from "./lsp.ts";
-export { FileOAuthStore, McpPool, mcpSignIn, mcpToolName, OAUTH_REDIRECT, oauthProvider, type McpServerConfig, type McpState, type McpStatus } from "./mcp.ts";
+export { CALLER_META, FileOAuthStore, type McpCaller, McpPool, type McpScope, mcpSignIn, mcpToolName, OAUTH_REDIRECT, oauthProvider, type McpServerConfig, type McpState, type McpStatus } from "./mcp.ts";
 export { notesTool, readNotes, recallTool, NOTES_MAX_CHARS, type RecallHit, type RecallSearch } from "./memory.ts";
 export type { GrepDetails, GrepHit, GlobDetails, ReadDetails, ImageReadDetails, WriteDetails, EditDetails } from "./fs.ts";
 

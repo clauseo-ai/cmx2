@@ -538,6 +538,10 @@ export type McpStatus = {
 		name: string;
 		version: string;
 	};
+	/** which sessions see its tools: all, or root (top-level sessions only; spawned helpers never see them) */
+	sessions?: "all" | "root";
+	/** true when each tools/call carries the calling session in _meta["cmx2/caller"] */
+	caller?: boolean;
 };
 
 /** every event the daemon publishes, by type */
@@ -574,6 +578,10 @@ export interface EventMap {
 			name: string;
 			version: string;
 		};
+		/** which sessions see its tools: all, or root (top-level sessions only; spawned helpers never see them) */
+		sessions?: "all" | "root";
+		/** true when each tools/call carries the calling session in _meta["cmx2/caller"] */
+		caller?: boolean;
 	};
 	/** a session was created (v1) */
 	"session.created": {

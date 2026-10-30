@@ -68,7 +68,7 @@ the tool does its own work: there is no handle to call other tools from `ctx` (o
 | `signal` | an `AbortSignal`: fires on interrupt, on timeout and on daemon shutdown |
 | `config` | this tool's block from the profile (`tools.<name>`), with `$NAME` and `!command` string values resolved (below); `{}` when absent |
 | `env` | variables the session adds for commands it runs (a subagent's push guard). a tool that spawns a process should merge them |
-| `session` | `{ id, child }`: which session called, and whether it is a subagent |
+| `session` | `{ id, child }`: which session called, and whether it is a subagent. an mcp server gets the same and more (root, parent, depth, path, directory, host, call id) in `_meta["cmx2/caller"]` when its profile entry says `caller: true` (D29) |
 | `callId` | the tool call id, for the tool's own logs |
 
 left out on purpose: `spill` (the daemon clips every result to the shared 2000 lines / 50 KB and spills the rest itself, as it does for mcp), a handle to call other tools (decided: tools do their own work), the procs host (background jobs belong to the model's `shell`, not to a tool), the raw daemon config.

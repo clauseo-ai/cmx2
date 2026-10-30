@@ -1856,6 +1856,23 @@
 								"type": "string"
 							}
 						}
+					},
+					"sessions": {
+						"anyOf": [
+							{
+								"type": "string",
+								"const": "all"
+							},
+							{
+								"type": "string",
+								"const": "root"
+							}
+						],
+						"description": "which sessions see its tools: all, or root (top-level sessions only; spawned helpers never see them)"
+					},
+					"caller": {
+						"type": "boolean",
+						"description": "true when each tools/call carries the calling session in _meta[\"cmx2/caller\"]"
 					}
 				},
 				"description": "one mcp server from the profile"
@@ -2151,6 +2168,23 @@
 										"type": "string"
 									}
 								}
+							},
+							"sessions": {
+								"anyOf": [
+									{
+										"type": "string",
+										"const": "all"
+									},
+									{
+										"type": "string",
+										"const": "root"
+									}
+								],
+								"description": "which sessions see its tools: all, or root (top-level sessions only; spawned helpers never see them)"
+							},
+							"caller": {
+								"type": "boolean",
+								"description": "true when each tools/call carries the calling session in _meta[\"cmx2/caller\"]"
 							}
 						}
 					},

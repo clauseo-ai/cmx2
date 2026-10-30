@@ -356,6 +356,8 @@ export const McpStatus = Type.Object(
 		tools: Type.Array(Type.String(), { description: "the server's tool names; sessions see them as <server>_<tool> through tool_search" }),
 		error: Type.Optional(Type.String()),
 		server: Type.Optional(Type.Object({ name: Type.String(), version: Type.String() })),
+		sessions: Type.Optional(Type.Union([Type.Literal("all"), Type.Literal("root")], { description: "which sessions see its tools: all, or root (top-level sessions only; spawned helpers never see them)" })),
+		caller: Type.Optional(Type.Boolean({ description: "true when each tools/call carries the calling session in _meta[\"cmx2/caller\"]" })),
 	},
 	{ description: "one mcp server from the profile" },
 );
