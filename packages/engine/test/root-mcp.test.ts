@@ -156,7 +156,7 @@ test("a server's instructions ride the turn context once, again only when they c
 	const kid = await session(p, childScope);
 	try {
 		const turn = (s: unknown) => String((s as any).turnText() ?? "");
-		expect(turn(top)).toContain("instructions from mcp server guide (its tools load through tool_search as guide_*):\nfirst words");
+		expect(turn(top)).toContain('<mcp-instructions server="guide">\ninstructions from mcp server guide (its tools load through tool_search as guide_*):\nfirst words\n</mcp-instructions>');
 		expect(turn(top)).not.toContain("first words");
 		expect(turn(kid)).not.toContain("instructions from mcp server");
 		p.configure(guide("second words"));
@@ -169,6 +169,23 @@ test("a server's instructions ride the turn context once, again only when they c
 	} finally {
 		top.dispose();
 		kid.dispose();
+		await p.close();
+	}
+}, 20_000);
+
+test("after a compaction the state block carries a server's instructions again, and the next turn does not repeat them", async () => {
+	const p = pool();
+	p.configure({ guide: { command: ECHO, env: { ECHO_INSTRUCTIONS: "guide words" }, instructions: true } });
+	await p.ready();
+	const top = await session(p, rootScope);
+	try {
+		expect(String((top as any).turnText())).toContain("guide words");
+		expect(String((top as any).turnText() ?? "")).not.toContain("guide words");
+		// what a compaction puts after its summary: the runtime's own state, turn-context blocks included
+		expect((top as any).stateBlock()).toContain('<mcp-instructions server="guide">');
+		expect(String((top as any).turnText() ?? "")).not.toContain("guide words");
+	} finally {
+		top.dispose();
 		await p.close();
 	}
 }, 20_000);

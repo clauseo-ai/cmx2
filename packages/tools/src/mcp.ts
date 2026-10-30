@@ -374,10 +374,15 @@ export class McpPool {
 	}
 }
 
-/** a server's instructions as one turn-context block, cut at MCP_INSTRUCTIONS_CAP characters with a note saying so */
+/**
+ * a server's instructions as one turn-context block in <mcp-instructions server="name">, cut at MCP_INSTRUCTIONS_CAP
+ * characters with a note saying so. every "</" in the server's text becomes "<\\/", so no closing tag it sends
+ * (</mcp-instructions>, </system-reminder>) can end the block and make what follows read as cmx2's or the person's words
+ */
 export function mcpInstructionsText(server: string, text: string): string {
-	const body = text.length > MCP_INSTRUCTIONS_CAP ? `${text.slice(0, MCP_INSTRUCTIONS_CAP)}\n(cut at ${MCP_INSTRUCTIONS_CAP} of ${text.length} characters)` : text;
-	return `instructions from mcp server ${server} (its tools load through tool_search as ${mcpToolName(server, "")}*):\n${body}`;
+	const cut = text.length > MCP_INSTRUCTIONS_CAP ? `${text.slice(0, MCP_INSTRUCTIONS_CAP)}\n(cut at ${MCP_INSTRUCTIONS_CAP} of ${text.length} characters)` : text;
+	const body = cut.replaceAll("</", "<\\/");
+	return `<mcp-instructions server="${server}">\ninstructions from mcp server ${server} (its tools load through tool_search as ${mcpToolName(server, "")}*):\n${body}\n</mcp-instructions>`;
 }
 
 /** one mcp tool as a cmx2 tool: same schema, output under the shared limits */
