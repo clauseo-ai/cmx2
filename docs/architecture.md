@@ -83,6 +83,28 @@ the diagrams are generated: `bun assets/src/build.ts` redraws every svg in `asse
 
 five layers merge in order: shipped defaults, your profile (`~/.config/cmx2/cmx2.jsonc`, moved by `CMX2_CONFIG_DIR`), a per-machine `cmx2.<hostname>.jsonc` beside it, the project's `.cmx2/cmx2.jsonc`, then environment variables. a repository's own config cannot set providers, keys or listeners and cannot loosen permissions, so a cloned repo cannot take over your machine. the profile reloads when a file changes. see [quickstart.md](quickstart.md) and [routing.md](routing.md).
 
+### mcp servers
+
+`mcp` in your profile names servers by name. each connects once for the whole daemon, and its tools reach sessions as `<server>_<tool>` through `tool_search`. two fields decide who sees a server and what it learns about the caller:
+
+```jsonc
+"mcp": {
+  "files": { "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/srv/docs"] },
+  "threads": {
+    "url": "http://127.0.0.1:8123/mcp",
+    "headers": { "authorization": "Bearer $THREADS_TOKEN" },
+    // only sessions with no parent see its tools: forks and sessions you start, never spawned helpers. default "all"
+    "sessions": "root",
+    // each tool call carries _meta["cmx2/caller"]: sessionID, rootID, parentID, depth, path, directory, host, callID. default false
+    "caller": true,
+    // the instructions the server sends when it connects go in the turn context of sessions that see it, up to 4096 characters. default false
+    "instructions": true
+  }
+}
+```
+
+leave `caller` off for servers you did not write: it sends session ids and folder paths. `GET /mcp` and `cmx2 mcp` show each server's `sessions`, `caller` and `instructions`. turn on `instructions` for a server whose tools the model should know about before it searches; the text rides the turn context, never the system prompt, so the prompt cache is untouched.
+
 ## glossary
 
 - **session**: one conversation with a model, with its own transcript and working directory.

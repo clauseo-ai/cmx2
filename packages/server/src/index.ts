@@ -11,7 +11,7 @@ import { ModelError, resolveModel } from "@cmx2/engine/models";
 import { Transcript } from "@cmx2/engine/transcript";
 import { evaluate, type PermissionRule, rulesFromConfig, subagentEnv } from "@cmx2/engine/permission";
 import { BusyError, EngineSession, type EngineEvent, type MailRecord, type StepRow, type TurnEvent, type UserBlock } from "@cmx2/engine/session";
-import { defaultSkillDirs, LspPool, McpPool, resizeImage, runCommand, Skills } from "@cmx2/tools";
+import { defaultSkillDirs, LspPool, McpPool, type McpScope, resizeImage, runCommand, Skills } from "@cmx2/tools";
 import { closeOpenSteps, decodeCursor, documentPart, encodeCursor, messageId, partId, projectMessage, projectTranscript, type SessionQuery, type SessionRevert, type SessionStateInfo, type RefreshUsage, Store, type StoredSession } from "@cmx2/store";
 import { Value } from "typebox/value";
 import { Asks, permissionJson, questionJson, type ReplyOutcome } from "./asks.ts";
@@ -1903,6 +1903,14 @@ export function serve(opts: ServeOptions) {
 			merge: (dir, message) => mergeWorktree(real(resolve(directory, dir)), message, id),
 			discard: (dir) => discardWorktree(real(resolve(directory, dir)), id),
 		});
+		// one scope per session, so the pool's caller-bound mcp tools are made once and reused on every step
+		const mcpScope: McpScope = {
+			child,
+			caller: () => {
+				const row = actors.rowOf(id);
+				return { sessionID: id, rootID: row.root_id, parentID: row.parent_id, depth: row.depth, path: row.path, directory, host: machineName() };
+			},
+		};
 		// review is declared, never inferred: the agent in a checkout says when its work is ready. a subagent reports to its spawner instead
 		const review = !child && inCheckout(directory)
 			? [
@@ -2066,6 +2074,14 @@ export function serve(opts: ServeOptions) {
 					// without spawn there is nobody to route to (eval arm c); the table would only invite a call that cannot be made
 					["routing", !child && evalExclude.includes("spawn") ? undefined : actors.routingText(id)],
 					["agents", actors.helpersText(id)],
+					// an mcp server's own instructions, for sessions that see the server (instructions: true in its entry)
+					...(() => {
+						try {
+							return mcp.instructionsFor(Object.keys(configFor(directory).mcp ?? {}), mcpScope);
+						} catch {
+							return mcp.instructionsFor(Object.keys(config.mcp ?? {}), mcpScope);
+						}
+					})(),
 				];
 			},
 			// the main session's model and effort are the user's dial; only helpers escalate on failure signals (and come back down)
@@ -2123,9 +2139,9 @@ export function serve(opts: ServeOptions) {
 			lsp,
 			dynamicTools: () => {
 				try {
-					return [...checkoutTools, ...mcp.toolsFor(Object.keys(configFor(directory).mcp ?? {}))];
+					return [...checkoutTools, ...mcp.toolsFor(Object.keys(configFor(directory).mcp ?? {}), mcpScope)];
 				} catch {
-					return [...checkoutTools, ...mcp.toolsFor(Object.keys(config.mcp ?? {}))];
+					return [...checkoutTools, ...mcp.toolsFor(Object.keys(config.mcp ?? {}), mcpScope)];
 				}
 			},
 			ledger: () => procs.ledger(id),
@@ -2364,7 +2380,7 @@ export function serve(opts: ServeOptions) {
 		dataDir: data,
 		version: VERSION,
 		cwd: real(process.env.HOME ?? process.cwd()),
-		onChange: (st) => publish("global", "mcp.status", { name: st.name, status: st.status, transport: st.transport, tools: st.tools, ...(st.error ? { error: scrubText(st.error) } : {}) }),
+		onChange: (st) => publish("global", "mcp.status", { name: st.name, status: st.status, transport: st.transport, tools: st.tools, ...(st.error ? { error: scrubText(st.error) } : {}), ...(st.sessions ? { sessions: st.sessions } : {}), ...(st.caller !== undefined ? { caller: st.caller } : {}), ...(st.instructions !== undefined ? { instructions: st.instructions } : {}) }),
 		log: (line) => console.error(line),
 	});
 	mcp.configure(config.mcp);

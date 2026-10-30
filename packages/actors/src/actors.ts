@@ -38,6 +38,11 @@ const ATTACH_MAX = 20_000;
 /** how long close and interrupt wait for a stopped turn to go idle before they end its session anyway */
 export const IDLE_WAIT_MS = 5_000;
 
+/** text without the turn-context blocks a session's user messages can carry: <system-reminder> and <mcp-instructions> */
+export function stripTurnContext(text: string): string {
+	return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").replace(/<mcp-instructions\b[^>]*>[\s\S]*?<\/mcp-instructions>/g, "");
+}
+
 export class ActorError extends Error {
 	constructor(
 		override readonly name: string,
@@ -827,7 +832,10 @@ export class Actors {
 			.slice(start)
 			.filter((m) => m?.role === "user" || m?.role === "assistant")
 			.map((m) => {
-				const t = typeof m.content === "string" ? m.content : (m.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+				const raw = typeof m.content === "string" ? m.content : (m.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+				// the spawner's turn context (folded into its user message on models without mid-conversation system
+				// messages) is the spawner's own: its helpers line, its routing, its mcp servers' instructions
+				const t = stripTurnContext(raw);
 				return t.trim() ? `${m.role}: ${t.trim().slice(0, 4000)}` : "";
 			})
 			.filter(Boolean);

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { McpClient, Tool as McpTool } from "@earendil-works/pi-mcp";
+import type { CallToolResult, McpClient, Tool as McpTool } from "@earendil-works/pi-mcp";
 import type { McpOAuthProvider, McpOAuthState, McpOAuthStateStore } from "@earendil-works/pi-mcp/oauth";
 import { Type } from "typebox";
 import { imageParts } from "./image.ts";
@@ -31,7 +31,42 @@ export interface McpServerConfig {
 	timeout?: number;
 	/** oauth for a remote server that asks for it; client id and secret when it does not register clients itself */
 	oauth?: false | { clientId?: string; clientSecret?: string; scope?: string };
+	/** which sessions see its tools: every session (default), or only top-level ones (no parent; forks count, spawned helpers do not) */
+	sessions?: "all" | "root";
+	/** true sends the calling session with every tools/call, in `_meta["cmx2/caller"]`; off by default, since it names sessions and folders */
+	caller?: boolean;
+	/** true puts the instructions the server sent at initialize in the turn context of sessions that see it; off by default */
+	instructions?: boolean;
 }
+
+/** the most of a server's instructions that reaches the turn context, in characters */
+export const MCP_INSTRUCTIONS_CAP = 4096;
+
+/** the session behind a tools/call, sent as `_meta["cmx2/caller"]` to a server with `caller: true` */
+export interface McpCaller {
+	sessionID: string;
+	/** the top of its agent tree; the session itself for a top-level session */
+	rootID: string;
+	parentID: string | null;
+	/** 0 for a top-level session, 1 for its helpers, and so on */
+	depth: number;
+	/** its path in the agent tree, such as /root/worker_a */
+	path: string;
+	directory: string;
+	/** the machine's short hostname */
+	host: string;
+	/** the model's tool call id */
+	callID: string;
+}
+
+/** the session asking for tools: helpers skip servers offered to top-level sessions only, and caller servers learn who called */
+export interface McpScope {
+	child: boolean;
+	caller: () => Omit<McpCaller, "callID">;
+}
+
+/** the `_meta` key the caller travels under */
+export const CALLER_META = "cmx2/caller";
 
 export type McpState = "connecting" | "connected" | "failed" | "disabled" | "needs_auth";
 
@@ -42,6 +77,12 @@ export interface McpStatus {
 	tools: string[];
 	error?: string;
 	server?: { name: string; version: string };
+	/** which sessions see its tools */
+	sessions?: "all" | "root";
+	/** whether its calls carry the calling session */
+	caller?: boolean;
+	/** whether its instructions reach the turn context (the entry says so and the server sent some) */
+	instructions?: boolean;
 }
 
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -103,6 +144,11 @@ interface Entry {
 	status: McpStatus;
 	client?: McpClient;
 	tools: Tool[];
+	/** the server's tool list as it sent it, for wrappers bound to a caller */
+	listed: McpTool[];
+	/** what the server sent as `instructions` at initialize */
+	instructions?: string;
+	toLlm?: ToLlm;
 	ready: Promise<void>;
 	/** failed redials since the connection was last up; 0 for a first dial */
 	tries: number;
@@ -112,6 +158,8 @@ interface Entry {
 
 export class McpPool {
 	private entries = new Map<string, Entry>();
+	/** wrappers bound to one session's caller, per server, rebuilt when the server's tool list changes */
+	private bound = new WeakMap<McpScope, Map<string, { from: Tool[]; tools: Tool[] }>>();
 
 	constructor(private readonly opts: { dataDir: string; version: string; cwd: string; onChange?: (s: McpStatus) => void; log?: (line: string) => void; redialMs?: number[] }) {}
 
@@ -150,11 +198,45 @@ export class McpPool {
 		return [...this.entries.values()].map((e) => ({ ...e.status, tools: [...e.status.tools] }));
 	}
 
-	/** the tools of the connected servers among these names (a session's config), as deferred tools */
-	toolsFor(names?: string[]): Tool[] {
+	/**
+	 * the tools of the connected servers among these names (a session's config), as deferred tools. with a
+	 * scope, a helper gets nothing from a server offered to top-level sessions only, and a server with
+	 * `caller: true` gets tools that send the scope's caller. without one, every server, and no caller
+	 */
+	toolsFor(names?: string[], scope?: McpScope): Tool[] {
 		const out: Tool[] = [];
-		for (const e of this.entries.values()) if (e.status.status === "connected" && (!names || names.includes(e.name))) out.push(...e.tools);
+		for (const e of this.entries.values()) {
+			if (e.status.status !== "connected" || (names && !names.includes(e.name))) continue;
+			if (!scope) out.push(...e.tools);
+			else if (!(scope.child && e.config.sessions === "root")) out.push(...(e.config.caller === true ? this.boundTools(e, scope) : e.tools));
+		}
 		return out;
+	}
+
+	/**
+	 * turn-context entries for the servers among these names whose profile entry says `instructions: true`:
+	 * `["mcp:<name>", text]` when the server is connected, sent instructions and is offered to this scope;
+	 * `["mcp:<name>", undefined]` otherwise, so the session drops the entry and sends it again if it comes back
+	 */
+	instructionsFor(names?: string[], scope?: McpScope): Array<[string, string | undefined]> {
+		const out: Array<[string, string | undefined]> = [];
+		for (const e of this.entries.values()) {
+			if (e.config.instructions !== true || (names && !names.includes(e.name))) continue;
+			const offered = e.status.status === "connected" && !!e.instructions && !(scope?.child && e.config.sessions === "root");
+			out.push([`mcp:${e.name}`, offered ? mcpInstructionsText(e.name, e.instructions!) : undefined]);
+		}
+		return out;
+	}
+
+	/** a caller server's tools for one scope, made once per tool list so a session's every step reuses them */
+	private boundTools(e: Entry, scope: McpScope): Tool[] {
+		let byServer = this.bound.get(scope);
+		if (!byServer) this.bound.set(scope, (byServer = new Map()));
+		const hit = byServer.get(e.name);
+		if (hit && hit.from === e.tools) return hit.tools;
+		const tools = e.listed.map((t) => wrap(e.name, t, () => this.clientOf(e.name), e.toLlm!, scope.caller));
+		byServer.set(e.name, { from: e.tools, tools });
+		return tools;
 	}
 
 	async close() {
@@ -199,8 +281,9 @@ export class McpPool {
 			name,
 			key: JSON.stringify(config),
 			config,
-			status: { name, transport: remote ? "http" : "stdio", status: "connecting", tools: [] },
+			status: { name, transport: remote ? "http" : "stdio", status: "connecting", tools: [], sessions: config.sessions === "root" ? "root" : "all", caller: config.caller === true },
 			tools: [],
+			listed: [],
 			ready: Promise.resolve(),
 			tries,
 		};
@@ -267,6 +350,8 @@ export class McpPool {
 			});
 			this.adopt(e, listed, toLlmContent);
 			e.status.server = { name: init.serverInfo.name, version: init.serverInfo.version };
+			e.instructions = typeof init.instructions === "string" && init.instructions.trim() ? init.instructions.trim() : undefined;
+			e.status.instructions = config.instructions === true && !!e.instructions;
 			this.set(e, { status: "connected" });
 		} catch (err) {
 			void client.close().catch(() => {});
@@ -275,6 +360,8 @@ export class McpPool {
 	}
 
 	private adopt(e: Entry, listed: McpTool[], toLlm: ToLlm) {
+		e.listed = listed;
+		e.toLlm = toLlm;
 		e.tools = listed.map((t) => wrap(e.name, t, () => this.clientOf(e.name), toLlm));
 		e.status.tools = listed.map((t) => t.name);
 	}
@@ -285,6 +372,18 @@ export class McpPool {
 		if (!e?.client || e.status.status !== "connected") throw new Error(`mcp server ${name} is ${e ? e.status.status : "no longer configured"}${e?.status.error ? `: ${e.status.error}` : ""}`);
 		return e.client;
 	}
+}
+
+/**
+ * a server's instructions as one turn-context block in <mcp-instructions server="name">, cut at MCP_INSTRUCTIONS_CAP
+ * characters with a note saying so. every "</" in the server's text becomes "<\\/", so no closing tag it sends
+ * (</mcp-instructions>, </system-reminder>) can end the block and make what follows read as cmx2's or the person's words
+ */
+export function mcpInstructionsText(server: string, text: string): string {
+	// escaped first, then cut, so the cap bounds what is sent; a cut that splits "<\\/" leaves a lone "<", which closes nothing
+	const escaped = text.replaceAll("</", "<\\/");
+	const body = escaped.length > MCP_INSTRUCTIONS_CAP ? `${escaped.slice(0, MCP_INSTRUCTIONS_CAP)}\n(cut at ${MCP_INSTRUCTIONS_CAP} of ${escaped.length} characters)` : escaped;
+	return `<mcp-instructions server="${server}">\ninstructions from mcp server ${server} (its tools load through tool_search as ${mcpToolName(server, "")}*):\n${body}\n</mcp-instructions>`;
 }
 
 /** one mcp tool as a cmx2 tool: same schema, output under the shared limits */
@@ -307,8 +406,22 @@ export async function mcpContent(result: Parameters<ToLlm>[0], server: string, t
 	return content;
 }
 
-/** one server tool as a deferred cmx2 tool. a server the user configured is trusted, so its `readOnlyHint` stands (the spec treats annotations as untrusted otherwise) */
-export function wrap(server: string, tool: McpTool, client: () => McpClient, toLlmContent: ToLlm): Tool {
+/**
+ * what a tools/call answered, checked the way pi-mcp's callTool checks it: an object, content a list when
+ * present (servers that send only structuredContent leave it out), structuredContent an object
+ */
+function callResult(value: unknown): CallToolResult {
+	const v = value as Record<string, unknown> | null;
+	if (!v || typeof v !== "object" || Array.isArray(v) || (v.content !== undefined && !Array.isArray(v.content))) throw new Error("the server answered tools/call with no content list");
+	if (v.structuredContent !== undefined && (typeof v.structuredContent !== "object" || v.structuredContent === null || Array.isArray(v.structuredContent))) throw new Error("the server answered tools/call with structuredContent that is not an object");
+	return (v.content === undefined ? { ...v, content: [] } : v) as unknown as CallToolResult;
+}
+
+/**
+ * one server tool as a deferred cmx2 tool. a server the user configured is trusted, so its `readOnlyHint` stands (the spec treats annotations as untrusted otherwise).
+ * with `caller`, each call carries the calling session and the call id in `_meta["cmx2/caller"]`; the model's arguments, a `_meta` key among them, stay in `arguments`
+ */
+export function wrap(server: string, tool: McpTool, client: () => McpClient, toLlmContent: ToLlm, caller?: () => Omit<McpCaller, "callID">): Tool {
 	const schema = (tool.inputSchema ?? { type: "object" }) as Record<string, unknown>;
 	return {
 		name: mcpToolName(server, tool.name),
@@ -316,8 +429,12 @@ export function wrap(server: string, tool: McpTool, client: () => McpClient, toL
 		description: `${tool.description?.trim() || tool.name} (mcp server ${server}, tool ${tool.name})`,
 		parameters: Type.Unsafe({ ...schema, type: "object", properties: (schema.properties as object) ?? {} }),
 		readOnly: tool.annotations?.readOnlyHint === true,
-		async execute(_id, params, signal): Promise<ToolResult<Record<string, unknown>>> {
-			const result = await client().callTool(tool.name, (params ?? {}) as Record<string, unknown>, { signal, timeoutMs: CALL_TIMEOUT_MS });
+		async execute(id, params, signal): Promise<ToolResult<Record<string, unknown>>> {
+			const args = (params ?? {}) as Record<string, unknown>;
+			const options = { signal, timeoutMs: CALL_TIMEOUT_MS };
+			const result = caller
+				? callResult(await client().request("tools/call", { name: tool.name, arguments: args, _meta: { [CALLER_META]: { ...caller(), callID: id } } }, options))
+				: await client().callTool(tool.name, args, options);
 			const content = await mcpContent(result, server, tool.name, toLlmContent);
 			return { content, details: { server, tool: tool.name }, ...(result.structuredContent !== undefined ? { structuredContent: result.structuredContent } : {}), isError: result.isError === true };
 		},

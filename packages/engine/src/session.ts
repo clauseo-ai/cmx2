@@ -463,9 +463,9 @@ function sha(s: string): string {
 	return createHash("sha256").update(s).digest("hex").slice(0, 16);
 }
 
-/** the same tools by name, in the same order (a count alone misses one tool gone and another come) */
-function sameToolNames(a: ReadonlyArray<{ name: string }>, b: ReadonlyArray<{ name: string }>): boolean {
-	return a.length === b.length && a.every((t, i) => t.name === b[i]!.name);
+/** the same tool objects in the same order */
+function sameTools(a: ReadonlyArray<unknown>, b: ReadonlyArray<unknown>): boolean {
+	return a.length === b.length && a.every((t, i) => t === b[i]);
 }
 
 function firstDiff(a: string, b: string): number | null {
@@ -517,6 +517,8 @@ export class EngineSession {
 	private skills!: Skills;
 	private deferred = new Map<string, Tool>();
 	private loaded = new Set<string>();
+	/** the executable tools the agent's current list was built from, for syncTools' identity check */
+	private builtFrom: Tool[] = [];
 	/** tools only run helpers reach (shell.spawn, pty.*), never declared */
 	private runOnly = new Map<string, Tool>();
 	private pendingEffort: Effort | undefined;
@@ -780,7 +782,7 @@ export class EngineSession {
 			// and a stale one would re-add what this just removed (53 tool_additions every turn, until the api refuses)
 			prepareNextTurnWithContext: (turn) => {
 				const tools = this.syncTools();
-				if (sameToolNames(turn.context.tools ?? [], tools)) return undefined;
+				if (sameTools(turn.context.tools ?? [], tools)) return undefined;
 				return { context: { ...turn.context, tools } };
 			},
 			// sequential tools are gated here; the rest in their execution (agentTools), so a response's asks are all open at once
@@ -856,7 +858,9 @@ export class EngineSession {
 	 * response are two open asks at once, each answered on its own. a refusal reads as a blocked call does.
 	 */
 	private agentTools(): AgentTool[] {
-		return this.executableTools().map((t) => {
+		const exec = this.executableTools();
+		this.builtFrom = exec;
+		return exec.map((t) => {
 			// argument names models bring from other harnesses (ARG_ALIASES) are renamed before pi validates them
 			const prepare = (t as { prepareArguments?: (a: unknown) => unknown }).prepareArguments;
 			const a = Object.hasOwn(ARG_ALIASES, t.name) ? { ...t, prepareArguments: (args: unknown) => aliasArgs(t.name, prepare ? prepare(args) : args) } : t;
@@ -873,10 +877,16 @@ export class EngineSession {
 		}) as unknown as AgentTool[];
 	}
 
-	/** the agent's tool list brought up to date when its names changed; the current list either way */
+	/**
+	 * the agent's tool list brought up to date when any tool it was built from changed; the current list either way.
+	 * compared by identity, not name: an mcp server whose caller setting flipped keeps its tool names but brings
+	 * new wrappers, and the old ones would keep sending (or not sending) the caller. tool objects are cached at
+	 * their sources (deferred map, mcp entries, caller-bound wrappers), so an unchanged set compares equal step to step
+	 */
 	private syncTools(): AgentTool[] {
+		const current = this.agent.state.tools as AgentTool[] | undefined;
+		if (current && sameTools(this.builtFrom, this.executableTools())) return current;
 		const tools = this.agentTools();
-		if (sameToolNames(this.agent.state.tools ?? [], tools)) return this.agent.state.tools as AgentTool[];
 		this.agent.state.tools = tools;
 		return tools;
 	}
