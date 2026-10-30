@@ -2,6 +2,20 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
+## unreleased
+
+contract version 7. additive: `POST /session/:id/title` (`regenerateTitle`) answers with the session after giving it a new title; 409 for history imported from cmx, 502 `TitleError` when no title model gave one (the title is unchanged). an older daemon answers 404.
+
+### added
+- `POST /session/:id/title`: a new title from what the session is about now, through the same structured request as the automatic title, over the session's first user message and its latest user and assistant text (4000 characters, newest kept). it replaces any title, given or generated, adds its cost to the session and sends `session.updated`. why: a client's "new title" asked the thread through a btw, a chat turn with no tools, so it could only get free text back.
+- `bun packages/eval/src/titles.ts [provider/model ...]`: titles three sample messages on real models and prints each title, how it came back and its cost.
+
+### changed
+- session titles come back structured. anthropic and google constrain the reply to a json schema `{ title }` natively (`output_config.format`, `responseJsonSchema` with a json mime type), which also holds on the anthropic models that answer a forced tool choice with a 400; openai-compatible endpoints get one `set_title` tool with a forced `tool_choice`, which compatible servers honour more widely than `response_format: json_schema`. the title is validated (a string, trimmed, lowercased, 1 to 60 characters, at most 8 words); an invalid one moves on to the next model. only a reply with no structured answer falls back to text: a text reply is cleaned as it is, a refused structured request is asked again as plain text.
+
+### fixed
+- the title request never sent its prompt: it passed pi a plain context, whose `systemPrompt` the adapters ignore, so the model saw only the message and sometimes answered with a label (`**title:** planning stetdoc testing on claude code` was stored as `title:** planning ...`). the request is built with `normalizeContext` now, and the text cleaner strips labels with emphasis (`**title:**`, `**Title**:`, `*session title:*`, `__title__ -`) and a heading line with the title below it.
+
 ## 0.9.5 - 2026-10-30
 
 contract version 7. additive: `ProcessInfo` carries `serve` (boolean) and `notify` (what can still fire, or null); `POST /session/:id/procs` takes `serve`; `process.updated` also goes out when a running job's listening ports change. older daemons also report contract 7 and send neither field: read a missing `serve` as false and a missing `notify` as unknown. `McpStatus` (`GET /mcp`, `mcp.status`, the reload answer) carries `sessions`, `caller` and `instructions`. `POST /session/:id/agents/close` answers 400 for a target that is the session itself or one of its ancestors; `/interrupt` answers as before.

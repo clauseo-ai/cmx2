@@ -5,6 +5,7 @@ format: slug, what happened, the fix or the rule.
 
 ## pi
 
+- **a plain `Context` loses its system prompt and tools (2026-10-30).** pi's adapters read a `TranscriptContext` (`{ messages }`), with the prompt and tools in a leading system message. a request built as `{ systemPrompt, tools, messages } as never` sends only the messages: the title request ran this way and its prompt never reached the model, which is how a reply like `**title:** planning ...` got through. build it with `normalizeContext({ systemPrompt, tools, messages })`; `packages/engine/test/title.test.ts` checks the prompt is on the wire.
 - **api churn.** pi's extension/sdk api broke in 4 of the 6 minor releases
   checked (0.84.0 ~12 items incl. rpc `message_update` deltas and
   SessionRepo v4; 0.84.3 thinking-level type rename; 0.86.0 custom
@@ -452,6 +453,7 @@ format: slug, what happened, the fix or the rule.
 
 ## machine and ops
 
+- **the suite inside a cmx2 helper fails two git push tests.** a helper's shell inherits `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`, the env that stops its own `git push`, and `security.test.ts` (and the push cases in `calls.test.ts`, `permission.test.ts`) then fail with exit 128. run them with `env -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u GIT_CONFIG_VALUE_0`.
 - **tcc.** a binary run from `~/Documents` makes launchd spawns stall for
   minutes on a consent prompt nobody can answer; copy the binary to
   `~/.local/share/cmx2/bin` at install.
