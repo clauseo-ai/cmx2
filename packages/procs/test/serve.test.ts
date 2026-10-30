@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { shellTool } from "@cmx2/tools";
@@ -135,4 +135,72 @@ test("the sweep stops when no process runs and starts again with the next one", 
 	await until(() => procs.sweeps > n, "a sweep after the spawn");
 	await procs.kill(p.id);
 	await until(() => !procs.sweeping, "the sweep to stop again", 2000);
+});
+
+/** a script standing in for lsof, in the scratch dir */
+function fakeLsof(name: string, body: string): string {
+	const path = join(root, name);
+	writeFileSync(path, `#!/bin/bash\n${body}\n`);
+	chmodSync(path, 0o755);
+	return path;
+}
+
+test("ptys are not swept: an open terminal starts no sweep and gets no port updates; its ports come on demand", async () => {
+	const own: ProcEvent[] = [];
+	const p2 = new Procs({ dataDir: join(root, "data-pty"), onEvent: (e) => own.push(e), killGrace: 500, portSweepMs: SWEEP });
+	const port = freePort();
+	const t = p2.spawn({ command: `exec bun -e 'Bun.serve({ port: ${port}, hostname: "127.0.0.1", fetch() { return new Response("ok") } })'`, tty: true, sessionID: "ses_p", origin: "model" });
+	started.push(t.pid);
+	expect(p2.sweeping).toBe(false);
+	for (let i = 0; i < 100 && !(await fetch(`http://127.0.0.1:${port}/`).then((r) => r.ok).catch(() => false)); i++) await Bun.sleep(50);
+	await Bun.sleep(SWEEP * 4);
+	expect(p2.sweeps).toBe(0);
+	expect(own.filter((e) => e.type === "proc.updated")).toEqual([]);
+	expect(await p2.ports(t.id)).toEqual([port]);
+	await p2.stopAll();
+});
+
+test("an lsof that hangs is killed at the timeout, said once, and the sweep keeps going", async () => {
+	const pids = join(root, "hung.pids");
+	// the background sleep keeps lsof's stdout open after lsof itself is killed, so only the hard deadline ends the read
+	const lsof = fakeLsof("lsof-hang", `sleep 30 & echo $! >> ${pids}\nexec sleep 30`);
+	const said: string[] = [];
+	const error = console.error;
+	console.error = (...a: unknown[]) => void said.push(a.join(" "));
+	const own: ProcEvent[] = [];
+	const p3 = new Procs({ dataDir: join(root, "data-hang"), onEvent: (e) => own.push(e), killGrace: 500, portSweepMs: 50, lsof, lsofTimeoutMs: 200 });
+	try {
+		const j = p3.spawn({ command: "sleep 30", sessionID: "ses_h", origin: "model" });
+		started.push(j.pid);
+		const t0 = Date.now();
+		await until(() => p3.sweeps >= 3, "three sweeps past a hung lsof", 5000);
+		expect(Date.now() - t0).toBeLessThan(3000);
+		expect(p3.sweeping).toBe(true);
+		expect(said.filter((s) => s.includes("did not answer")).length).toBe(1);
+		expect(own.filter((e) => e.type === "proc.updated")).toEqual([]);
+		await p3.stopAll();
+	} finally {
+		console.error = error;
+		if (existsSync(pids)) for (const pid of readFileSync(pids, "utf8").split("\n").filter(Boolean)) try { process.kill(Number(pid), "SIGKILL"); } catch {}
+	}
+});
+
+test("stop during a sweep: the answer that lands after stop changes nothing and no sweep follows", async () => {
+	const lsof = fakeLsof("lsof-slow", 'sleep 0.4; exec lsof "$@"');
+	const own: ProcEvent[] = [];
+	const p4 = new Procs({ dataDir: join(root, "data-stop"), onEvent: (e) => own.push(e), killGrace: 500, portSweepMs: 50, lsof });
+	const port = freePort();
+	// kept, so it is still running after stop and a late sweep could still touch it
+	const j = p4.spawn({ command: `exec bun -e 'Bun.serve({ port: ${port}, hostname: "127.0.0.1", fetch() { return new Response("ok") } })'`, keep: "stop-test", sessionID: "ses_s", origin: "model" });
+	started.push(j.pid);
+	await Bun.sleep(200);
+	expect(p4.sweeps).toBe(0);
+	await p4.stopAll();
+	const at = own.length;
+	await Bun.sleep(800);
+	expect(p4.sweeps).toBeLessThanOrEqual(1);
+	expect(own.slice(at)).toEqual([]);
+	expect(p4.get(j.id)!.ports).toEqual([]);
+	expect(p4.sweeping).toBe(false);
+	process.kill(-j.pid, "SIGKILL");
 });

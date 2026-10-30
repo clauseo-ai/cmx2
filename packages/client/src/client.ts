@@ -914,7 +914,7 @@ export function createClient(opts: ClientOptions) {
 				on_pattern?: string;
 				on_port?: number;
 			};
-			/** left running for a person or other tools to use; never counts in parked.jobs */
+			/** a dev server or preview the person will open, left running; never counts in parked.jobs */
 			serve?: boolean;
 		}, o?: CallOptions) =>
 			call<ProcessInfo>("POST", `/session/${encodeURIComponent(params.sessionID)}/procs`, undefined, body, o),

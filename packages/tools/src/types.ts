@@ -82,8 +82,8 @@ export interface ProcSpawn {
 	detach?: boolean;
 	notify?: ProcNotify;
 	/**
-	 * left running for a person or other tools to use (a dev server, a preview, a watcher nobody waits on): it gets no
-	 * default notify and never counts as a job the session waits on, even with a notify still armed
+	 * a dev server or preview the person will open, left running (a server started only to test against is a plain job):
+	 * it gets no default notify and never counts as a job the session waits on, even with a notify still armed
 	 */
 	serve?: boolean;
 }
@@ -101,7 +101,7 @@ export interface ProcSummary {
 	cursor: number;
 	/** tcp ports the process group listens on (looked up on demand) */
 	ports: number[];
-	/** started with serve: left running for a person or other tools, not waited on */
+	/** started with serve: a dev server or preview the person will open, not waited on */
 	serve: boolean;
 	keep?: string;
 	detached?: boolean;

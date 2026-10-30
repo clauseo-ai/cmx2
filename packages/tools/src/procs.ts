@@ -52,7 +52,7 @@ export function procTools(env: ToolEnv): Tool[] {
 				keep: Type.Optional(Type.String({ description: "name it to keep it alive after the session ends" })),
 				detach: Type.Optional(Type.Boolean({ description: "keep it alive across a daemon restart" })),
 				notify: Type.Optional(Notify),
-				serve: Type.Optional(Type.Boolean({ description: "left running for a person or other tools to use (a dev server, a preview); not waited on" })),
+				serve: Type.Optional(Type.Boolean({ description: "a dev server or preview the person will open; not waited on. a server you start only to test against is a plain job; stop it when done." })),
 			}),
 			async execute(_id, params) {
 				const p = host(env).spawn({ ...params, cwd: params.cwd ?? env.cwd });

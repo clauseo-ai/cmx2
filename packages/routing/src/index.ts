@@ -88,7 +88,7 @@ export const DEFAULT_ROUTING: RoutingConfig = {
 		"your own context is the most expensive in the tree: delegate reading and ask for digests.",
 		"a brief asks for a report under about 300 words, with the detail in a file the report names, and every claim in it naming the check behind it; a claim without a check is not done.",
 		"disjoint work runs in parallel, one writer per area, each writer in its own worktree.",
-		"long watches (builds, test suites, dev servers) are background jobs with notify, not helpers.",
+		"long watches (builds, test suites) are background jobs with notify, not helpers; a dev server or preview left for the person is a serve job.",
 		"when only helpers or jobs remain, end your turn; their reports wake you.",
 	],
 	// haiku past high spends 2 to 3x the tokens for 2 to 3 points, and an xhigh turn can end with no visible text, which is a helper's report

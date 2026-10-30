@@ -92,7 +92,7 @@ export function runDescription(has: ToolCheck = () => true): string {
 	const notes = ["paths resolve against the working directory."];
 	if (on.has("fs.read")) notes.push("fs.read returns the file's text as it is on disk, without line numbers; offset and limit count lines.");
 	if (on.has("shell.exec")) notes.push("shell.exec resolves with a non-zero exit_code instead of throwing.");
-	if (on.has("shell.spawn")) notes.push("shell.spawn starts a background job this session owns and returns at once; with notify, a message arrives in the session when it fires and starts a new turn if yours has ended, so nothing needs to wait on it; serve: true marks one left running for a person or other tools (a dev server, a preview), which nothing waits on.");
+	if (on.has("shell.spawn")) notes.push("shell.spawn starts a background job this session owns and returns at once; with notify, a message arrives in the session when it fires and starts a new turn if yours has ended, so nothing needs to wait on it. serve: a dev server or preview the person will open. a server you start only to test against is a plain job; stop it when done.");
 	if (on.has("pty.spawn")) notes.push("pty.* drives a terminal: write input with a trailing \\n, then read from the last cursor with wait_ms to get the reply.");
 	if ([...on].some((n) => n.startsWith("agents."))) notes.push("agents.* are the agent verbs, for fanning out work from a script.");
 	const imaging = ["fs.read", "shell.exec"].filter((n) => on.has(n));

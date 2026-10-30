@@ -513,9 +513,9 @@ export type ProcessInfo = {
 	kind: "pty" | "job";
 	status: "running" | "exited";
 	exitCode: number | null;
-	/** tcp ports the process group listens on, as last looked up; kept fresh by a sweep every few seconds while any process runs, and a change goes out as process.updated */
+	/** tcp ports the job's own process group listens on, as last looked up (a server in another group, under docker or setsid, shows []). kept fresh for jobs by a sweep every few seconds while any job runs, and a change goes out as process.updated; a pty's are looked up when its session's procs are read */
 	ports: Array<number>;
-	/** started with serve: left running for a person or other tools to use (a dev server, a preview). the session is not waiting on it: it never counts in parked.jobs, even with a notify still armed */
+	/** started with serve: a dev server or preview the person will open, left running. the session is not waiting on it: it never counts in parked.jobs, even with a notify still armed */
 	serve: boolean;
 	/** the notifications that can still fire: on_port goes once it fired, everything once the process exited; null when none */
 	notify: {

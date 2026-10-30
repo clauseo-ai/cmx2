@@ -42,8 +42,12 @@ export interface ProcsOptions {
 	keepExited?: number;
 	/** ms between sigterm and sigkill */
 	killGrace?: number;
-	/** ms between port sweeps while any process runs (PORT_SWEEP_MS); 0 turns the sweep off */
+	/** ms between port sweeps while any job runs (PORT_SWEEP_MS); 0 turns the sweep off */
 	portSweepMs?: number;
+	/** the lsof the sweep runs (default lsof on PATH); tests point it at a fake */
+	lsof?: string;
+	/** ms before a sweep's lsof is killed and given up on (5000) */
+	lsofTimeoutMs?: number;
 }
 
 export type SpawnOptions = ProcSpawn & {
@@ -138,14 +142,14 @@ export function probeDelay(elapsedMs: number): number {
 }
 const PATTERN_LINE_MAX = 8192;
 /**
- * how often the listening ports of every running process are looked up while any runs, so `ports` stays fresh and a change
+ * how often the listening ports of every running job (not ptys, see `swept`) are looked up while any runs, so `ports` stays fresh and a change
  * goes out as proc.updated without a client asking. one lsof covers all of them (`-g` takes a list of groups). measured on a
  * 12-core mac at a load average over 60: 28 ms of wall time (34 at p95) and 26 ms of cpu with 714 processes, 31 ms and
- * 29 ms with 1,717. so 3 s costs about 1% of one core while any process runs and nothing when none do; a port shows
+ * 29 ms with 1,717. so 3 s costs about 1% of one core while any job runs and nothing when none do; a port shows
  * within 3 s of being bound (on_port is the faster path for a session that waits on one). sweeps never overlap: the next one is timed from the end of the last.
  */
 export const PORT_SWEEP_MS = 3000;
-/** an lsof that takes longer than this is stopped and its sweep changes nothing */
+/** an lsof that takes longer than this is killed and its sweep changes nothing; the next sweep runs as usual */
 const SWEEP_LSOF_TIMEOUT_MS = 5000;
 
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-_]/g;
@@ -182,28 +186,38 @@ export async function listenersOf(port: number): Promise<Array<{ pid: number; pg
 }
 
 /**
- * the tcp ports each of these process groups listens on, from one lsof; undefined when lsof could not answer (not
- * installed, or stopped at the timeout), so a failed look never reads as "listens on nothing"
+ * the tcp ports each of these process groups listens on, from one lsof. "missing" when lsof cannot start, "slow" when it
+ * did not answer by the timeout (it is sent SIGKILL, and the answer is given up on even if a child it left holds the
+ * pipe), so a failed look never reads as "listens on nothing"
  */
-export async function listeningPorts(pgids: number[], timeoutMs = SWEEP_LSOF_TIMEOUT_MS): Promise<Map<number, Set<number>> | undefined> {
+export async function listeningPorts(pgids: number[], opts: { timeoutMs?: number; lsof?: string } = {}): Promise<Map<number, Set<number>> | "missing" | "slow"> {
 	const out = new Map<number, Set<number>>();
 	if (!pgids.length) return out;
+	const timeoutMs = opts.timeoutMs ?? SWEEP_LSOF_TIMEOUT_MS;
 	let proc: ReturnType<typeof Bun.spawn>;
 	try {
 		// -a ands the tcp filter with the group filter; lsof exits 1 when any listed group has no match, so its code says nothing
-		proc = Bun.spawn(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-g", pgids.join(","), "-Fgn"], { stdout: "pipe", stderr: "ignore" });
+		proc = Bun.spawn([opts.lsof ?? "lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-g", pgids.join(","), "-Fgn"], { stdout: "pipe", stderr: "ignore" });
 	} catch {
-		return undefined;
+		return "missing";
 	}
-	const timer = setTimeout(() => proc.kill(), timeoutMs);
-	let text: string;
-	try {
-		text = await new Response(proc.stdout as ReadableStream<Uint8Array>).text();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<undefined>((done) => {
+		timer = setTimeout(() => {
+			try {
+				proc.kill("SIGKILL");
+			} catch {}
+			done(undefined);
+		}, timeoutMs);
+	});
+	const work = (async () => {
+		const text = await new Response(proc.stdout as ReadableStream<Uint8Array>).text();
 		await proc.exited;
-	} finally {
-		clearTimeout(timer);
-	}
-	if (proc.signalCode) return undefined;
+		return text;
+	})().catch(() => undefined);
+	const text = await Promise.race([work, deadline]);
+	clearTimeout(timer);
+	if (text === undefined || proc.signalCode) return "slow";
 	let pgid = 0;
 	for (const line of text.split("\n")) {
 		if (line.startsWith("g")) pgid = Number(line.slice(1));
@@ -307,6 +321,8 @@ export class Procs {
 	private sweepTimer?: ReturnType<typeof setTimeout>;
 	/** lsof could not start: the sweep stays off (said once) */
 	private noLsof = false;
+	/** an lsof ran past its timeout once already (said once; the sweep goes on) */
+	private slowSaid = false;
 	/** sweeps run so far, for tests and the budget check */
 	sweeps = 0;
 
@@ -567,19 +583,25 @@ export class Procs {
 		this.emit({ type: "proc.updated", info: { ...e.info } });
 	}
 
-	private anyRunning(): boolean {
-		for (const e of this.entries.values()) if (e.info.status === "running") return true;
+	/** the sweep covers running jobs only: a pty's shell puts each command it runs in a group of its own, so the
+	 * pty's group finds nothing, and an open terminal would keep the sweep going for as long as it stays open */
+	private swept(e: Entry): boolean {
+		return e.info.status === "running" && !e.info.tty && e.pgid > 0;
+	}
+
+	private anyJobRunning(): boolean {
+		for (const e of this.entries.values()) if (this.swept(e)) return true;
 		return false;
 	}
 
-	/** whether a port sweep is scheduled or running: true exactly while some process runs */
+	/** whether a port sweep is scheduled or running: set when a job starts, unset at the first sweep that finds no job running (up to one interval after the last exits) */
 	get sweeping(): boolean {
 		return this.sweepTimer !== undefined;
 	}
 
 	/** schedules the next port sweep when a process runs and none is scheduled */
 	private armSweep() {
-		if (this.sweepTimer || this.stopped || this.noLsof || this.sweepMs <= 0 || !this.anyRunning()) return;
+		if (this.sweepTimer || this.stopped || this.noLsof || this.sweepMs <= 0 || !this.anyJobRunning()) return;
 		this.sweepTimer = setTimeout(() => {
 			void this.sweepPorts()
 				.catch((err: unknown) => console.error(`cmx2: the port sweep failed: ${err instanceof Error ? err.message : String(err)}`))
@@ -591,18 +613,21 @@ export class Procs {
 		this.sweepTimer.unref?.();
 	}
 
-	/** one lsof for every running process group; each process whose listening ports changed gets a proc.updated */
+	/** one lsof for every running job's process group; each job whose listening ports changed gets a proc.updated */
 	async sweepPorts() {
-		const live = [...this.entries.values()].filter((e) => e.info.status === "running" && e.pgid > 0);
+		const live = [...this.entries.values()].filter((e) => this.swept(e));
 		if (!live.length || this.stopped) return;
 		const began = performance.now();
-		const found = await listeningPorts([...new Set(live.map((e) => e.pgid))]);
+		const found = await listeningPorts([...new Set(live.map((e) => e.pgid))], { lsof: this.opts.lsof, timeoutMs: this.opts.lsofTimeoutMs });
 		this.sweeps++;
-		if (!found) {
-			if (!Bun.which("lsof")) {
-				this.noLsof = true;
-				console.error("cmx2: lsof is not installed, so process ports are looked up only when asked for");
-			}
+		if (found === "missing") {
+			this.noLsof = true;
+			console.error("cmx2: lsof could not be started, so job ports are looked up only when asked for");
+			return;
+		}
+		if (found === "slow") {
+			if (!this.slowSaid) console.error(`cmx2: lsof did not answer within ${this.opts.lsofTimeoutMs ?? SWEEP_LSOF_TIMEOUT_MS} ms and was killed; job ports keep their last value until a sweep answers`);
+			this.slowSaid = true;
 			return;
 		}
 		for (const e of live) {

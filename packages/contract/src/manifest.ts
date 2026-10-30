@@ -304,11 +304,12 @@ export const ProcessInfo = Type.Object(
 		status: Type.Union([Type.Literal("running"), Type.Literal("exited")]),
 		exitCode: Type.Union([Type.Integer(), Type.Null()]),
 		ports: Type.Array(Type.Integer(), {
-			description: "tcp ports the process group listens on, as last looked up; kept fresh by a sweep every few seconds while any process runs, and a change goes out as process.updated",
+			description:
+				"tcp ports the job's own process group listens on, as last looked up (a server in another group, under docker or setsid, shows []). kept fresh for jobs by a sweep every few seconds while any job runs, and a change goes out as process.updated; a pty's are looked up when its session's procs are read",
 		}),
 		serve: Type.Boolean({
 			description:
-				"started with serve: left running for a person or other tools to use (a dev server, a preview). the session is not waiting on it: it never counts in parked.jobs, even with a notify still armed",
+				"started with serve: a dev server or preview the person will open, left running. the session is not waiting on it: it never counts in parked.jobs, even with a notify still armed",
 		}),
 		notify: Type.Union(
 			[
@@ -1180,7 +1181,7 @@ export const ROUTES: RouteDef[] = [
 			keep: Type.Optional(Type.String({ description: "survives session end under this name" })),
 			detach: Type.Optional(Type.Boolean({ description: "survives daemon restart" })),
 			notify: Type.Optional(Type.Object({ on_exit: Type.Optional(Type.Boolean()), on_pattern: Type.Optional(Type.String()), on_port: Type.Optional(Type.Integer()) })),
-			serve: Type.Optional(Type.Boolean({ description: "left running for a person or other tools to use; never counts in parked.jobs" })),
+			serve: Type.Optional(Type.Boolean({ description: "a dev server or preview the person will open, left running; never counts in parked.jobs" })),
 		}),
 		response: ProcessInfo,
 		status: 201,

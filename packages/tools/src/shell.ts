@@ -175,7 +175,7 @@ export function shellTool(env: ToolEnv): Tool {
 
 with background, notify, keep, serve or tty the command starts as a job this session owns and the call returns at once with its id. notify says when you hear back: a message lands in this session when the job exits, when an output line matches a pattern, or when a port opens. if your turn has ended by then, the message starts a new one, so you can end your turn after starting a long build and pick up from the message. jobs end with the session unless keep names them.
 
-serve marks a job left running for a person or other tools to use, such as a dev server or a preview: it gets no exit notification by default and you are not waiting on it. start it with serve (on_port tells you when it is up), then give the url.`,
+serve: a dev server or preview the person will open. a server you start only to test against is a plain job; stop it when done. a serve job gets no exit notification by default and nothing waits on it; start it with serve (on_port tells you when it is up), then give the url.`,
 		parameters: Type.Object({
 			command: Type.String({ description: "bash command line" }),
 			timeout: Type.Optional(Type.Number({ description: `seconds before the command is killed, default ${DEFAULT_TIMEOUT_S}; not used for jobs` })),
@@ -183,7 +183,7 @@ serve marks a job left running for a person or other tools to use, such as a dev
 			notify: Type.Optional(Notify),
 			keep: Type.Optional(Type.String({ description: "a name that keeps the job alive after the session ends" })),
 			tty: Type.Optional(Type.Boolean({ description: "run the job in a terminal (for programs that need one)" })),
-			serve: Type.Optional(Type.Boolean({ description: "a job left running for a person or other tools to use (a dev server, a preview); starts it in the background with no default notify" })),
+			serve: Type.Optional(Type.Boolean({ description: "a dev server or preview the person will open; starts it in the background with no default notify. a server you start only to test against is a plain job; stop it when done." })),
 		}),
 		async execute(_id, params, signal, onUpdate): Promise<ToolResult<Record<string, unknown>>> {
 			if (params.background || params.notify || params.keep || params.tty || params.serve) {
