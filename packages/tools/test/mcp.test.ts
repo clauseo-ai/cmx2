@@ -157,6 +157,12 @@ test("instructions past the cap are cut, with a note that says how long they wer
 	expect(out).toContain(`\n${"x".repeat(MCP_INSTRUCTIONS_CAP)}\n(cut at ${MCP_INSTRUCTIONS_CAP} of ${MCP_INSTRUCTIONS_CAP + 904} characters)`);
 	expect(out).not.toContain("x".repeat(MCP_INSTRUCTIONS_CAP + 1));
 	expect(mcpInstructionsText("small", "short")).not.toContain("cut at");
+	// text made of "</" grows when escaped; the cap still bounds what is sent
+	const tags = mcpInstructionsText("tags", "</".repeat(3000));
+	const inner = tags.slice(tags.indexOf("_*):\n") + 5, tags.indexOf("\n(cut at"));
+	expect(inner.length).toBe(MCP_INSTRUCTIONS_CAP);
+	expect(tags).toContain(`(cut at ${MCP_INSTRUCTIONS_CAP} of 9000 characters)`);
+	expect(tags.split("</").length - 1).toBe(1);
 });
 
 test("a server's text cannot close its block: every </ inside it is neutralised, and the block closes once, at its end", () => {

@@ -380,8 +380,9 @@ export class McpPool {
  * (</mcp-instructions>, </system-reminder>) can end the block and make what follows read as cmx2's or the person's words
  */
 export function mcpInstructionsText(server: string, text: string): string {
-	const cut = text.length > MCP_INSTRUCTIONS_CAP ? `${text.slice(0, MCP_INSTRUCTIONS_CAP)}\n(cut at ${MCP_INSTRUCTIONS_CAP} of ${text.length} characters)` : text;
-	const body = cut.replaceAll("</", "<\\/");
+	// escaped first, then cut, so the cap bounds what is sent; a cut that splits "<\\/" leaves a lone "<", which closes nothing
+	const escaped = text.replaceAll("</", "<\\/");
+	const body = escaped.length > MCP_INSTRUCTIONS_CAP ? `${escaped.slice(0, MCP_INSTRUCTIONS_CAP)}\n(cut at ${MCP_INSTRUCTIONS_CAP} of ${escaped.length} characters)` : escaped;
 	return `<mcp-instructions server="${server}">\ninstructions from mcp server ${server} (its tools load through tool_search as ${mcpToolName(server, "")}*):\n${body}\n</mcp-instructions>`;
 }
 
