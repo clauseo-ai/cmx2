@@ -45,7 +45,7 @@ class ScratchProcs implements ProcHost {
 		else Object.assign(opts, { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
 		const p = Bun.spawn(["bash", "--norc", "--noprofile", "-c", o.command], opts as never);
 		entry.p = p;
-		entry.s = { id, pid: p.pid, command: o.command, cwd: String(opts.cwd), title: o.title ?? o.command, tty: !!o.tty, status: "running", exitCode: null, cursor: 0, ports: [], origin: "model", startedAt: Date.now(), ...(o.keep ? { keep: o.keep } : {}) };
+		entry.s = { id, pid: p.pid, command: o.command, cwd: String(opts.cwd), title: o.title ?? o.command, tty: !!o.tty, status: "running", exitCode: null, cursor: 0, ports: [], serve: !!o.serve, origin: "model", startedAt: Date.now(), ...(o.keep ? { keep: o.keep } : {}) };
 		if (!o.tty) for (const s of [p.stdout, p.stderr]) void (async () => { for await (const c of s as unknown as AsyncIterable<Uint8Array>) append(c); })();
 		void p.exited.then((code) => Object.assign(entry.s, { status: "exited", exitCode: code }));
 		this.procs.set(id, entry);

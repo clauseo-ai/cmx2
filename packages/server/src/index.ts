@@ -296,8 +296,8 @@ export function serve(opts: ServeOptions) {
 
 	const machine = systemInfo(data);
 	const procs = new Procs({ dataDir: data, onEvent: (e) => onProc(e) });
-	/** running background jobs that will notify this session (ptys and jobs without notify do not count) */
-	const liveJobsOf = (id: string) => procs.list({ sessionID: id }).filter((p) => p.status === "running" && !p.tty && p.notify && Object.keys(p.notify).length > 0).length;
+	/** running background jobs that will notify this session (ptys, serve jobs and jobs without notify do not count) */
+	const liveJobsOf = (id: string) => procs.list({ sessionID: id }).filter((p) => p.status === "running" && !p.tty && !p.serve && p.notify && Object.keys(p.notify).length > 0).length;
 	const terminals = new Terminals(procs);
 	// what a previous daemon left running: orphans are stopped, keep'd and detached ones adopted
 	const swept: SweepResult = procs.sweep();
@@ -1403,6 +1403,8 @@ export function serve(opts: ServeOptions) {
 			status: p.status,
 			exitCode: p.exitCode,
 			ports: p.ports,
+			serve: p.serve,
+			notify: p.armed,
 			origin: p.origin,
 			startedAt: p.startedAt,
 			...(p.endedAt ? { endedAt: p.endedAt } : {}),
@@ -2895,7 +2897,7 @@ export function serve(opts: ServeOptions) {
 			const id = pr[1]!;
 			const stored = row(id);
 			if (stored.archived_at) throw new HttpError(409, "ConflictError", `session ${id} has ended; start a new one`);
-			const b = await bodyOf<{ command: string; tty?: boolean; title?: string; keep?: string; detach?: boolean; notify?: { on_exit?: boolean; on_pattern?: string; on_port?: number } }>(req, "startProc");
+			const b = await bodyOf<{ command: string; tty?: boolean; title?: string; keep?: string; detach?: boolean; serve?: boolean; notify?: { on_exit?: boolean; on_pattern?: string; on_port?: number } }>(req, "startProc");
 			const info = procs.spawn({ ...b, cwd: stored.directory, sessionID: id, origin: "user" });
 			return json(procJson(info), 201);
 		}

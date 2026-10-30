@@ -112,12 +112,34 @@ run(code)                                                                       
 ## processes and jobs
 
 - `procs.spawn({cmd, cwd, tty?, env?, notify?: {on_exit?, on_pattern?,
-  on_port?}, keep?: name})` → `{pid, id, ports?}`; output retained head/tail
+  on_port?}, keep?: name, serve?})` → `{pid, id, ports?}`; output retained head/tail
   with cursors; `procs.write(id, chars)`, `procs.read(id, since_cursor)`,
   `procs.kill(id)`, `procs.list()`.
 - notifications are mailbox items of kind `job`, so a parked owning session wakes.
-- ownership registry in sqlite: session id, pid, pgid, ports (polled from
-  `lsof` on demand), started at, keep name. ledger appended each turn.
+- what a background process is for: a plain job is one the session waits on
+  (`shell` with `background` defaults to `notify: {on_exit: true}`); a job
+  started with `serve: true` is left running for a person or other tools (a
+  dev server, a preview) and gets no default notify. an explicit notify on a
+  serve job still fires (on_port to learn it is up). `parked.jobs` and the 1h
+  ttl rule count running non-tty jobs with a notify and without serve, so a
+  session whose only process is a dev server it serves is idle, not parked.
+  the ledger line says `serve`. `ProcessInfo` carries `serve` and `notify`,
+  what can still fire: on_port goes once it fired, everything once the process
+  exited, null when nothing is armed. (a plain job whose only notify was an
+  on_port that fired still counts in `parked.jobs` until it exits, as before.)
+- ports: the registry looks up the listening tcp ports of every running
+  process (jobs, ptys, adopted groups) with one `lsof -iTCP -sTCP:LISTEN -a -g
+  <pgid,...> -Fgn` every 3 s (`PORT_SWEEP_MS`), and a process whose ports
+  changed gets `process.updated`; an on_port that fires and `GET
+  /session/:id/procs` set them too. the sweep is scheduled only while some
+  process runs and the next one is timed from the end of the last, so they
+  never overlap. measured on a 12-core mac at a load average over 60: 28 ms
+  of wall time (34 ms p95) and 26 ms of cpu per lsof with 714 processes, 31 ms
+  and 29 ms with 1,717; about 1% of one core while any process runs, nothing
+  when none do. an lsof that takes over 5 s is stopped and changes nothing;
+  without lsof installed the sweep stays off and ports come only from on_port.
+- ownership registry in sqlite: session id, pid, pgid, ports (from the sweep
+  above), started at, keep name. ledger appended each turn.
   session end reaps everything not `keep`ed; daemon start reaps orphans
   from the journal and reports them.
 - exposed to the model as `shell.exec` and `pty.*` inside `run`, and as a

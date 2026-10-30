@@ -38,7 +38,7 @@
 							},
 							"jobs": {
 								"type": "integer",
-								"description": "background jobs that will notify it"
+								"description": "background jobs that will notify it; serve jobs never count"
 							}
 						},
 						"description": "the turn has ended and the session waits on these; a report or a job notice wakes it"
@@ -1012,7 +1012,7 @@
 											},
 											"jobs": {
 												"type": "integer",
-												"description": "background jobs that will notify it"
+												"description": "background jobs that will notify it; serve jobs never count"
 											}
 										},
 										"description": "the turn has ended and the session waits on these; a report or a job notice wakes it"
@@ -1680,6 +1680,8 @@
 					"status",
 					"exitCode",
 					"ports",
+					"serve",
+					"notify",
 					"origin",
 					"startedAt"
 				],
@@ -1749,7 +1751,33 @@
 						"items": {
 							"type": "integer"
 						},
-						"description": "tcp ports the process group listens on, as last looked up"
+						"description": "tcp ports the process group listens on, as last looked up; kept fresh by a sweep every few seconds while any process runs, and a change goes out as process.updated"
+					},
+					"serve": {
+						"type": "boolean",
+						"description": "started with serve: left running for a person or other tools to use (a dev server, a preview). the session is not waiting on it: it never counts in parked.jobs, even with a notify still armed"
+					},
+					"notify": {
+						"anyOf": [
+							{
+								"type": "object",
+								"properties": {
+									"on_exit": {
+										"type": "boolean"
+									},
+									"on_pattern": {
+										"type": "string"
+									},
+									"on_port": {
+										"type": "integer"
+									}
+								}
+							},
+							{
+								"type": "null"
+							}
+						],
+						"description": "the notifications that can still fire: on_port goes once it fired, everything once the process exited; null when none"
 					},
 					"origin": {
 						"anyOf": [
@@ -2464,7 +2492,7 @@
 															},
 															"jobs": {
 																"type": "integer",
-																"description": "background jobs that will notify it"
+																"description": "background jobs that will notify it; serve jobs never count"
 															}
 														},
 														"description": "the turn has ended and the session waits on these; a report or a job notice wakes it"
@@ -4218,7 +4246,7 @@
 			},
 			"Event_process_updated": {
 				"type": "object",
-				"description": "a process changed (title, size, keep)",
+				"description": "a process changed (title, size, keep, the ports it listens on, what notify is still armed)",
 				"x-cmx2-version": 1,
 				"required": [
 					"id",
@@ -9127,7 +9155,7 @@
 																},
 																"jobs": {
 																	"type": "integer",
-																	"description": "background jobs that will notify it"
+																	"description": "background jobs that will notify it; serve jobs never count"
 																}
 															},
 															"description": "the turn has ended and the session waits on these; a report or a job notice wakes it"
@@ -12987,6 +13015,10 @@
 												"type": "integer"
 											}
 										}
+									},
+									"serve": {
+										"type": "boolean",
+										"description": "left running for a person or other tools to use; never counts in parked.jobs"
 									}
 								}
 							}

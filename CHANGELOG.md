@@ -2,6 +2,15 @@
 
 notable changes to cmx2, newest first. the format follows keep a changelog. "contract" means the daemon's http api; clients such as the boxbox web client read it.
 
+## unreleased
+
+contract version 7. additive: `ProcessInfo` carries `serve` (boolean) and `notify` (what can still fire, or null); `POST /session/:id/procs` takes `serve`; `process.updated` also goes out when a running process's listening ports change.
+
+### added
+- `serve: true` on `shell` and on `shell.spawn` in run: a process left running for a person or other tools to use (a dev server, a preview). it gets no default notify and never counts in `parked.jobs` or toward the 1h ttl switch, even with an explicit notify still armed; an explicit notify (on_port to learn it is up) fires as before. on `shell`, serve starts the command in the background. a background job without serve behaves as before. the tool descriptions and the system prompt say to start a dev server or preview for the person with serve and give them the url. why: a dev server started the default way counted as a job the session waited on until it exited, so a client could not tell "here is your dev server" from "waiting on a long task".
+- ports stay fresh without a client asking: while any process runs, one `lsof` every 3 s covers every running process group, and a process whose listening ports changed gets `process.updated`. it costs 26 to 29 ms of cpu per sweep on a busy mac with 700 to 1,700 processes (about 1% of one core) and stops when nothing runs.
+- `notify` on `ProcessInfo` is what is still armed: on_port drops out once it fired, everything once the process exited. the ledger line marks serve jobs.
+
 ## 0.9.4 - 2026-10-30
 
 contract version 7. no shape changes.

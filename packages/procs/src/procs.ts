@@ -17,7 +17,10 @@ export interface ProcInfo extends ProcSummary {
 	endedAt?: number;
 	/** the signal that ended it, when one did */
 	signal?: string;
+	/** the notify it was started with; what is still armed is `armed` */
 	notify?: ProcNotify;
+	/** the notifications that can still fire: on_port goes once it fired, everything once the process exited; null when none */
+	armed: ProcNotify | null;
 	/** taken over from a previous daemon: still running, its earlier output is gone */
 	adopted?: boolean;
 }
@@ -39,6 +42,8 @@ export interface ProcsOptions {
 	keepExited?: number;
 	/** ms between sigterm and sigkill */
 	killGrace?: number;
+	/** ms between port sweeps while any process runs (PORT_SWEEP_MS); 0 turns the sweep off */
+	portSweepMs?: number;
 }
 
 export type SpawnOptions = ProcSpawn & {
@@ -84,6 +89,7 @@ interface JournalEntry {
 	sessionID: string | null;
 	keep?: string;
 	detached?: boolean;
+	serve?: boolean;
 	startedAt: number;
 }
 
@@ -112,6 +118,8 @@ interface Entry {
 	portTimer?: ReturnType<typeof setTimeout>;
 	killTimer?: ReturnType<typeof setTimeout>;
 	liveTimer?: ReturnType<typeof setInterval>;
+	/** when its ports were last set, so a sweep that began before does not undo a newer answer */
+	portsAt: number;
 }
 
 const HEAD = 64 * 1024;
@@ -129,6 +137,16 @@ export function probeDelay(elapsedMs: number): number {
 	return elapsedMs < PORT_FAST_MS ? PORT_PROBE_MS : PORT_SLOW_MS;
 }
 const PATTERN_LINE_MAX = 8192;
+/**
+ * how often the listening ports of every running process are looked up while any runs, so `ports` stays fresh and a change
+ * goes out as proc.updated without a client asking. one lsof covers all of them (`-g` takes a list of groups). measured on a
+ * 12-core mac at a load average over 60: 28 ms of wall time (34 at p95) and 26 ms of cpu with 714 processes, 31 ms and
+ * 29 ms with 1,717. so 3 s costs about 1% of one core while any process runs and nothing when none do; a port shows
+ * within 3 s of being bound (on_port is the faster path for a session that waits on one). sweeps never overlap: the next one is timed from the end of the last.
+ */
+export const PORT_SWEEP_MS = 3000;
+/** an lsof that takes longer than this is stopped and its sweep changes nothing */
+const SWEEP_LSOF_TIMEOUT_MS = 5000;
 
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-_]/g;
 
@@ -158,6 +176,45 @@ export async function listenersOf(port: number): Promise<Array<{ pid: number; pg
 		else if (line.startsWith("c") && pid) {
 			const pg = await outputOf(["ps", "-o", "pgid=", "-p", String(pid)], 2000);
 			out.push({ pid, pgid: Number(pg.trim()) || 0, command: line.slice(1) });
+		}
+	}
+	return out;
+}
+
+/**
+ * the tcp ports each of these process groups listens on, from one lsof; undefined when lsof could not answer (not
+ * installed, or stopped at the timeout), so a failed look never reads as "listens on nothing"
+ */
+export async function listeningPorts(pgids: number[], timeoutMs = SWEEP_LSOF_TIMEOUT_MS): Promise<Map<number, Set<number>> | undefined> {
+	const out = new Map<number, Set<number>>();
+	if (!pgids.length) return out;
+	let proc: ReturnType<typeof Bun.spawn>;
+	try {
+		// -a ands the tcp filter with the group filter; lsof exits 1 when any listed group has no match, so its code says nothing
+		proc = Bun.spawn(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-g", pgids.join(","), "-Fgn"], { stdout: "pipe", stderr: "ignore" });
+	} catch {
+		return undefined;
+	}
+	const timer = setTimeout(() => proc.kill(), timeoutMs);
+	let text: string;
+	try {
+		text = await new Response(proc.stdout as ReadableStream<Uint8Array>).text();
+		await proc.exited;
+	} finally {
+		clearTimeout(timer);
+	}
+	if (proc.signalCode) return undefined;
+	let pgid = 0;
+	for (const line of text.split("\n")) {
+		if (line.startsWith("g")) pgid = Number(line.slice(1));
+		else if (line.startsWith("p")) pgid = 0;
+		else if (line.startsWith("n") && pgid) {
+			const m = line.match(/:(\d+)$/);
+			if (m) {
+				let set = out.get(pgid);
+				if (!set) out.set(pgid, (set = new Set()));
+				set.add(Number(m[1]));
+			}
 		}
 	}
 	return out;
@@ -216,12 +273,22 @@ function portOpen(port: number, host: string): Promise<boolean> {
 	});
 }
 
+/** a copy of what can fire, or null when nothing was asked for */
+function armedOf(n: ProcNotify | undefined): ProcNotify | null {
+	if (!n) return null;
+	const a: ProcNotify = {};
+	if (n.on_exit) a.on_exit = true;
+	if (n.on_pattern) a.on_pattern = n.on_pattern;
+	if (n.on_port !== undefined) a.on_port = n.on_port;
+	return Object.keys(a).length ? a : null;
+}
+
 function randomId(prefix: string): string {
 	return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function summaryOf(info: ProcInfo): ProcSummary {
-	const { sessionID: _s, endedAt: _e, signal: _g, notify: _n, adopted: _a, ...summary } = info;
+	const { sessionID: _s, endedAt: _e, signal: _g, notify: _n, armed: _r, adopted: _a, ...summary } = info;
 	return summary;
 }
 
@@ -235,6 +302,13 @@ export class Procs {
 	private readonly keepExited: number;
 	private readonly grace: number;
 	private stopped = false;
+	private readonly sweepMs: number;
+	/** set from when a sweep is scheduled until it has finished; unset when nothing runs */
+	private sweepTimer?: ReturnType<typeof setTimeout>;
+	/** lsof could not start: the sweep stays off (said once) */
+	private noLsof = false;
+	/** sweeps run so far, for tests and the budget check */
+	sweeps = 0;
 
 	constructor(private readonly opts: ProcsOptions) {
 		this.daemonPid = opts.daemonPid ?? process.pid;
@@ -246,6 +320,7 @@ export class Procs {
 		this.tail = opts.tailBytes ?? TAIL;
 		this.keepExited = opts.keepExited ?? 32;
 		this.grace = opts.killGrace ?? 2000;
+		this.sweepMs = opts.portSweepMs ?? PORT_SWEEP_MS;
 	}
 
 	private emit(e: ProcEvent) {
@@ -289,12 +364,14 @@ export class Procs {
 			exitCode: null,
 			cursor: 0,
 			ports: [],
+			serve: opts.serve === true,
 			...(opts.keep ? { keep: opts.keep } : {}),
 			...(opts.detach ? { detached: true } : {}),
 			origin: opts.origin,
 			startedAt: Date.now(),
 			sessionID: opts.sessionID,
 			...(opts.notify && Object.keys(opts.notify).length ? { notify: opts.notify } : {}),
+			armed: armedOf(opts.notify),
 		};
 		let pattern: RegExp | undefined;
 		if (opts.notify?.on_pattern) {
@@ -315,6 +392,7 @@ export class Procs {
 			partial: "",
 			pattern,
 			decoder: new TextDecoder(),
+			portsAt: 0,
 		};
 		const onData = (bytes: Uint8Array) => this.onData(entry, bytes);
 		let child: Child;
@@ -342,6 +420,7 @@ export class Procs {
 		if (opts.notify?.on_port) this.probePort(entry, opts.notify.on_port);
 		this.writeJournal();
 		this.emit({ type: "proc.started", info: { ...info } });
+		this.armSweep();
 		return { ...info };
 	}
 
@@ -406,12 +485,15 @@ export class Procs {
 		e.info.exitCode = code;
 		e.info.endedAt = Date.now();
 		e.info.ports = [];
+		e.portsAt = performance.now();
+		const armed = e.info.armed;
+		e.info.armed = null;
 		if (signal) e.info.signal = signal;
 		e.child = undefined;
 		this.wake(e);
 		this.writeJournal();
 		this.emit({ type: "proc.exited", info: { ...e.info } });
-		if (e.info.notify?.on_exit) this.emit({ type: "proc.notify", info: { ...e.info }, reason: "exit", detail: this.exitDetail(e) });
+		if (armed?.on_exit) this.emit({ type: "proc.notify", info: { ...e.info }, reason: "exit", detail: this.exitDetail(e) });
 		this.forgetOldExited();
 	}
 
@@ -446,8 +528,9 @@ export class Procs {
 				// the job may have exited while lsof ran: no port and no notice after its exit
 				if (e.info.status !== "running" || this.stopped) return;
 				const mine = owners.filter((o) => o.pgid === e.info.pid);
+				// the watch is over either way: on_port is no longer armed
+				this.disarmPort(e, owners.length === 0 || mine.length > 0 ? port : undefined);
 				if (owners.length === 0 || mine.length > 0) {
-					if (!e.info.ports.includes(port)) e.info.ports = [...e.info.ports, port].sort((a, b) => a - b);
 					this.emit({ type: "proc.notify", info: { ...e.info }, reason: "port", detail: `port ${port} is accepting connections${mine[0] ? ` (pid ${mine[0].pid}, this job)` : ""}` });
 				} else {
 					const o = owners[0]!;
@@ -460,6 +543,72 @@ export class Procs {
 		};
 		e.portTimer = setTimeout(tick, PORT_PROBE_MS);
 		e.portTimer.unref?.();
+	}
+
+	/** on_port fired: it is no longer armed, and the port joins `ports` when it is this job's; one proc.updated says both */
+	private disarmPort(e: Entry, port?: number) {
+		if (e.info.armed) {
+			const { on_port: _p, ...rest } = e.info.armed;
+			e.info.armed = Object.keys(rest).length ? rest : null;
+		}
+		if (port !== undefined && !e.info.ports.includes(port)) {
+			e.info.ports = [...e.info.ports, port].sort((a, b) => a - b);
+			e.portsAt = performance.now();
+		}
+		this.emit({ type: "proc.updated", info: { ...e.info } });
+	}
+
+	/** sets a running process's ports; a change goes out as proc.updated */
+	private setPorts(e: Entry, ports: number[]) {
+		if (e.info.status !== "running") return;
+		e.portsAt = performance.now();
+		if (ports.length === e.info.ports.length && ports.every((p, i) => p === e.info.ports[i])) return;
+		e.info.ports = ports;
+		this.emit({ type: "proc.updated", info: { ...e.info } });
+	}
+
+	private anyRunning(): boolean {
+		for (const e of this.entries.values()) if (e.info.status === "running") return true;
+		return false;
+	}
+
+	/** whether a port sweep is scheduled or running: true exactly while some process runs */
+	get sweeping(): boolean {
+		return this.sweepTimer !== undefined;
+	}
+
+	/** schedules the next port sweep when a process runs and none is scheduled */
+	private armSweep() {
+		if (this.sweepTimer || this.stopped || this.noLsof || this.sweepMs <= 0 || !this.anyRunning()) return;
+		this.sweepTimer = setTimeout(() => {
+			void this.sweepPorts()
+				.catch((err: unknown) => console.error(`cmx2: the port sweep failed: ${err instanceof Error ? err.message : String(err)}`))
+				.finally(() => {
+					this.sweepTimer = undefined;
+					this.armSweep();
+				});
+		}, this.sweepMs);
+		this.sweepTimer.unref?.();
+	}
+
+	/** one lsof for every running process group; each process whose listening ports changed gets a proc.updated */
+	async sweepPorts() {
+		const live = [...this.entries.values()].filter((e) => e.info.status === "running" && e.pgid > 0);
+		if (!live.length || this.stopped) return;
+		const began = performance.now();
+		const found = await listeningPorts([...new Set(live.map((e) => e.pgid))]);
+		this.sweeps++;
+		if (!found) {
+			if (!Bun.which("lsof")) {
+				this.noLsof = true;
+				console.error("cmx2: lsof is not installed, so process ports are looked up only when asked for");
+			}
+			return;
+		}
+		for (const e of live) {
+			if (this.stopped || e.portsAt > began) continue;
+			this.setPorts(e, [...(found.get(e.pgid) ?? [])].sort((a, b) => a - b));
+		}
 	}
 
 	// ---------- io ----------
@@ -616,7 +765,7 @@ export class Procs {
 			const m = line.match(/^n.*:(\d+)$/);
 			if (m) ports.add(Number(m[1]));
 		}
-		e.info.ports = [...ports].sort((a, b) => a - b);
+		this.setPorts(e, [...ports].sort((a, b) => a - b));
 		return e.info.ports;
 	}
 
@@ -644,7 +793,7 @@ export class Procs {
 		if (!live.length) return undefined;
 		const lines = live.map((p) => {
 			const cmd = p.command.length > 80 ? `${p.command.slice(0, 77)}...` : p.command;
-			const bits = [`${p.id}`, p.tty ? "pty" : "job", `pid ${p.pid}`, ...(p.ports.length ? [`ports ${p.ports.join(",")}`] : []), ...(p.keep ? [`keep ${p.keep}`] : [])];
+			const bits = [`${p.id}`, p.tty ? "pty" : "job", `pid ${p.pid}`, ...(p.serve ? ["serve"] : []), ...(p.ports.length ? [`ports ${p.ports.join(",")}`] : []), ...(p.keep ? [`keep ${p.keep}`] : [])];
 			return `- ${bits.join(", ")}: ${cmd}`;
 		});
 		return `processes alive:\n${lines.join("\n")}`;
@@ -702,6 +851,7 @@ export class Procs {
 				sessionID: e.info.sessionID,
 				...(e.info.keep ? { keep: e.info.keep } : {}),
 				...(e.info.detached ? { detached: true } : {}),
+				...(e.info.serve ? { serve: true } : {}),
 				startedAt: e.info.startedAt,
 			}));
 		const path = this.journalPath();
@@ -785,9 +935,11 @@ export class Procs {
 			exitCode: null,
 			cursor: 0,
 			ports: [],
+			serve: false,
 			origin: opts.origin,
 			startedAt: Date.now(),
 			sessionID: opts.sessionID,
+			armed: null,
 		};
 		const e: Entry = {
 			info,
@@ -800,6 +952,7 @@ export class Procs {
 			lastDataAt: 0,
 			partial: "",
 			decoder: new TextDecoder(),
+			portsAt: 0,
 		};
 		// not our child, so no exit event arrives: look every ADOPTED_POLL_MS
 		e.liveTimer = setInterval(() => {
@@ -809,6 +962,7 @@ export class Procs {
 		this.entries.set(id, e);
 		this.writeJournal();
 		this.emit({ type: "proc.started", info: { ...info } });
+		this.armSweep();
 		return { info: { ...info }, output: (bytes) => this.onData(e, bytes) };
 	}
 
@@ -825,11 +979,13 @@ export class Procs {
 			exitCode: null,
 			cursor: 0,
 			ports: [],
+			serve: p.serve === true,
 			...(p.keep ? { keep: p.keep } : {}),
 			...(p.detached ? { detached: true } : {}),
 			origin: p.origin,
 			startedAt: p.startedAt,
 			sessionID: p.sessionID,
+			armed: null,
 			adopted: true,
 		};
 		const e: Entry = {
@@ -842,6 +998,7 @@ export class Procs {
 			lastDataAt: 0,
 			partial: "",
 			decoder: new TextDecoder(),
+			portsAt: 0,
 		};
 		// not our child, so no exit event arrives: look every few seconds
 		e.liveTimer = setInterval(() => {
@@ -849,6 +1006,7 @@ export class Procs {
 		}, 3000);
 		e.liveTimer.unref?.();
 		this.entries.set(p.id, e);
+		this.armSweep();
 	}
 
 	/** daemon shutdown: everything not kept or detached stops; what stays is journaled for the next start */
@@ -862,6 +1020,8 @@ export class Procs {
 			clearTimeout(e.portTimer);
 			clearInterval(e.liveTimer);
 		}
+		clearTimeout(this.sweepTimer);
+		this.sweepTimer = undefined;
 		this.writeJournal();
 		return { killed: doomed.map((p) => this.get(p.id) ?? p), left };
 	}

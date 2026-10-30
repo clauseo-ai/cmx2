@@ -173,7 +173,9 @@ export function shellTool(env: ToolEnv): Tool {
 		label: "shell",
 		description: `run one bash command in the working directory and get its combined stdout and stderr (the last 2000 lines, full output spilled to a file when longer). no stdin; timeout in seconds, default ${DEFAULT_TIMEOUT_S}, up to ${MAX_TIMEOUT_S}. image files the command writes and prints the path of come back as images.
 
-with background, notify, keep or tty the command starts as a job this session owns and the call returns at once with its id. notify says when you hear back: a message lands in this session when the job exits, when an output line matches a pattern, or when a port opens. if your turn has ended by then, the message starts a new one, so you can end your turn after starting a dev server or a long build and pick up from the message. jobs end with the session unless keep names them.`,
+with background, notify, keep, serve or tty the command starts as a job this session owns and the call returns at once with its id. notify says when you hear back: a message lands in this session when the job exits, when an output line matches a pattern, or when a port opens. if your turn has ended by then, the message starts a new one, so you can end your turn after starting a long build and pick up from the message. jobs end with the session unless keep names them.
+
+serve marks a job left running for a person or other tools to use, such as a dev server or a preview: it gets no exit notification by default and you are not waiting on it. start it with serve (on_port tells you when it is up), then give the url.`,
 		parameters: Type.Object({
 			command: Type.String({ description: "bash command line" }),
 			timeout: Type.Optional(Type.Number({ description: `seconds before the command is killed, default ${DEFAULT_TIMEOUT_S}; not used for jobs` })),
@@ -181,14 +183,16 @@ with background, notify, keep or tty the command starts as a job this session ow
 			notify: Type.Optional(Notify),
 			keep: Type.Optional(Type.String({ description: "a name that keeps the job alive after the session ends" })),
 			tty: Type.Optional(Type.Boolean({ description: "run the job in a terminal (for programs that need one)" })),
+			serve: Type.Optional(Type.Boolean({ description: "a job left running for a person or other tools to use (a dev server, a preview); starts it in the background with no default notify" })),
 		}),
 		async execute(_id, params, signal, onUpdate): Promise<ToolResult<Record<string, unknown>>> {
-			if (params.background || params.notify || params.keep || params.tty) {
+			if (params.background || params.notify || params.keep || params.tty || params.serve) {
 				if (!env.procs) throw new Error("background jobs are not available in this session; run the command in the foreground");
-				const notify = params.notify ?? { on_exit: true };
-				const job = env.procs.spawn({ command: params.command, cwd: env.cwd, tty: params.tty, keep: params.keep, notify });
+				// a serve job is not waited on, so it has no exit notice unless one is asked for
+				const notify = params.notify ?? (params.serve ? undefined : { on_exit: true });
+				const job = env.procs.spawn({ command: params.command, cwd: env.cwd, tty: params.tty, keep: params.keep, notify, ...(params.serve ? { serve: true } : {}) });
 				return {
-					content: [text(`started job ${procLine(job)}\n${describeNotify(notify)}. its output: pty.read({ id: "${job.id}" }) in run.`)],
+					content: [text(`started job ${procLine(job)}\n${params.serve && !notify ? "a serve job: nothing waits on it and no message arrives unless notify asks for one" : describeNotify(notify)}. its output: pty.read({ id: "${job.id}" }) in run.`)],
 					details: { job },
 					structuredContent: job,
 				};
