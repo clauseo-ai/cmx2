@@ -2,7 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ExportError, exportSession, exportStream, importSession, projectTranscript, type SessionExport, Store } from "../src/index.ts";
+import { ExportError, exportSession, exportStream, importSession, projectTranscript, type SessionExport, Store, sweepImports } from "../src/index.ts";
 
 /**
  * imports that must leave nothing half done, exports that hold what was there when they began, and the checks on what a
@@ -145,18 +145,62 @@ test("a subagent whose parent is not here imports as a session of its own", asyn
 	t.close();
 });
 
-test("an orphan from an interrupted import (a transcript, staged rows, no session row) is replaced, not an id clash", async () => {
+test("a transcript or rows under the id that no import marked are left alone: 409, and asNew makes a copy", async () => {
 	const { s, id } = source();
 	const e = exportSession(s, id);
 	s.close();
-	const { t, data } = target("dst-orphan");
+	const { t, data } = target("dst-unmarked");
 	mkdirSync(join(data, "sessions"), { recursive: true });
-	writeFileSync(join(data, "sessions", `${id}.jsonl`), "left by a crash\n");
-	t.db.query("insert into message (id, session_id, seq, role, created_at, info) values (?, ?, 1, 'user', 1, '{}')").run(e.messages[0]!.id, id);
-	const r = await importSession(t, e, { dataDir: data });
-	expect(r.id).toBe(id);
-	expect(readFileSync(r.transcript!, "utf8")).not.toContain("left by a crash");
+	writeFileSync(join(data, "sessions", `${id}.jsonl`), "someone else's transcript\n");
+	const before = counts(t);
+	await expect(importSession(t, e, { dataDir: data })).rejects.toThrow("asNew=true");
+	expect(readFileSync(join(data, "sessions", `${id}.jsonl`), "utf8")).toBe("someone else's transcript\n");
+	expect(counts(t)).toEqual(before);
+	// unmarked rows the same way
+	const other = source();
+	const e2 = exportSession(other.s, other.id);
+	other.s.close();
+	t.db.query("insert into message (id, session_id, seq, role, created_at, info) values ('msg_unmarked_1', ?, 1, 'user', 1, '{}')").run(other.id);
+	await expect(importSession(t, e2, { dataDir: data })).rejects.toThrow("with no session");
+	expect(t.db.query("select count(*) as n from message where session_id = ?").get(other.id)).toEqual({ n: 1 });
+	expect(t.db.query("select count(*) as n from import_staging").get()).toEqual({ n: 0 });
+	const copy = await importSession(t, e, { dataDir: data, asNew: true });
+	expect(copy.id).not.toBe(id);
+	t.close();
+});
+
+test("two imports of one id at once: one is refused as being imported, the other commits whole", async () => {
+	const { s, id } = source(300, 20_000);
+	const e = exportSession(s, id);
+	s.close();
+	const { t, data } = target("dst-race");
+	const results = await Promise.allSettled([importSession(t, e, { dataDir: data }), importSession(t, e, { dataDir: data })]);
+	const ok = results.filter((r) => r.status === "fulfilled");
+	const refused = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+	expect(ok).toHaveLength(1);
+	expect(refused).toHaveLength(1);
+	expect(String(refused[0]!.reason.message)).toContain("being imported");
 	expect(t.messages(id).rows).toHaveLength(e.messages.length);
+	expect(readFileSync(join(data, "sessions", `${id}.jsonl`), "utf8")).toBe(e.transcript!);
+	expect(t.db.query("select count(*) as n from import_staging").get()).toEqual({ n: 0 });
+	expect(readdirSync(join(data, "import"))).toEqual([]);
+	t.close();
+});
+
+test("a crash after staging: the sweep removes only the marked id's rows, its marker and the temp files", async () => {
+	const { t, data } = target("dst-crash");
+	mkdirSync(join(data, "import"), { recursive: true });
+	writeFileSync(join(data, "import", "half.jsonl"), "{");
+	t.db.query("insert into import_staging (session_id, token, created_at) values ('ses_crashedaaaaaaaaaaaaa', 'x', 1)").run();
+	t.db.query("insert into message (id, session_id, seq, role, created_at, info) values ('msg_crashed_1', 'ses_crashedaaaaaaaaaaaaa', 1, 'user', 1, '{}')").run();
+	t.db.query("insert into part (id, message_id, session_id, seq, type, data) values ('prt_crashed_1', 'msg_crashed_1', 'ses_crashedaaaaaaaaaaaaa', 0, 'text', '{}')").run();
+	t.db.query("insert into message (id, session_id, seq, role, created_at, info) values ('msg_unmarked_9', 'ses_unmarkedaaaaaaaaaaaa', 1, 'user', 1, '{}')").run();
+	expect(sweepImports(t, data)).toEqual(["ses_crashedaaaaaaaaaaaaa"]);
+	expect(t.db.query("select count(*) as n from message where session_id = 'ses_crashedaaaaaaaaaaaaa'").get()).toEqual({ n: 0 });
+	expect(t.db.query("select count(*) as n from part where session_id = 'ses_crashedaaaaaaaaaaaaa'").get()).toEqual({ n: 0 });
+	expect(t.db.query("select count(*) as n from message where session_id = 'ses_unmarkedaaaaaaaaaaaa'").get()).toEqual({ n: 1 });
+	expect(t.db.query("select count(*) as n from import_staging").get()).toEqual({ n: 0 });
+	expect(readdirSync(join(data, "import"))).toEqual([]);
 	t.close();
 });
 

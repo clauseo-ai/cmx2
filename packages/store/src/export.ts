@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, createReadStream, existsSync, mkdirSync, openSync, readSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, linkSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { arch, homedir, hostname, platform } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { BundleError, BundleReader, type Range } from "./bundle.ts";
@@ -347,17 +347,20 @@ async function importFrom(store: Store, r: BundleReader, opts: BundleImportOptio
 	const source = session.id as string;
 	let id = source;
 	let rename: ((v: unknown) => unknown) | undefined;
-	if (store.session(source)) {
-		if (!opts.asNew) throw new ExportError(`session ${source} is already in this database; nothing was changed. ${asNew}`, "clash");
+	// a transcript or rows under the id with no session row belong to someone else (a session whose row is not written yet,
+	// an import in flight, history this import cannot vouch for): they are left alone, like a session that is here
+	const unmarked = (sid: string) => existsSync(join(opts.dataDir, "sessions", `${sid}.jsonl`)) || !!store.db.query("select 1 from message where session_id = ? limit 1").get(sid);
+	const here0 = store.session(source);
+	if (here0 || unmarked(source)) {
+		if (!opts.asNew) {
+			if (here0) throw new ExportError(`session ${source} is already in this database; nothing was changed. ${asNew}`, "clash");
+			const busy = store.db.query("select 1 from import_staging where session_id = ?").get(source);
+			throw new ExportError(busy ? `session ${source} is being imported right now; nothing was changed. wait for it, or ${asNew}` : `there is already a transcript or messages for ${source} here, with no session; nothing was changed. ${asNew}`, "clash");
+		}
 		id = `ses_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
 		rename = renamer(source, id);
 	}
 	const file = hasTranscript ? join(opts.dataDir, "sessions", `${id}.jsonl`) : null;
-	// no session row has this id (checked above), so a transcript file or rows under it are what an import left when it
-	// stopped between writing them and committing the session: an orphan no list or read can reach, replaced here
-	const orphan = join(opts.dataDir, "sessions", `${id}.jsonl`);
-	if (existsSync(orphan)) rmSync(orphan, { force: true });
-	unstage(store, id);
 	const directory = folder(opts.directory ?? (session.directory as string));
 	const projectId = opts.project?.(directory);
 	const here: Place = { ...(opts.here ?? thisMachine(directory)), directory };
@@ -366,11 +369,34 @@ async function importFrom(store: Store, r: BundleReader, opts: BundleImportOptio
 	// a subagent's parent stays behind; pointing at a session that is not here would hide the import as an orphan
 	const parent = session.parent_id && store.session(session.parent_id) ? session.parent_id : null;
 
-	// 1. the transcript, a line at a time, into a file only this import made
+	// 0. the marker: this import's claim on the id, before anything is written. another import of the same id (the cli and
+	// the daemon at once) fails to insert it and stops; on failure, and at daemon start, only rows under a marked id with no
+	// session row are removed (sweepImports), so nothing guesses who wrote a file or a row
+	const token = randomUUID();
+	try {
+		store.db.query("insert into import_staging (session_id, token, created_at) values (?, ?, ?)").run(id, token, Date.now());
+	} catch {
+		throw new ExportError(`session ${id} is being imported right now; nothing was changed. wait for it, or ${asNew}`, "clash");
+	}
+	// checked again under the marker: something written between the check above and the claim is left alone too
+	if (unmarked(id)) {
+		store.db.query("delete from import_staging where session_id = ? and token = ?").run(id, token);
+		throw new ExportError(`there is already a transcript or messages for ${id} here, with no session; nothing was changed. ${asNew}`, "clash");
+	}
+	const temp = file ? join(opts.dataDir, "import", `${randomUUID()}.jsonl`) : null;
+	let linked = false;
+	/** a failure: what this run staged under its marker, its temp transcript, a transcript it linked, and the marker */
+	const undo = () => {
+		if (temp) rmSync(temp, { force: true });
+		if (linked && file) rmSync(file, { force: true });
+		unstage(store, id, token);
+	};
+
+	// 1. the transcript, a line at a time, into a temp file only this import made
 	let lines = 0;
-	if (file && tr) {
-		mkdirSync(join(opts.dataDir, "sessions"), { recursive: true });
-		const fd = openSync(file, "wx");
+	if (temp && tr) {
+		mkdirSync(join(opts.dataDir, "import"), { recursive: true });
+		const fd = openSync(temp, "wx");
 		try {
 			const out = new Out(fd);
 			const oldBare = bare(source);
@@ -402,7 +428,7 @@ async function importFrom(store: Store, r: BundleReader, opts: BundleImportOptio
 			out.flush();
 		} catch (e) {
 			closeSync(fd);
-			rmSync(file, { force: true });
+			undo();
 			throw e;
 		}
 		closeSync(fd);
@@ -471,7 +497,16 @@ async function importFrom(store: Store, r: BundleReader, opts: BundleImportOptio
 			}
 		}
 		commit();
+		if (temp && file) {
+			// the transcript takes its place only now: a link fails if a file is already there, so nothing is overwritten
+			mkdirSync(join(opts.dataDir, "sessions"), { recursive: true });
+			linkSync(temp, file);
+			linked = true;
+			rmSync(temp, { force: true });
+		}
 		store.db.transaction(() => {
+			// a daemon that started while this import ran (a cli import) swept its marker: its staged rows may be gone
+			if (!store.db.query("select 1 from import_staging where session_id = ? and token = ?").get(id, token)) throw new ExportError(`the claim on ${id} was cleared while it was imported (a daemon started and swept it); nothing was imported. import it again`);
 			const s = { ...session };
 			for (const k of ["session_file", "archived_at", "transcript_rev"]) delete s[k];
 			store.putSession({
@@ -488,11 +523,11 @@ async function importFrom(store: Store, r: BundleReader, opts: BundleImportOptio
 			if (prefix) store.putPrefix(id, prefix.hash, prefix.bytes);
 			for (const st of steps) store.putStep(Object.fromEntries(Object.entries({ ...st, session_id: id }).filter(([k]) => stepCols.has(k))));
 			if (moved && file) projectMessage(store, { sessionId: id, cwd: directory, seq: lines + 1 }, { role: "notice", source: "moved", text: movedText(moved), moved, timestamp: moved.at });
+			store.db.query("delete from import_staging where session_id = ? and token = ?").run(id, token);
 		})();
 	} catch (e) {
 		if (open) store.db.exec("rollback");
-		unstage(store, id);
-		if (file) rmSync(file, { force: true });
+		undo();
 		if (e instanceof ExportError || e instanceof BundleError) throw e;
 		throw new ExportError(`that bundle could not be imported: ${e instanceof Error ? e.message : String(e)}; nothing was changed`);
 	} finally {
@@ -502,16 +537,36 @@ async function importFrom(store: Store, r: BundleReader, opts: BundleImportOptio
 }
 
 /**
- * rows an import staged under an id that no session row names: what a failed or interrupted import left. nothing else
- * writes messages under such an id, so these are never a session's history (rule 14 is about history); with a session
- * row present this removes nothing
+ * the rows an import staged under its marker, and the marker: only while the marker is there (with this token, when one
+ * is given) and no session row has the id. a committed import removed its marker in the transaction that wrote the
+ * session row, so this never touches a session's history (rule 14)
  */
-function unstage(store: Store, id: string) {
-	if (store.session(id)) return;
+function unstage(store: Store, id: string, token?: string) {
 	store.db.transaction(() => {
-		store.db.query("delete from part where session_id = ?").run(id);
-		store.db.query("delete from message where session_id = ?").run(id);
+		const marked = token
+			? store.db.query("select 1 from import_staging where session_id = ? and token = ?").get(id, token)
+			: store.db.query("select 1 from import_staging where session_id = ?").get(id);
+		if (!marked) return;
+		if (!store.db.query("select 1 from main.session where id = ?").get(id)) {
+			store.db.query("delete from part where session_id = ?").run(id);
+			store.db.query("delete from message where session_id = ?").run(id);
+		}
+		store.db.query("delete from import_staging where session_id = ?").run(id);
 	})();
+}
+
+/**
+ * at daemon start: what imports that stopped part way left. the rows under each marked id with no session row, the
+ * markers, and the temp files in <dataDir>/import (bodies and transcripts, never a session's own files). returns the ids
+ * it cleared
+ */
+export function sweepImports(store: Store, dataDir: string): string[] {
+	const ids = (store.db.query("select session_id from import_staging").all() as Array<{ session_id: string }>).map((r) => r.session_id);
+	for (const id of ids) unstage(store, id);
+	try {
+		for (const f of readdirSync(join(dataDir, "import"))) rmSync(join(dataDir, "import", f), { force: true });
+	} catch {}
+	return ids;
 }
 
 function parseLine(line: string): Record<string, any> | undefined {

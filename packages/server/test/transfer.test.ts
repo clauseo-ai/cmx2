@@ -11,7 +11,7 @@ import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFi
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { DEFAULTS } from "@cmx2/engine/config";
-import { exportSession, exportStream, projectTranscript } from "@cmx2/store";
+import { exportSession, exportStream, projectTranscript, Store } from "@cmx2/store";
 import { Type } from "typebox";
 import { nonce, port } from "../../eval/src/harness.ts";
 import { serve } from "../src/index.ts";
@@ -433,14 +433,22 @@ test("a large import never holds the daemon's event loop for long", async () => 
 	expect(longest).toBeLessThan(150);
 }, 60_000);
 
-test("a daemon clears the import folder's leftovers when it starts", async () => {
+test("a daemon clears an unfinished import when it starts: the marked rows, the marker, the temp files, nothing unmarked", async () => {
 	const data = join(ROOT, "data-c");
 	mkdirSync(join(data, "import"), { recursive: true });
 	writeFileSync(join(data, "import", "left-by-a-crash.json"), "{");
+	// an import that crashed after staging, and rows under an id no import marked
+	const pre = new Store(join(data, "cmx2.db"));
+	pre.db.query("insert into import_staging (session_id, token, created_at) values ('ses_crashedaaaaaaaaaaaaa', 'x', 1)").run();
+	pre.db.query("insert into message (id, session_id, seq, role, created_at, info) values ('msg_crashed_1', 'ses_crashedaaaaaaaaaaaaa', 1, 'user', 1, '{}')").run();
+	pre.db.query("insert into message (id, session_id, seq, role, created_at, info) values ('msg_unmarked_1', 'ses_unmarkedaaaaaaaaaaaa', 1, 'user', 1, '{}')").run();
+	pre.close();
 	const c = config();
 	const d = serve({ config: c, port: port(4849), hostname: "127.0.0.1", dataDir: data, reload: () => c, warmHorizonMs: 0 });
 	try {
 		expect(existsSync(join(data, "import", "left-by-a-crash.json"))).toBe(false);
+		expect(d.store.db.query("select session_id from message where id in ('msg_crashed_1', 'msg_unmarked_1')").all()).toEqual([{ session_id: "ses_unmarkedaaaaaaaaaaaa" }]);
+		expect(d.store.db.query("select count(*) as n from import_staging").get()).toEqual({ n: 0 });
 	} finally {
 		await d.stop();
 	}

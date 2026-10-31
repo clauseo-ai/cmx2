@@ -349,4 +349,8 @@ export const MIGRATIONS: readonly string[] = [
 	// 17 · a session moved here from another machine or folder by an import: json { from, to, at }, each side
 	// { machine, os, arch, directory, home }. null for every session that never moved, existing rows included
 	`alter table session add column moved_from text`,
+	// 18 · a session import in progress: its claim on the id, inserted before it writes anything and removed in the transaction
+	// that writes the session row. a second import of the id fails on the key; a failed or interrupted import's rows are
+	// removed only under a marked id with no session row
+	`create table if not exists import_staging (session_id text primary key, token text not null, created_at integer not null)`,
 ];

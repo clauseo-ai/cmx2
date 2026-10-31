@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import { open as openFile, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { CONTRACT_VERSION, EVENTS, type EventType } from "@cmx2/contract";
@@ -12,7 +12,7 @@ import { Transcript } from "@cmx2/engine/transcript";
 import { evaluate, type PermissionRule, rulesFromConfig, subagentEnv } from "@cmx2/engine/permission";
 import { BusyError, EngineSession, type EngineEvent, type MailRecord, type StepRow, type TurnEvent, type UserBlock } from "@cmx2/engine/session";
 import { defaultSkillDirs, LspPool, McpPool, type McpScope, resizeImage, runCommand, Skills } from "@cmx2/tools";
-import { closeOpenSteps, decodeCursor, documentPart, encodeCursor, ExportError, exportStream, importBundleFile, messageId, partId, projectMessage, projectTranscript, type SessionQuery, type SessionRevert, type SessionStateInfo, type RefreshUsage, Store, type StoredSession } from "@cmx2/store";
+import { closeOpenSteps, decodeCursor, documentPart, encodeCursor, ExportError, exportStream, importBundleFile, messageId, sweepImports, partId, projectMessage, projectTranscript, type SessionQuery, type SessionRevert, type SessionStateInfo, type RefreshUsage, Store, type StoredSession } from "@cmx2/store";
 import { Value } from "typebox/value";
 import { Asks, permissionJson, questionJson, type ReplyOutcome } from "./asks.ts";
 import { Catalog, expandTemplate, providersJson } from "./catalog.ts";
@@ -264,11 +264,10 @@ async function realAsync(p: string): Promise<string> {
 
 export function serve(opts: ServeOptions) {
 	const data = opts.dataDir ?? defaultDataDir();
-	// uploads a daemon was importing when it stopped: only ever temporary copies of a body, never a session
-	try {
-		for (const f of readdirSync(join(data, "import"))) rmSync(join(data, "import", f), { force: true });
-	} catch {}
 	const store = new Store(join(data, "cmx2.db"));
+	// imports that stopped part way (a crash, a killed cli): their marked rows, markers and temp files; nothing unmarked
+	const unfinished = sweepImports(store, data);
+	if (unfinished.length) console.error(`cmx2: cleared ${unfinished.length} unfinished import(s): ${unfinished.join(", ")}`);
 	const locks = new RunLocks(data, opts.port);
 	const sessions = new Map<string, EngineSession>();
 	const subscribers = new Set<Subscriber>();
