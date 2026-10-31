@@ -216,3 +216,21 @@ test("the bundle's own folder is checked like a given one: absolute, and stored 
 	expect(t.session(r.id)!.directory).toBe(dir);
 	t.close();
 });
+
+test("the sweep keeps a claim whose importer still runs, and clears a dead importer's claim with its staged rows", async () => {
+	const { t, data } = target("dst-live");
+	const started = Math.round(Date.now() - process.uptime() * 1000);
+	// an importer that ran and exited: its pid is free now
+	const gone = Bun.spawn(["true"]);
+	await gone.exited;
+	const claim = t.db.query("insert into import_staging (session_id, token, created_at, pid, started) values (?, 'x', ?, ?, ?)");
+	claim.run("ses_liveimportaaaaaaaaaa", Date.now(), process.pid, started);
+	claim.run("ses_deadimportaaaaaaaaaa", Date.now(), gone.pid, started);
+	// this process's pid with another start time: a reused pid, not the importer
+	claim.run("ses_reusedpidaaaaaaaaaaa", Date.now(), process.pid, started - 3_600_000);
+	for (const id of ["ses_liveimportaaaaaaaaaa", "ses_deadimportaaaaaaaaaa", "ses_reusedpidaaaaaaaaaaa"]) t.db.query("insert into message (id, session_id, seq, role, created_at, info) values (?, ?, 1, 'user', 1, '{}')").run(`msg_${id.slice(4, 12)}_1`, id);
+	expect(sweepImports(t, data).sort()).toEqual(["ses_deadimportaaaaaaaaaa", "ses_reusedpidaaaaaaaaaaa"]);
+	expect(t.db.query("select session_id from import_staging").all()).toEqual([{ session_id: "ses_liveimportaaaaaaaaaa" }]);
+	expect(t.db.query("select session_id from message order by session_id").all()).toEqual([{ session_id: "ses_liveimportaaaaaaaaaa" }]);
+	t.close();
+});

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, createReadStream, existsSync, linkSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { arch, homedir, hostname, platform } from "node:os";
@@ -374,7 +375,7 @@ async function importFrom(store: Store, r: BundleReader, opts: BundleImportOptio
 	// session row are removed (sweepImports), so nothing guesses who wrote a file or a row
 	const token = randomUUID();
 	try {
-		store.db.query("insert into import_staging (session_id, token, created_at) values (?, ?, ?)").run(id, token, Date.now());
+		store.db.query("insert into import_staging (session_id, token, created_at, pid, started) values (?, ?, ?, ?, ?)").run(id, token, Date.now(), process.pid, PROCESS_STARTED);
 	} catch {
 		throw new ExportError(`session ${id} is being imported right now; nothing was changed. wait for it, or ${asNew}`, "clash");
 	}
@@ -555,18 +556,60 @@ function unstage(store: Store, id: string, token?: string) {
 	})();
 }
 
+/** when this process started (ms), within a second: with the pid it names an importer even after the pid is reused */
+const PROCESS_STARTED = Math.round(Date.now() - process.uptime() * 1000);
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** a claim whose importer cannot be checked is cleared once it is this old */
+const STALE_CLAIM_MS = 60 * 60 * 1000;
+
 /**
- * at daemon start: what imports that stopped part way left. the rows under each marked id with no session row, the
+ * whether the process that holds a claim still runs: true or false when the pid and its start time can be checked (ps
+ * prints the start to the second), undefined when they cannot (no pid recorded, no ps)
+ */
+export function importerAlive(pid: number | null, started: number | null): boolean | undefined {
+	if (!pid || !started) return undefined;
+	try {
+		process.kill(pid, 0);
+	} catch (e) {
+		if ((e as { code?: string }).code === "ESRCH") return false;
+		if ((e as { code?: string }).code !== "EPERM") return undefined;
+	}
+	// ps prints the start in local time; asked in utc and read field by field, it does not depend on the reader's TZ
+	const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
+	const [, mon, day, time, year] = r.status === 0 ? r.stdout.trim().split(/\s+/) : [];
+	const month = MONTHS.indexOf(mon ?? "") + 1;
+	const at = month && day && time && year ? Date.parse(`${year}-${String(month).padStart(2, "0")}-${day.padStart(2, "0")}T${time}Z`) : Number.NaN;
+	if (Number.isNaN(at)) return undefined;
+	// the pid runs; it is the importer only if it started when the importer did (a reused pid started later)
+	return Math.abs(at - started) < 2000;
+}
+
+/**
+ * at daemon start: what imports that stopped part way left. a claim stays while its importer runs (a cli import the
+ * daemon started beside); one whose importer is gone, or that is over an hour old when that cannot be checked, is cleared. the rows under each marked id with no session row, the
  * markers, and the temp files in <dataDir>/import (bodies and transcripts, never a session's own files). returns the ids
  * it cleared
  */
 export function sweepImports(store: Store, dataDir: string): string[] {
-	const ids = (store.db.query("select session_id from import_staging").all() as Array<{ session_id: string }>).map((r) => r.session_id);
-	for (const id of ids) unstage(store, id);
-	try {
-		for (const f of readdirSync(join(dataDir, "import"))) rmSync(join(dataDir, "import", f), { force: true });
-	} catch {}
-	return ids;
+	const claims = store.db.query("select session_id, token, created_at, pid, started from import_staging").all() as Array<{ session_id: string; token: string; created_at: number; pid: number | null; started: number | null }>;
+	const cleared: string[] = [];
+	let live = 0;
+	for (const c of claims) {
+		const alive = importerAlive(c.pid, c.started);
+		if (alive === true || (alive === undefined && Date.now() - c.created_at < STALE_CLAIM_MS)) {
+			live++;
+			continue;
+		}
+		unstage(store, c.session_id, c.token);
+		cleared.push(c.session_id);
+	}
+	// a live import's temp files are its own; with none running, everything in the folder is left over
+	if (!live) {
+		try {
+			for (const f of readdirSync(join(dataDir, "import"))) rmSync(join(dataDir, "import", f), { force: true });
+		} catch {}
+	}
+	return cleared;
 }
 
 function parseLine(line: string): Record<string, any> | undefined {

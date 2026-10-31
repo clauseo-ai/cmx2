@@ -351,6 +351,7 @@ export const MIGRATIONS: readonly string[] = [
 	`alter table session add column moved_from text`,
 	// 18 · a session import in progress: its claim on the id, inserted before it writes anything and removed in the transaction
 	// that writes the session row. a second import of the id fails on the key; a failed or interrupted import's rows are
-	// removed only under a marked id with no session row
-	`create table if not exists import_staging (session_id text primary key, token text not null, created_at integer not null)`,
+	// removed only under a marked id with no session row, and a daemon start clears a claim only once its importer (pid and
+	// process start time) is gone
+	`create table if not exists import_staging (session_id text primary key, token text not null, created_at integer not null, pid integer, started integer)`,
 ];

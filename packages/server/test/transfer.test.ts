@@ -433,7 +433,7 @@ test("a large import never holds the daemon's event loop for long", async () => 
 	expect(longest).toBeLessThan(150);
 }, 60_000);
 
-test("a daemon clears an unfinished import when it starts: the marked rows, the marker, the temp files, nothing unmarked", async () => {
+test("a daemon clears a dead import when it starts (its marked rows and marker), keeps a live one's claim, and touches nothing unmarked", async () => {
 	const data = join(ROOT, "data-c");
 	mkdirSync(join(data, "import"), { recursive: true });
 	writeFileSync(join(data, "import", "left-by-a-crash.json"), "{");
@@ -442,13 +442,17 @@ test("a daemon clears an unfinished import when it starts: the marked rows, the 
 	pre.db.query("insert into import_staging (session_id, token, created_at) values ('ses_crashedaaaaaaaaaaaaa', 'x', 1)").run();
 	pre.db.query("insert into message (id, session_id, seq, role, created_at, info) values ('msg_crashed_1', 'ses_crashedaaaaaaaaaaaaa', 1, 'user', 1, '{}')").run();
 	pre.db.query("insert into message (id, session_id, seq, role, created_at, info) values ('msg_unmarked_1', 'ses_unmarkedaaaaaaaaaaaa', 1, 'user', 1, '{}')").run();
+	// a cli import still running beside the daemon (this process holds the claim)
+	pre.db.query("insert into import_staging (session_id, token, created_at, pid, started) values ('ses_inflightaaaaaaaaaaaa', 'y', ?, ?, ?)").run(Date.now(), process.pid, Math.round(Date.now() - process.uptime() * 1000));
+	pre.db.query("insert into message (id, session_id, seq, role, created_at, info) values ('msg_inflight_1', 'ses_inflightaaaaaaaaaaaa', 1, 'user', 1, '{}')").run();
 	pre.close();
 	const c = config();
 	const d = serve({ config: c, port: port(4849), hostname: "127.0.0.1", dataDir: data, reload: () => c, warmHorizonMs: 0 });
 	try {
-		expect(existsSync(join(data, "import", "left-by-a-crash.json"))).toBe(false);
-		expect(d.store.db.query("select session_id from message where id in ('msg_crashed_1', 'msg_unmarked_1')").all()).toEqual([{ session_id: "ses_unmarkedaaaaaaaaaaaa" }]);
-		expect(d.store.db.query("select count(*) as n from import_staging").get()).toEqual({ n: 0 });
+		// a live import's temp files may be in the folder, so it is left as it is while one runs
+		expect(existsSync(join(data, "import", "left-by-a-crash.json"))).toBe(true);
+		expect(d.store.db.query("select session_id from message where id in ('msg_crashed_1', 'msg_unmarked_1', 'msg_inflight_1') order by session_id").all()).toEqual([{ session_id: "ses_inflightaaaaaaaaaaaa" }, { session_id: "ses_unmarkedaaaaaaaaaaaa" }]);
+		expect(d.store.db.query("select session_id from import_staging").all()).toEqual([{ session_id: "ses_inflightaaaaaaaaaaaa" }]);
 	} finally {
 		await d.stop();
 	}
