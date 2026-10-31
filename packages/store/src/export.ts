@@ -308,7 +308,7 @@ class Out {
  * either removes the file it made. an export with an origin that names another machine or folder gets a moved record
  * (see the top of this file).
  */
-export function importBundleFile(store: Store, path: string, opts: BundleImportOptions): ImportResult {
+export async function importBundleFile(store: Store, path: string, opts: BundleImportOptions): Promise<ImportResult> {
 	let reader: BundleReader;
 	try {
 		reader = new BundleReader(path);
@@ -316,7 +316,7 @@ export function importBundleFile(store: Store, path: string, opts: BundleImportO
 		throw new ExportError(`there is no readable file at ${path}`);
 	}
 	try {
-		return importFrom(store, reader, opts);
+		return await importFrom(store, reader, opts);
 	} catch (e) {
 		if (e instanceof BundleError) throw new ExportError(e.message);
 		throw e;
@@ -325,8 +325,8 @@ export function importBundleFile(store: Store, path: string, opts: BundleImportO
 	}
 }
 
-function importFrom(store: Store, r: BundleReader, opts: BundleImportOptions): ImportResult {
-	const top = r.top();
+async function importFrom(store: Store, r: BundleReader, opts: BundleImportOptions): Promise<ImportResult> {
+	const top = await r.top();
 	const small = (k: string) => {
 		const at = top.get(k);
 		return at ? r.parse(at) : undefined;
@@ -353,8 +353,12 @@ function importFrom(store: Store, r: BundleReader, opts: BundleImportOptions): I
 		rename = renamer(source, id);
 	}
 	const file = hasTranscript ? join(opts.dataDir, "sessions", `${id}.jsonl`) : null;
-	if (file && existsSync(file)) throw new ExportError(`${file} already exists; nothing was changed. ${asNew}`, "clash");
-	const directory = opts.directory ? folder(opts.directory) : (session.directory as string);
+	// no session row has this id (checked above), so a transcript file or rows under it are what an import left when it
+	// stopped between writing them and committing the session: an orphan no list or read can reach, replaced here
+	const orphan = join(opts.dataDir, "sessions", `${id}.jsonl`);
+	if (existsSync(orphan)) rmSync(orphan, { force: true });
+	unstage(store, id);
+	const directory = folder(opts.directory ?? (session.directory as string));
 	const projectId = opts.project?.(directory);
 	const here: Place = { ...(opts.here ?? thisMachine(directory)), directory };
 	const o = head.origin;
@@ -385,6 +389,10 @@ function importFrom(store: Store, r: BundleReader, opts: BundleImportOptions): I
 				if (line.startsWith('{"type":"message"') || (!line.startsWith('{"type":"header"') && parseLine(line)?.type === "message")) lines++;
 				ended = line.endsWith("\n");
 				out.write(line);
+				if (r.due()) {
+					out.flush();
+					await r.pause();
+				}
 			}
 			if (moved) {
 				// the moved record: a runtime notice the engine hands the model as user text on the next request, projected as
@@ -400,15 +408,69 @@ function importFrom(store: Store, r: BundleReader, opts: BundleImportOptions): I
 		closeSync(fd);
 	}
 
-	// 2. the rows, all in one transaction; a failure rolls them back and removes the transcript made above
+	// 2. the rows. the messages go in first, in transactions of about 20 ms with a turn of the event loop between them, under
+	// an id no session row names yet, so no list or read sees them; the session row, prefix, steps and moved notice then go
+	// in one transaction, which is what makes the session appear. a failure on the way removes the rows this import staged
+	// (only rows under an id with no session row, which nothing else writes) and the transcript made above
 	const stepCols = new Set((store.db.query("pragma table_info(step)").all() as Array<{ name: string }>).map((c) => c.name));
 	let count = 0;
 	let parts = 0;
-	// one transaction of hundreds of megabytes keeps its dirty pages in memory unless sqlite may spill them to the wal as it
+	// a transaction of hundreds of megabytes keeps its dirty pages in memory unless sqlite may spill them to the wal as it
 	// goes: 1 MB of pages here, the connection's own setting back after (measured: 124 MB peak for 280 MB of rows without, 48 with)
 	const spill = (store.db.query("pragma cache_spill").get() as { cache_spill: number } | null)?.cache_spill;
 	store.db.exec("pragma cache_spill = 256");
+	let open = false;
+	const begin = () => {
+		store.db.exec("begin immediate");
+		open = true;
+	};
+	const commit = () => {
+		store.db.exec("commit");
+		open = false;
+	};
 	try {
+		const msg = store.db.query(
+			`insert into message (id, session_id, seq, role, created_at, completed_at, model, effort, tokens_input, tokens_output,
+			   tokens_cache_read, tokens_cache_write, cost, stop_reason, info)
+			 values ($id, $session_id, $seq, $role, $created_at, $completed_at, $model, $effort, $tokens_input, $tokens_output,
+			   $tokens_cache_read, $tokens_cache_write, $cost, $stop_reason, $info)`,
+		);
+		const part = store.db.query("insert into part (id, message_id, session_id, seq, type, data) values ($id, $message_id, $session_id, $seq, $type, $data)");
+		begin();
+		for (const el of r.elements(messages)) {
+			const m = (rename ? rename(el) : el) as ExportedMessage;
+			if (!m || typeof m !== "object" || !Array.isArray(m.parts) || !m.info || typeof m.info !== "object") throw new ExportError("a message in that export has no parts or no info; it is cut short or edited");
+			const { parts: ps, info, ...row } = m;
+			const i = { ...info, ...(typeof (info as { path?: unknown }).path === "object" && opts.directory ? { path: { cwd: directory, root: directory } } : {}) };
+			msg.run({
+				id: row.id,
+				seq: row.seq,
+				role: row.role,
+				created_at: row.created_at,
+				completed_at: row.completed_at ?? null,
+				model: row.model ?? null,
+				effort: row.effort ?? null,
+				tokens_input: row.tokens_input ?? 0,
+				tokens_output: row.tokens_output ?? 0,
+				tokens_cache_read: row.tokens_cache_read ?? 0,
+				tokens_cache_write: row.tokens_cache_write ?? 0,
+				cost: row.cost ?? 0,
+				stop_reason: row.stop_reason ?? null,
+				session_id: id,
+				info: JSON.stringify(i),
+			} as never);
+			count++;
+			for (const { data, ...p } of ps) {
+				part.run({ id: p.id, message_id: p.message_id, seq: p.seq, type: p.type, session_id: id, data: JSON.stringify(data) } as never);
+				parts++;
+			}
+			if (r.due()) {
+				commit();
+				await r.pause();
+				begin();
+			}
+		}
+		commit();
 		store.db.transaction(() => {
 			const s = { ...session };
 			for (const k of ["session_file", "archived_at", "transcript_rev"]) delete s[k];
@@ -423,46 +485,13 @@ function importFrom(store: Store, r: BundleReader, opts: BundleImportOptions): I
 				...(projectId !== undefined ? { project_id: projectId } : {}),
 				...(moved ? { moved_from: JSON.stringify(moved) } : {}),
 			} as StoredSession);
-			const msg = store.db.query(
-				`insert into message (id, session_id, seq, role, created_at, completed_at, model, effort, tokens_input, tokens_output,
-				   tokens_cache_read, tokens_cache_write, cost, stop_reason, info)
-				 values ($id, $session_id, $seq, $role, $created_at, $completed_at, $model, $effort, $tokens_input, $tokens_output,
-				   $tokens_cache_read, $tokens_cache_write, $cost, $stop_reason, $info)`,
-			);
-			const part = store.db.query("insert into part (id, message_id, session_id, seq, type, data) values ($id, $message_id, $session_id, $seq, $type, $data)");
-			for (const el of r.elements(messages)) {
-				const m = (rename ? rename(el) : el) as ExportedMessage;
-				if (!m || typeof m !== "object" || !Array.isArray(m.parts) || !m.info || typeof m.info !== "object") throw new ExportError("a message in that export has no parts or no info; it is cut short or edited");
-				const { parts: ps, info, ...row } = m;
-				const i = { ...info, ...(typeof (info as { path?: unknown }).path === "object" && opts.directory ? { path: { cwd: directory, root: directory } } : {}) };
-				msg.run({
-					id: row.id,
-					seq: row.seq,
-					role: row.role,
-					created_at: row.created_at,
-					completed_at: row.completed_at ?? null,
-					model: row.model ?? null,
-					effort: row.effort ?? null,
-					tokens_input: row.tokens_input ?? 0,
-					tokens_output: row.tokens_output ?? 0,
-					tokens_cache_read: row.tokens_cache_read ?? 0,
-					tokens_cache_write: row.tokens_cache_write ?? 0,
-					cost: row.cost ?? 0,
-					stop_reason: row.stop_reason ?? null,
-					session_id: id,
-					info: JSON.stringify(i),
-				} as never);
-				count++;
-				for (const { data, ...p } of ps) {
-					part.run({ id: p.id, message_id: p.message_id, seq: p.seq, type: p.type, session_id: id, data: JSON.stringify(data) } as never);
-					parts++;
-				}
-			}
 			if (prefix) store.putPrefix(id, prefix.hash, prefix.bytes);
 			for (const st of steps) store.putStep(Object.fromEntries(Object.entries({ ...st, session_id: id }).filter(([k]) => stepCols.has(k))));
 			if (moved && file) projectMessage(store, { sessionId: id, cwd: directory, seq: lines + 1 }, { role: "notice", source: "moved", text: movedText(moved), moved, timestamp: moved.at });
 		})();
 	} catch (e) {
+		if (open) store.db.exec("rollback");
+		unstage(store, id);
 		if (file) rmSync(file, { force: true });
 		if (e instanceof ExportError || e instanceof BundleError) throw e;
 		throw new ExportError(`that bundle could not be imported: ${e instanceof Error ? e.message : String(e)}; nothing was changed`);
@@ -470,6 +499,19 @@ function importFrom(store: Store, r: BundleReader, opts: BundleImportOptions): I
 		if (spill !== undefined) store.db.exec(`pragma cache_spill = ${spill}`);
 	}
 	return { id, source, directory, messages: count, parts, steps: steps.length, transcript: file, ...(moved ? { moved } : {}) };
+}
+
+/**
+ * rows an import staged under an id that no session row names: what a failed or interrupted import left. nothing else
+ * writes messages under such an id, so these are never a session's history (rule 14 is about history); with a session
+ * row present this removes nothing
+ */
+function unstage(store: Store, id: string) {
+	if (store.session(id)) return;
+	store.db.transaction(() => {
+		store.db.query("delete from part where session_id = ?").run(id);
+		store.db.query("delete from message where session_id = ?").run(id);
+	})();
 }
 
 function parseLine(line: string): Record<string, any> | undefined {
@@ -481,13 +523,13 @@ function parseLine(line: string): Record<string, any> | undefined {
 }
 
 /** an export held in memory, imported through the same path as a file (tests and small callers) */
-export function importSession(store: Store, input: SessionExport, opts: BundleImportOptions): ImportResult {
+export async function importSession(store: Store, input: SessionExport, opts: BundleImportOptions): Promise<ImportResult> {
 	const dir = join(opts.dataDir, "import");
 	mkdirSync(dir, { recursive: true });
 	const tmp = join(dir, `${randomUUID()}.json`);
 	writeFileSync(tmp, JSON.stringify(input), { flag: "wx" });
 	try {
-		return importBundleFile(store, tmp, opts);
+		return await importBundleFile(store, tmp, opts);
 	} finally {
 		rmSync(tmp, { force: true });
 	}

@@ -101,7 +101,7 @@ function exportCmd(args: string[]) {
 	}
 }
 
-function importCmd(args: string[]) {
+async function importCmd(args: string[]) {
 	const { values, positionals } = parseArgs({ args, allowPositionals: true, options: { "as-new": { type: "boolean" }, directory: { type: "string" } } });
 	const file = positionals[0];
 	if (!file) fail("which file? cmx2 session import <file.json>, one that cmx2 session export wrote");
@@ -116,7 +116,7 @@ function importCmd(args: string[]) {
 	try {
 		const before = { sessions: store.sessionCount(), messages: store.messageCount() };
 		// read a piece at a time, so a large export never sits in memory whole
-		const r = importBundleFile(store, resolve(file), { dataDir: dataDir(), ...(directory ? { directory } : {}), ...(values["as-new"] ? { asNew: true } : {}) });
+		const r = await importBundleFile(store, resolve(file), { dataDir: dataDir(), ...(directory ? { directory } : {}), ...(values["as-new"] ? { asNew: true } : {}) });
 		const where = r.directory;
 		console.log(`imported ${r.id}${r.id !== r.source ? ` (a copy of ${r.source})` : ""}: ${r.messages} messages, ${r.parts} parts, ${r.steps} steps${r.transcript ? "" : ", no transcript so it is browse only"}`);
 		if (r.moved) console.log(`moved from ${r.moved.from.machine} (${r.moved.from.os}, ${r.moved.from.directory}); the model reads that with its next turn`);

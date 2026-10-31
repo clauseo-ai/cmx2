@@ -1,17 +1,17 @@
 /**
  * session export and import over http: GET /session/:id/export streams the cli's bundle, POST /session/import writes it
- * into another daemon's store. two daemons in this process (ports 4961 and 4962, shifted by CMX2_PORT_SHIFT), each
+ * into another daemon's store. two daemons in this process (ports 4844 and 4845, shifted by CMX2_PORT_SHIFT), each
  * with its own data dir; the provider is a scripted stand-in on loopback speaking anthropic's stream, so the turns are
  * real turns with a real tool call. counts of sessions and messages are checked around every import (rule 14).
  *
  * run: bun test packages/server/test/transfer.test.ts
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { DEFAULTS } from "@cmx2/engine/config";
-import { exportSession, exportStream } from "@cmx2/store";
+import { exportSession, exportStream, projectTranscript } from "@cmx2/store";
 import { Type } from "typebox";
 import { nonce, port } from "../../eval/src/harness.ts";
 import { serve } from "../src/index.ts";
@@ -24,9 +24,10 @@ for (const d of [WORK, WORK2, CONFIG]) mkdirSync(d, { recursive: true });
 writeFileSync(join(WORK, "notes.txt"), "the answer is 42\n");
 const CONFIG_DIR_BEFORE = process.env.CMX2_CONFIG_DIR;
 process.env.CMX2_CONFIG_DIR = CONFIG;
-const A = `http://127.0.0.1:${port(4961)}`;
-const B = `http://127.0.0.1:${port(4962)}`;
+const A = `http://127.0.0.1:${port(4844)}`;
+const B = `http://127.0.0.1:${port(4845)}`;
 const SMALL_CAP = 2 * 1024 * 1024;
+const STALL_MS = 400;
 
 const sse = (type: string, data: unknown) => `event: ${type}\ndata: ${JSON.stringify({ type, ...(data as object) })}\n\n`;
 type Block = { type: "text"; text: string } | { type: "tool_use"; name: string; input: unknown };
@@ -96,8 +97,8 @@ let b: ReturnType<typeof serve>;
 beforeAll(() => {
 	const ca = config();
 	const cb = config();
-	a = serve({ config: ca, port: port(4961), hostname: "127.0.0.1", dataDir: join(ROOT, "data-a"), checkEvents: true, reload: () => ca, warmHorizonMs: 0, extraTools: () => [stuck as never] });
-	b = serve({ config: cb, port: port(4962), hostname: "127.0.0.1", dataDir: join(ROOT, "data-b"), checkEvents: true, reload: () => cb, warmHorizonMs: 0, importMaxBytes: SMALL_CAP });
+	a = serve({ config: ca, port: port(4844), hostname: "127.0.0.1", dataDir: join(ROOT, "data-a"), checkEvents: true, reload: () => ca, warmHorizonMs: 0, extraTools: () => [stuck as never] });
+	b = serve({ config: cb, port: port(4845), hostname: "127.0.0.1", dataDir: join(ROOT, "data-b"), checkEvents: true, reload: () => cb, warmHorizonMs: 0, importMaxBytes: SMALL_CAP, importStallMs: STALL_MS });
 });
 afterAll(async () => {
 	for (const r of held.splice(0)) r();
@@ -296,7 +297,9 @@ test("a session running a turn is not exported: 409 BusyError", async () => {
 test("an oversized, corrupt, cut-short or newer bundle is refused with a plain error and writes nothing", async () => {
 	const before = counts(b);
 	const big = JSON.stringify({ ...JSON.parse(bundle), padding: "x".repeat(SMALL_CAP) });
-	const over = await importTo(B, big);
+	// refused from its content-length before a byte is read, and the connection closed: a client still sending may see the
+	// reset instead of the 413
+	const over = await importTo(B, big).catch((e: Error) => ({ status: (e as { code?: string }).code === "ECONNRESET" ? 413 : 0 }));
 	expect(over.status).toBe(413);
 	expect((await importTo(B, "{not json")).json.data.message).toContain("not json");
 	expect((await importTo(B, bundle.slice(0, Math.floor(bundle.length / 2)))).status).toBe(400);
@@ -374,4 +377,71 @@ test("a relative directory is refused", async () => {
 	const r = await importTo(B, bundle, `?asNew=true&directory=${encodeURIComponent("elsewhere")}`);
 	expect(r.status).toBe(400);
 	expect(r.json.data.message).toContain("not an absolute path");
+});
+
+test("an upload that stops sending is dropped after the stall limit with 408, and the next import runs", async () => {
+	const before = counts(b);
+	const slow = piecewise(bundle);
+	const t0 = Date.now();
+	const r = await fetch(`${B}/session/import?asNew=true`, { method: "POST", headers: { "content-type": "application/json" }, body: slow.body, duplex: "half" } as RequestInit);
+	expect(r.status).toBe(408);
+	expect(((await r.json()) as any).name).toBe("RequestTimeoutError");
+	expect(Date.now() - t0).toBeLessThan(STALL_MS + 2000);
+	slow.release();
+	expect(counts(b)).toEqual(before);
+	expect(readdirSync(join(ROOT, "data-b", "import"))).toEqual([]);
+	expect((await importTo(B, bundle, "?asNew=true")).status).toBe(201);
+});
+
+test("a bundle whose own folder is not an absolute path is refused", async () => {
+	const e = JSON.parse(bundle);
+	e.session.directory = "work";
+	const r = await importTo(B, JSON.stringify(e), "?asNew=true");
+	expect(r.status).toBe(400);
+	expect(r.json.data.message).toContain("not an absolute path");
+});
+
+test("a large import never holds the daemon's event loop for long", async () => {
+	// a 25 MB session in daemon a's store, as a run would leave it
+	const id = `ses_bigimport${nonce()}`.padEnd(24, "a").slice(0, 24);
+	const file = join(ROOT, "data-a", "sessions", `${id}.jsonl`);
+	writeFileSync(file, `${JSON.stringify({ type: "header", version: 1, id, cwd: WORK, created: 1 })}\n`);
+	const text = "lorem ipsum dolor sit amet, \"quoted\" é 你好 ".repeat(450);
+	let lines = "";
+	for (let i = 1; i <= 600; i++) {
+		lines += `${JSON.stringify({ type: "message", message: { role: "user", content: `question ${i}`, timestamp: i } })}\n`;
+		lines += `${JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: `${i} ${text}` }], provider: "anthropic", model: "m", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } }, stopReason: "stop", timestamp: i + 0.5 } })}\n`;
+	}
+	appendFileSync(file, lines);
+	a.store.putSession({ id, directory: WORK, title: "big", model: "anthropic/claude-opus-5-5", session_file: file, created_at: 1 });
+	projectTranscript(a.store, id, file, WORK);
+	const big = (await exported(id)).text;
+	expect(big.length).toBeGreaterThan(20 * 1024 * 1024);
+	// the test shares the daemon's event loop: the longest gap between ticks is the longest block
+	let last = performance.now();
+	let longest = 0;
+	const watch = setInterval(() => {
+		const now = performance.now();
+		longest = Math.max(longest, now - last);
+		last = now;
+	}, 1);
+	const r = await importTo(A, big, "?asNew=true");
+	clearInterval(watch);
+	expect(r.status).toBe(201);
+	expect(((await call(A, "GET", `/session/${r.json.id}/message`)).json as any[]).length).toBe(1200);
+	console.error(`longest event loop block during a ${Math.round(big.length / 1048576)} MB import: ${Math.round(longest)} ms`);
+	expect(longest).toBeLessThan(150);
+}, 60_000);
+
+test("a daemon clears the import folder's leftovers when it starts", async () => {
+	const data = join(ROOT, "data-c");
+	mkdirSync(join(data, "import"), { recursive: true });
+	writeFileSync(join(data, "import", "left-by-a-crash.json"), "{");
+	const c = config();
+	const d = serve({ config: c, port: port(4849), hostname: "127.0.0.1", dataDir: data, reload: () => c, warmHorizonMs: 0 });
+	try {
+		expect(existsSync(join(data, "import", "left-by-a-crash.json"))).toBe(false);
+	} finally {
+		await d.stop();
+	}
 });

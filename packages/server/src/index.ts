@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import { open as openFile, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { CONTRACT_VERSION, EVENTS, type EventType } from "@cmx2/contract";
@@ -196,6 +196,8 @@ export interface ServeOptions {
 	idleWaitMs?: number;
 	/** the biggest session bundle POST /session/import takes (IMPORT_MAX_BYTES; tests set a small one) */
 	importMaxBytes?: number;
+	/** how long an import upload may send nothing before it is dropped (IMPORT_STALL_MS; tests set a short one) */
+	importStallMs?: number;
 	/** tools every session also declares (tests add one that ignores the abort signal) */
 	extraTools?: () => NonNullable<SessionOptionsOf["extraTools"]>;
 }
@@ -210,6 +212,8 @@ export const MAX_BODY_BYTES = 128 * 1024 * 1024;
  * cap, and the import reads that file a piece at a time
  */
 export const IMPORT_MAX_BYTES = 256 * 1024 * 1024;
+/** an import upload that sends no bytes for this long is dropped with 408, and the import slot is free again */
+export const IMPORT_STALL_MS = 60_000;
 /** the unauthenticated pairing exchange carries a token and a name */
 const PAIR_BODY_BYTES = 16 * 1024;
 
@@ -260,6 +264,10 @@ async function realAsync(p: string): Promise<string> {
 
 export function serve(opts: ServeOptions) {
 	const data = opts.dataDir ?? defaultDataDir();
+	// uploads a daemon was importing when it stopped: only ever temporary copies of a body, never a session
+	try {
+		for (const f of readdirSync(join(data, "import"))) rmSync(join(data, "import", f), { force: true });
+	} catch {}
 	const store = new Store(join(data, "cmx2.db"));
 	const locks = new RunLocks(data, opts.port);
 	const sessions = new Map<string, EngineSession>();
@@ -1509,17 +1517,18 @@ export function serve(opts: ServeOptions) {
 		const chunks = exportStream(store, stored.id, { cmx2: VERSION });
 		const enc = new TextEncoder();
 		let sinceGc = 0;
+		let gcs = 0;
 		const body = new ReadableStream<Uint8Array>({
 			async pull(c) {
 				const { done, value } = await chunks.next();
 				if (done) return c.close();
 				c.enqueue(enc.encode(value));
-				// each chunk leaves its rows, strings and bytes for a gc that a fast reader never gives time to run; collecting
-				// every 8 MB keeps a 256 MB export near flat (measured on a 256 MB export: +223 MB peak rss without, +50 MB with)
+				// each chunk leaves its rows, strings and bytes for a gc that a fast reader never gives time to run (a 256 MB
+				// export added 223 MB to peak rss): a minor collection every 4 MB sent, a full one every 8th time, as the import does
 				sinceGc += value.length;
-				if (sinceGc >= 8 * 1024 * 1024) {
+				if (sinceGc >= 4 * 1024 * 1024) {
 					sinceGc = 0;
-					Bun.gc(true);
+					Bun.gc(++gcs % 8 === 0);
 				}
 			},
 			async cancel() {
@@ -1551,10 +1560,28 @@ export function serve(opts: ServeOptions) {
 			const out = await openFile(tmp, "wx");
 			try {
 				const body = req.body?.getReader();
+				const stallMs = opts.importStallMs ?? IMPORT_STALL_MS;
+				let received = 0;
+				let gcs = 0;
 				for (;;) {
-					const chunk = body ? await body.read() : { done: true as const, value: undefined };
+					let timer: ReturnType<typeof setTimeout> | undefined;
+					const stalled = new Promise<"stalled">((r) => (timer = setTimeout(() => r("stalled"), stallMs)));
+					const chunk = body ? await Promise.race([body.read(), stalled]) : ({ done: true, value: undefined } as const);
+					clearTimeout(timer);
+					if (chunk === "stalled") {
+						// an upload that stopped sending would hold the one import slot for good
+						void body?.cancel().catch(() => {});
+						return Response.json({ name: "RequestTimeoutError", data: { message: `the upload sent nothing for ${Math.round(stallMs / 1000)} s; nothing was imported. send it again` } }, { status: 408, headers: { connection: "close" } });
+					}
 					if (chunk.done) break;
 					await out.write(chunk.value);
+					// each piece of the body is a buffer outside the js heap that only a gc frees; an upload faster than the gc
+					// comes due would hold most of the body (the same policy as the import's reads)
+					received += chunk.value.length;
+					if (received >= 4 * 1024 * 1024) {
+						received = 0;
+						Bun.gc(++gcs % 8 === 0);
+					}
 				}
 			} catch (e) {
 				if (e instanceof BodyTooLarge) return Response.json({ name: "PayloadTooLargeError", data: { message: "that request body is bigger than the daemon takes" } }, { status: 413, headers: { connection: "close" } });
@@ -1562,9 +1589,9 @@ export function serve(opts: ServeOptions) {
 			} finally {
 				await out.close();
 			}
-			let r: ReturnType<typeof importBundleFile>;
+			let r: Awaited<ReturnType<typeof importBundleFile>>;
 			try {
-				r = importBundleFile(store, tmp, {
+				r = await importBundleFile(store, tmp, {
 					dataDir: data,
 					...(directory ? { directory } : {}),
 					...(q.asNew === "true" ? { asNew: true } : {}),

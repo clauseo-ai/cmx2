@@ -68,14 +68,14 @@ liveTest("a session exported from one daemon lists, reads and continues on anoth
 	const dataB = join(SCRATCH, "b");
 	const storeB = new Store(join(dataB, "cmx2.db"));
 	const before = counts(storeB);
-	const r = importSession(storeB, readExport(await Bun.file(file).text()), { dataDir: dataB });
+	const r = await importSession(storeB, readExport(await Bun.file(file).text()), { dataDir: dataB });
 	const after = counts(storeB);
 	console.log(`import into b: sessions ${before.sessions} -> ${after.sessions}, messages ${before.messages} -> ${after.messages}`);
 	expect(r.id).toBe(created.id);
 	expect(after).toEqual({ sessions: before.sessions + 1, messages: before.messages + e.messages.length });
 	expect(existsSync(join(dataB, "sessions", `${created.id}.jsonl`))).toBe(true);
 	// a second import of the same file changes nothing (and deletes nothing)
-	expect(() => importSession(storeB, readExport(JSON.stringify(e)), { dataDir: dataB })).toThrow(/already in this database; nothing was changed/);
+	await expect(importSession(storeB, readExport(JSON.stringify(e)), { dataDir: dataB })).rejects.toThrow(/already in this database; nothing was changed/);
 	expect(counts(storeB)).toEqual(after);
 	storeB.close();
 
@@ -109,8 +109,8 @@ liveTest("as-new imports a copy under a fresh id with every id moved, and leaves
 	src.close();
 	const dataC = join(SCRATCH, "c");
 	const c = new Store(join(dataC, "cmx2.db"));
-	importSession(c, e, { dataDir: dataC });
-	const copy = importSession(c, e, { dataDir: dataC, asNew: true, directory: PROJ });
+	await importSession(c, e, { dataDir: dataC });
+	const copy = await importSession(c, e, { dataDir: dataC, asNew: true, directory: PROJ });
 	expect(copy.id).not.toBe(e.session.id);
 	const bare = e.session.id.replace(/^ses_/, "");
 	const leaked = c.db.query("select count(*) as n from message where session_id = ? and (id like ? or info like ?)").get(copy.id, `%${bare}%`, `%${bare}%`) as { n: number };

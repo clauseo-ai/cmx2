@@ -37,7 +37,7 @@ function target(name: string) {
 
 const counts = (t: Store) => ({ sessions: t.sessionCount(), messages: t.messageCount(), parts: t.partCount() });
 
-test("a failed import leaves nothing: no rows, no transcript, and a retry is not an id clash", () => {
+test("a failed import leaves nothing: no rows, no transcript, and a retry is not an id clash", async () => {
 	const { s, id } = source();
 	const e = exportSession(s, id);
 	s.close();
@@ -45,17 +45,17 @@ test("a failed import leaves nothing: no rows, no transcript, and a retry is not
 	// a sessions path the transcript cannot be written under
 	writeFileSync(join(data, "sessions"), "not a folder");
 	const before = counts(t);
-	expect(() => importSession(t, e, { dataDir: data })).toThrow();
+	await expect(importSession(t, e, { dataDir: data })).rejects.toThrow();
 	expect(counts(t)).toEqual(before);
 	expect(t.session(id)).toBeUndefined();
 	rmSync(join(data, "sessions"));
 	// a message that cannot be stored: the rows roll back and the transcript written before them is removed
 	const bad = structuredClone(e) as SessionExport;
 	(bad.messages[1] as any).seq = null;
-	expect(() => importSession(t, bad, { dataDir: data })).toThrow(ExportError);
+	await expect(importSession(t, bad, { dataDir: data })).rejects.toThrow(ExportError);
 	expect(counts(t)).toEqual(before);
 	expect(existsSync(join(data, "sessions", `${id}.jsonl`))).toBe(false);
-	const r = importSession(t, e, { dataDir: data });
+	const r = await importSession(t, e, { dataDir: data });
 	expect(r.id).toBe(id);
 	expect(counts(t).messages).toBe(before.messages + e.messages.length);
 	t.close();
@@ -92,31 +92,31 @@ test("export chunks stay near 1 MB however large the messages are", async () => 
 	s.close();
 });
 
-test("an import takes an absolute directory only, and stores its real path", () => {
+test("an import takes an absolute directory only, and stores its real path", async () => {
 	const { s, id } = source();
 	const e = exportSession(s, id);
 	s.close();
 	const { t, data } = target("dst-dir");
-	expect(() => importSession(t, e, { dataDir: data, directory: "relative/folder" })).toThrow("not an absolute path");
+	await expect(importSession(t, e, { dataDir: data, directory: "relative/folder" })).rejects.toThrow("not an absolute path");
 	const real = join(dir, "real-folder");
 	mkdirSync(real);
 	const link = join(dir, "link-folder");
 	symlinkSync(real, link);
-	const r = importSession(t, e, { dataDir: data, directory: link });
+	const r = await importSession(t, e, { dataDir: data, directory: link });
 	expect(r.directory).toBe(real);
 	expect(t.session(id)!.directory).toBe(real);
 	expect(JSON.parse(readFileSync(r.transcript!, "utf8").split("\n")[0]!).cwd).toBe(real);
 	t.close();
 });
 
-test("a short session id is refused; a copy renames id fields only, never the text", () => {
+test("a short session id is refused; a copy renames id fields only, never the text", async () => {
 	const { s, id } = source();
 	const e = exportSession(s, id);
 	s.close();
 	const { t, data } = target("dst-ids");
-	expect(() => importSession(t, { ...e, session: { ...e.session, id: "ses_a" } }, { dataDir: data })).toThrow("is not a cmx2 session id");
-	importSession(t, e, { dataDir: data });
-	const r = importSession(t, e, { dataDir: data, asNew: true });
+	await expect(importSession(t, { ...e, session: { ...e.session, id: "ses_a" } }, { dataDir: data })).rejects.toThrow("is not a cmx2 session id");
+	await importSession(t, e, { dataDir: data });
+	const r = await importSession(t, e, { dataDir: data, asNew: true });
 	expect(r.id).not.toBe(id);
 	const rows = t.messages(r.id).rows;
 	expect(rows.every((m) => m.id.includes(r.id.slice(4)) && m.session_id === r.id)).toBe(true);
@@ -130,17 +130,45 @@ test("a short session id is refused; a copy renames id fields only, never the te
 	t.close();
 });
 
-test("a subagent whose parent is not here imports as a session of its own", () => {
+test("a subagent whose parent is not here imports as a session of its own", async () => {
 	const { s, id } = source();
 	const e = exportSession(s, id);
 	s.close();
 	const { t, data } = target("dst-parent");
-	const r = importSession(t, { ...e, session: { ...e.session, parent_id: "ses_notherebbbbbbbbbbbbb" } }, { dataDir: data });
+	const r = await importSession(t, { ...e, session: { ...e.session, parent_id: "ses_notherebbbbbbbbbbbbb" } }, { dataDir: data });
 	expect(t.session(r.id)!.parent_id).toBeNull();
 	// a parent that is here stays
 	t.putSession({ id: "ses_parenthereccccccccc", directory: dir, title: "p", model: "anthropic/m", session_file: null, created_at: 1 });
-	const c = importSession(t, { ...e, session: { ...e.session, parent_id: "ses_parenthereccccccccc" } }, { dataDir: data, asNew: true });
+	const c = await importSession(t, { ...e, session: { ...e.session, parent_id: "ses_parenthereccccccccc" } }, { dataDir: data, asNew: true });
 	expect(t.session(c.id)!.parent_id).toBe("ses_parenthereccccccccc");
 	expect(readdirSync(join(data, "import"))).toEqual([]);
+	t.close();
+});
+
+test("an orphan from an interrupted import (a transcript, staged rows, no session row) is replaced, not an id clash", async () => {
+	const { s, id } = source();
+	const e = exportSession(s, id);
+	s.close();
+	const { t, data } = target("dst-orphan");
+	mkdirSync(join(data, "sessions"), { recursive: true });
+	writeFileSync(join(data, "sessions", `${id}.jsonl`), "left by a crash\n");
+	t.db.query("insert into message (id, session_id, seq, role, created_at, info) values (?, ?, 1, 'user', 1, '{}')").run(e.messages[0]!.id, id);
+	const r = await importSession(t, e, { dataDir: data });
+	expect(r.id).toBe(id);
+	expect(readFileSync(r.transcript!, "utf8")).not.toContain("left by a crash");
+	expect(t.messages(id).rows).toHaveLength(e.messages.length);
+	t.close();
+});
+
+test("the bundle's own folder is checked like a given one: absolute, and stored as its real path", async () => {
+	const { s, id } = source();
+	const e = exportSession(s, id);
+	s.close();
+	const { t, data } = target("dst-own-folder");
+	await expect(importSession(t, { ...e, session: { ...e.session, directory: "work" } }, { dataDir: data })).rejects.toThrow("not an absolute path");
+	const link = join(dir, "own-link");
+	symlinkSync(dir, link);
+	const r = await importSession(t, { ...e, session: { ...e.session, directory: link } }, { dataDir: data });
+	expect(t.session(r.id)!.directory).toBe(dir);
 	t.close();
 });

@@ -41,7 +41,7 @@ test("an import onto another machine writes one moved record: moved_from, a noti
 	const data = join(dir, "data-b");
 	const t = new Store(join(data, "cmx2.db"), { archivePath: null });
 	const before = { sessions: t.sessionCount(), messages: t.messageCount() };
-	const r = importSession(t, readExport(JSON.stringify(e)), { dataDir: data, directory: "/home/rohan/x", here: { machine: "boxbox", os: "linux", arch: "x64", home: "/home/rohan" }, now: 500 });
+	const r = await importSession(t, readExport(JSON.stringify(e)), { dataDir: data, directory: "/home/rohan/x", here: { machine: "boxbox", os: "linux", arch: "x64", home: "/home/rohan" }, now: 500 });
 	expect(r.moved).toEqual({ from: e.origin, to: { machine: "boxbox", os: "linux", arch: "x64", directory: "/home/rohan/x", home: "/home/rohan" }, at: 500 });
 	const line = movedText(r.moved!);
 	expect(line).toBe(
@@ -61,20 +61,20 @@ test("an import onto another machine writes one moved record: moved_from, a noti
 	t.close();
 });
 
-test("an export with no origin (from before 0.9.6) imports with no move", () => {
+test("an export with no origin (from before 0.9.6) imports with no move", async () => {
 	const s = new Store(join(dir, "data-a", "cmx2.db"), { archivePath: null });
 	const e = exportSession(s, "ses_move0001aaaaaaaaaaaa");
 	s.close();
 	delete e.origin;
 	const data = join(dir, "data-c");
 	const t = new Store(join(data, "cmx2.db"), { archivePath: null });
-	const r = importSession(t, e, { dataDir: data, directory: "/home/rohan/x" });
+	const r = await importSession(t, e, { dataDir: data, directory: "/home/rohan/x" });
 	expect(r.moved).toBeUndefined();
 	expect(t.session(r.id)!.moved_from).toBeNull();
 	t.close();
 });
 
-test("migration 17 adds moved_from and keeps every session, message and part", () => {
+test("migration 17 adds moved_from and keeps every session, message and part", async () => {
 	const path = join(dir, "migrate.db");
 	const s = new Store(path, { archivePath: null });
 	for (let i = 0; i < 10; i++) {
