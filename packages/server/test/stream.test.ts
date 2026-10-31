@@ -9,7 +9,7 @@
  */
 import { afterAll, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, realpathSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULTS } from "@cmx2/engine/config";
 import { nonce, port } from "../../eval/src/harness.ts";
@@ -62,7 +62,11 @@ const provider = Bun.serve({
 		return new Response(out, { headers: { "content-type": "text/event-stream" } });
 	},
 });
-afterAll(() => provider.stop(true));
+afterAll(() => {
+	provider.stop(true);
+	// each run writes about 120 mb of transcripts and data here
+	rmSync(SCRATCH, { recursive: true, force: true });
+});
 
 /** a daemon for one test, with the streams it closed (its log lines) */
 async function withDaemon<T>(data: string, fn: (closes: string[]) => Promise<T>): Promise<T> {

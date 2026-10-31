@@ -27,6 +27,7 @@ test("migration 15 adds the btw table and keeps every session, message and part"
 	// the store as migration 14 left it
 	const raw = new Database(path);
 	raw.exec("drop table btw");
+	raw.exec("alter table session drop column moved_from");
 	raw.exec("pragma user_version = 14");
 	raw.close();
 	const m = new Store(path, { archivePath: null });

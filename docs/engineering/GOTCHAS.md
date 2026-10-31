@@ -496,3 +496,9 @@ format: slug, what happened, the fix or the rule.
 - bun's node:zlib cannot compress a stream synchronously across calls (`_processChunk` closes its handle), so the gzip switch compresses each batch separately with the last 32 kb as its preset dictionary and joins them into one gzip member; every streaming decoder reads it batch by batch.
 - the stall judge's timing depends on the work done per withheld frame: delta frames, and frames to a stream held at the cap, are built per stream rather than shared, or 30 readers through a burst start getting cut.
 - bun's fetch asks for gzip by default, so the tui and cli get gzipped json answers since the rest gzip landed.
+
+## session transfer (export and import over http)
+
+- **a migration test that rewinds user_version must drop every later column too (2026-10-31).** the btw, lineage, refresh and rev tests build a fresh store, drop their own column and set an older user_version, so the store reruns every migration after it. a new `alter table add column` migration then fails on the column the fresh store already made ("duplicate column"). when you add a column migration, add its drop to those tests.
+- **a streamed answer must not be `application/json`.** the listener reads a json answer whole to gzip it for a client that takes gzip, which undoes streaming. the export answers `application/vnd.cmx2.session+json` so it stays a stream.
+- **request bodies are buffered whole.** the listener reads each body into memory, cut at the precheck's maxBody; a route that takes big bodies gets its own cap there (`/session/import`, IMPORT_MAX_BYTES), not a bigger MAX_BODY_BYTES for every route.

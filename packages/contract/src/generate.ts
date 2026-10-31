@@ -285,15 +285,17 @@ function sseLines(body: ReadableStream<Uint8Array>): AsyncIterable<{ id?: string
 			out.push(`\t\t/** ${r.summary} */\n\t\t${r.operationId}: (o?: CallOptions) => stream(${JSON.stringify(r.path)}, o),`);
 			continue;
 		}
+		const path = params.length ? `\`${r.path.replace(/:(\w+)/g, (_m, p) => `\${encodeURIComponent(params.${p})}`)}\`` : JSON.stringify(r.path);
 		if (r.bytes) {
-			args.push(`query: ${ts(r.query, "\t\t")}`, "o?: BytesOptions");
-			out.push(`\t\t/** ${r.summary} */\n\t\t${r.operationId}: (${args.join(", ")}) => callBytes(${JSON.stringify(r.path)}, query, o),`);
+			// a route with path params and no query (a session's export) takes the params alone
+			if (r.query) args.push(`query: ${ts(r.query, "\t\t")}`);
+			args.push("o?: BytesOptions");
+			out.push(`\t\t/** ${r.summary} */\n\t\t${r.operationId}: (${args.join(", ")}) => callBytes(${path}, ${r.query ? "query" : "undefined"}, o),`);
 			continue;
 		}
 		if (r.body) args.push(`body: ${ts(r.body, "\t\t")}`);
 		if (r.query) args.push(`query: ${ts(r.query, "\t\t")}${(r.query as { required?: string[] }).required?.length ? "" : " = {}"}`);
 		args.push("o?: CallOptions");
-		const path = params.length ? `\`${r.path.replace(/:(\w+)/g, (_m, p) => `\${encodeURIComponent(params.${p})}`)}\`` : JSON.stringify(r.path);
 		out.push(
 			`\t\t/** ${r.summary} */\n\t\t${r.operationId}: (${args.join(", ")}) =>\n\t\t\tcall<${ts(r.response, "\t\t\t")}>(${JSON.stringify(r.method)}, ${path}, ${r.query ? "query" : "undefined"}, ${r.body ? "body" : "undefined"}, o),`,
 		);

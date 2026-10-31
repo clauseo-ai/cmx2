@@ -10,7 +10,7 @@ export { MIGRATIONS } from "./migrations.ts";
 export { AgentStore, type AgentRow, type AgentState, type MailKind, type MailRow } from "./agents.ts";
 export { ARCHIVE_FILE, ARCHIVE_MIGRATIONS, archivePathFor, openArchiveWriter } from "./archive.ts";
 export { closeIfDone, closeOpenSteps, documentPart, messageId, partId, projectMessage, projectTranscript, type Touched } from "./projection.ts";
-export { EXPORT_FORMAT, EXPORT_VERSION, type ExportedMessage, ExportError, exportSession, importSession, type ImportResult, readExport, type SessionExport, sessionMarkdown } from "./export.ts";
+export { EXPORT_FORMAT, EXPORT_VERSION, type ExportedMessage, ExportError, exportSession, exportStream, importSession, type ImportResult, type MoveRecord, movedText, type Place, readExport, type SessionExport, sessionMarkdown, thisMachine } from "./export.ts";
 export { DEFAULT_SINCE_DAYS, fileBytes, importCmx, ImportError, type ImportCounts, type ImportOptions, parseSince } from "./import-cmx.ts";
 
 export interface StoredSession {
@@ -46,6 +46,8 @@ export interface StoredSession {
 	forked_from?: string | null;
 	/** the parent's message the fork was cut before; null when the whole history was forked */
 	forked_at_message?: string | null;
+	/** json { from, to, at } when an import moved the session from another machine or folder (see export.ts) */
+	moved_from?: string | null;
 }
 
 /** an armed revert: the files are back as they were before `messageID`; unrevert puts `snapshot` back */
@@ -371,8 +373,8 @@ export class Store {
 	 */
 	private sessionView() {
 		this.db.exec("drop view if exists temp.all_session");
-		const main = `select ${COLS}, archived_at, transcript_rev, forked_from, forked_at_message from main.session`;
-		const archive = `select ${SESSION_COLUMNS.map((c) => `a.${c}`).join(", ")}, ai.archived_at, 0 as transcript_rev, null as forked_from, null as forked_at_message from archive.session a
+		const main = `select ${COLS}, archived_at, transcript_rev, forked_from, forked_at_message, moved_from from main.session`;
+		const archive = `select ${SESSION_COLUMNS.map((c) => `a.${c}`).join(", ")}, ai.archived_at, 0 as transcript_rev, null as forked_from, null as forked_at_message, null as moved_from from archive.session a
 			left join main.archived_import ai on ai.id = a.id where not exists (select 1 from main.session m where m.id = a.id)`;
 		this.db.exec(`create temp view all_session as ${this.attached ? `${main} union all ${archive}` : main}`);
 	}
@@ -410,15 +412,16 @@ export class Store {
 		this.db
 			.query(
 				`insert into session (id, directory, title, model, session_file, created_at, updated_at, effort, nudge, turn_mode, cache_ttl,
-				   parent_id, slug, project_id, source, version, cost, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, summary, forked_from, forked_at_message)
+				   parent_id, slug, project_id, source, version, cost, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, summary, forked_from, forked_at_message, moved_from)
 				 values ($id, $directory, $title, $model, $session_file, $created_at, $updated_at, $effort, $nudge, $turn_mode, $cache_ttl,
-				   $parent_id, $slug, $project_id, $source, $version, $cost, $tokens_input, $tokens_output, $tokens_cache_read, $tokens_cache_write, $summary, $forked_from, $forked_at_message)
+				   $parent_id, $slug, $project_id, $source, $version, $cost, $tokens_input, $tokens_output, $tokens_cache_read, $tokens_cache_write, $summary, $forked_from, $forked_at_message, $moved_from)
 				 on conflict(id) do update set title = excluded.title, model = excluded.model, session_file = excluded.session_file,
 				   updated_at = excluded.updated_at, effort = excluded.effort, nudge = excluded.nudge, turn_mode = excluded.turn_mode,
 				   cache_ttl = excluded.cache_ttl, parent_id = excluded.parent_id, slug = excluded.slug, project_id = excluded.project_id,
 				   version = excluded.version, cost = excluded.cost, tokens_input = excluded.tokens_input, tokens_output = excluded.tokens_output,
 				   tokens_cache_read = excluded.tokens_cache_read, tokens_cache_write = excluded.tokens_cache_write, summary = excluded.summary,
-				   forked_from = coalesce(excluded.forked_from, session.forked_from), forked_at_message = coalesce(excluded.forked_at_message, session.forked_at_message)`,
+				   forked_from = coalesce(excluded.forked_from, session.forked_from), forked_at_message = coalesce(excluded.forked_at_message, session.forked_at_message),
+				   moved_from = coalesce(excluded.moved_from, session.moved_from)`,
 			)
 			.run({
 				effort: null,
@@ -438,6 +441,7 @@ export class Store {
 				summary: null,
 				forked_from: null,
 				forked_at_message: null,
+				moved_from: null,
 				...s,
 				updated_at: s.updated_at ?? s.created_at,
 			} as never);
@@ -871,17 +875,23 @@ export class Store {
 	 * a page of messages, oldest first within the page. `before` is a message seq: the page ends just
 	 * before it. returns the rows plus the seq to pass as `before` for the next older page, if any.
 	 */
-	messages(sessionId: string, opts: { limit?: number; before?: number } = {}): { rows: Array<MessageRow & { parts: PartRow[] }>; next: number | null } {
+	messages(sessionId: string, opts: { limit?: number; before?: number; after?: number } = {}): { rows: Array<MessageRow & { parts: PartRow[] }>; next: number | null } {
 		const archived = this.home(sessionId) === "archive";
 		const home = archived ? "archive" : "main";
 		const args: Record<string, string | number> = { sid: sessionId };
 		// a permanent revert's messages stay in the store, out of lists (imported history has none)
 		let sql = `select * from ${home}.message where session_id = $sid${archived ? "" : " and reverted = 0"}`;
+		// after pages oldest first (the next page's after is next); before pages newest first (the older page's before is next)
+		const asc = opts.after !== undefined;
 		if (opts.before !== undefined) {
 			sql += " and seq < $before";
 			args.before = opts.before;
 		}
-		sql += " order by seq desc";
+		if (asc) {
+			sql += " and seq > $after";
+			args.after = opts.after!;
+		}
+		sql += asc ? " order by seq asc" : " order by seq desc";
 		if (opts.limit) {
 			sql += " limit $limit";
 			args.limit = opts.limit + 1;
@@ -892,7 +902,7 @@ export class Store {
 			rows = rows.slice(0, opts.limit);
 			next = rows.at(-1)!.seq;
 		}
-		rows.reverse();
+		if (!asc) rows.reverse();
 		const partsOf = this.db.query(`select * from ${home}.part where message_id = ? order by seq`);
 		if (!archived) return { rows: rows.map((r) => ({ ...r, parts: partsOf.all(r.id) as PartRow[] })), next };
 		// archived rows are decompressed here, for this page only

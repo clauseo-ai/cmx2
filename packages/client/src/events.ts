@@ -110,8 +110,31 @@ export type TextPart = {
 	messageID: string;
 	type: "text";
 	text: string;
-	/** context the user did not type (a mentioned file, the turn context) */
+	/** context the user did not type (a mentioned file, the turn context, a move) */
 	synthetic?: boolean;
+	/** on the notice message (notice.source moved) an import onto another machine or folder writes, and on its one text part: where the session ran before and where it runs now, for a client to draw a divider (moved from <machine>). the part's text is the line the model reads with its next request; the part is synthetic, so it is not the person's words */
+	moved?: {
+		from: {
+			machine: string;
+			os: string;
+			arch: string;
+			/** the session's folder: the repo root paths translate between */
+			directory: string;
+			home: string;
+			[key: string]: unknown;
+		};
+		to: {
+			machine: string;
+			os: string;
+			arch: string;
+			/** the session's folder: the repo root paths translate between */
+			directory: string;
+			home: string;
+			[key: string]: unknown;
+		};
+		at: number;
+		[key: string]: unknown;
+	};
 	/** the part is still being written: it was announced with empty text when it started, message.part.delta extends it, and its final message.part.updated (the whole text, no streaming, time with end) ends it, published when the part's block ends, not when the step does; in a read, the text so far, with the deltas after the read's seq continuing it; a part whose block has ended reads final, not streaming */
 	streaming?: boolean;
 	/** start is when the part was announced (its first delta follows at once), end when its block ended; end is absent on a part that is still streaming */
@@ -274,6 +297,17 @@ export type SessionInfo = {
 		/** the parent's message the fork was cut before: the fork holds the parent's history up to, not including, this message. absent when the whole history was forked */
 		messageID?: string;
 	};
+	/** set on a session imported from another machine or folder (POST /session/import): where it ran before. its timeline holds the move as a notice message (notice.source moved, with moved on the info and the part). absent on a session that never moved, and on one imported from a bundle with no origin (written before this field) */
+	movedFrom?: {
+		/** the short hostname of the machine the session was exported from */
+		machine: string;
+		/** macos, linux, windows, or the platform name */
+		os: string;
+		/** the session's folder there */
+		directory: string;
+		/** when it was imported here (ms) */
+		at: number;
+	};
 	title: string;
 	/** daemon version that created the session */
 	version: string;
@@ -393,6 +427,34 @@ export type MessageInfo = {
 	variant?: string;
 	/** on a user message made by promoting a btw: the btw's id. its text is the question and the answer, framed as a btw the user asked */
 	btw?: string;
+	/** on a user message that is runtime words, not the person's: what said it (job ..., moved) */
+	notice?: {
+		source: string;
+		[key: string]: unknown;
+	};
+	/** on the notice message (notice.source moved) an import onto another machine or folder writes, and on its one text part: where the session ran before and where it runs now, for a client to draw a divider (moved from <machine>). the part's text is the line the model reads with its next request; the part is synthetic, so it is not the person's words */
+	moved?: {
+		from: {
+			machine: string;
+			os: string;
+			arch: string;
+			/** the session's folder: the repo root paths translate between */
+			directory: string;
+			home: string;
+			[key: string]: unknown;
+		};
+		to: {
+			machine: string;
+			os: string;
+			arch: string;
+			/** the session's folder: the repo root paths translate between */
+			directory: string;
+			home: string;
+			[key: string]: unknown;
+		};
+		at: number;
+		[key: string]: unknown;
+	};
 	[key: string]: unknown;
 };
 
@@ -623,6 +685,17 @@ export interface EventMap {
 				sessionID: string;
 				/** the parent's message the fork was cut before: the fork holds the parent's history up to, not including, this message. absent when the whole history was forked */
 				messageID?: string;
+			};
+			/** set on a session imported from another machine or folder (POST /session/import): where it ran before. its timeline holds the move as a notice message (notice.source moved, with moved on the info and the part). absent on a session that never moved, and on one imported from a bundle with no origin (written before this field) */
+			movedFrom?: {
+				/** the short hostname of the machine the session was exported from */
+				machine: string;
+				/** macos, linux, windows, or the platform name */
+				os: string;
+				/** the session's folder there */
+				directory: string;
+				/** when it was imported here (ms) */
+				at: number;
 			};
 			title: string;
 			/** daemon version that created the session */

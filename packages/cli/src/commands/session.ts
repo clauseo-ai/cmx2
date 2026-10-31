@@ -16,13 +16,15 @@ usage:
   cmx2 session export <id> [--format json|markdown] [--out file]
                                   json (the default) is one file with everything a daemon needs to
                                   list, read and continue the session: messages, parts, the transcript,
-                                  the recorded prefix and the step telemetry. markdown is for reading.
+                                  the recorded prefix, the step telemetry and where it was written
+                                  (machine, os, folder). markdown is for reading.
                                   without --out it prints to stdout
   cmx2 session import <file.json> [--as-new] [--directory path]
                                   put an exported session into this machine's database. an id that is
                                   already here is refused and nothing changes; --as-new imports a copy
                                   under a fresh id. --directory moves it to a folder on this machine,
-                                  where its tools will run when you continue it
+                                  where its tools will run when you continue it. one from another machine
+                                  or folder gets a note the model reads on its next turn, saying where it moved
 
 these read the database directly, so they work with or without a daemon running. nothing here deletes
 a session; archive one from a client instead. sharing to a public url is not a thing cmx2 does.`;
@@ -117,6 +119,7 @@ function importCmd(args: string[]) {
 		const r = importSession(store, e, { dataDir: dataDir(), ...(directory ? { directory } : {}), ...(values["as-new"] ? { asNew: true } : {}) });
 		const where = directory ?? e.session.directory;
 		console.log(`imported ${r.id}${r.id !== e.session.id ? ` (a copy of ${e.session.id})` : ""}: ${r.messages} messages, ${r.parts} parts, ${r.steps} steps${r.transcript ? "" : ", no transcript so it is browse only"}`);
+		if (r.moved) console.log(`moved from ${r.moved.from.machine} (${r.moved.from.os}, ${r.moved.from.directory}); the model reads that with its next turn`);
 		console.log(`sessions ${before.sessions} -> ${store.sessionCount()}, messages ${before.messages} -> ${store.messageCount()}`);
 		if (!existsSync(where)) console.log(`its directory ${where} is not on this machine; import again with --as-new --directory <folder> to continue it here`);
 		else if (r.transcript) console.log(`continue it with cmx2 --session ${r.id}, or cmx2 run --session ${r.id} "..."`);

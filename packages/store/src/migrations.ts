@@ -346,4 +346,7 @@ export const MIGRATIONS: readonly string[] = [
 		ms integer
 	 );
 	 create index if not exists cache_refresh_session_idx on cache_refresh (session_id, at)`,
+	// 17 · a session moved here from another machine or folder by an import: json { from, to, at }, each side
+	// { machine, os, arch, directory, home }. null for every session that never moved, existing rows included
+	`alter table session add column moved_from text`,
 ];

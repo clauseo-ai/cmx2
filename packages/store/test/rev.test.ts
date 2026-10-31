@@ -41,6 +41,7 @@ test("the migration keeps every session, message and part, and starts each sessi
 	raw.exec("alter table session drop column transcript_rev; alter table event_log drop column rev");
 	// and without the fork lineage columns of migration 14, which runs again on top
 	raw.exec("alter table session drop column forked_from; alter table session drop column forked_at_message");
+	raw.exec("alter table session drop column moved_from");
 	raw.exec("pragma user_version = 12");
 	const count = (t: string) => (raw.query(`select count(*) as n from ${t}`).get() as { n: number }).n;
 	const before = { sessions: count("session"), messages: count("message"), parts: count("part"), events: count("event_log") };

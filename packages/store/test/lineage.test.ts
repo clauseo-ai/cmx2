@@ -26,6 +26,7 @@ test("migration 14 adds the lineage columns and keeps every session, message and
 	// the store as migration 13 left it
 	const raw = new Database(path);
 	raw.exec("alter table session drop column forked_from; alter table session drop column forked_at_message");
+	raw.exec("alter table session drop column moved_from");
 	raw.exec("pragma user_version = 13");
 	const count = (t: string) => (raw.query(`select count(*) as n from ${t}`).get() as { n: number }).n;
 	const before = { sessions: count("session"), messages: count("message"), parts: count("part") };

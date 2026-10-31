@@ -158,9 +158,12 @@ export function projectMessage(store: Store, ctx: ProjectContext, m: any): Touch
 		const id = messageId(sessionId, seq);
 		const pid = partId(sessionId, seq, 0);
 		const text = `${String(m.source ?? "runtime")}: ${String(m.text ?? "")}`;
-		const info = { id, sessionID: sessionId, role: "user", time: { created }, notice: { source: m.source } };
+		// a move (an import onto another machine or folder) carries where from and where to, for a client's divider; its words are
+		// context the model reads, not the person's, so they are synthetic and stay out of titles
+		const moved = m.source === "moved" && m.moved && typeof m.moved === "object" ? { moved: m.moved } : {};
+		const info = { id, sessionID: sessionId, role: "user", time: { created }, notice: { source: m.source }, ...moved };
 		store.putMessage(row(sessionId, seq, "user", created, null, info, { id }), [
-			{ id: pid, message_id: id, session_id: sessionId, seq: 0, type: "text", data: JSON.stringify({ id: pid, sessionID: sessionId, messageID: id, type: "text", text, notice: true }) },
+			{ id: pid, message_id: id, session_id: sessionId, seq: 0, type: "text", data: JSON.stringify({ id: pid, sessionID: sessionId, messageID: id, type: "text", text, notice: true, ...(moved.moved ? { synthetic: true, ...moved } : {}) }) },
 		]);
 		store.putRecall(id, [doc(ctx, id, "0", "user", "notice", created, text)]);
 		return { message: id, parts: [pid] };

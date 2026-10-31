@@ -26,6 +26,7 @@ test("migration 16 adds the cache_refresh table and keeps every session, message
 	// the store as migration 15 left it
 	const raw = new Database(path);
 	raw.exec("drop table cache_refresh");
+	raw.exec("alter table session drop column moved_from");
 	raw.exec("pragma user_version = 15");
 	const count = (t: string) => (raw.query(`select count(*) as n from ${t}`).get() as { n: number }).n;
 	const before = { sessions: count("session"), messages: count("message"), parts: count("part") };

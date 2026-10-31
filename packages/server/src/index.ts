@@ -12,7 +12,7 @@ import { Transcript } from "@cmx2/engine/transcript";
 import { evaluate, type PermissionRule, rulesFromConfig, subagentEnv } from "@cmx2/engine/permission";
 import { BusyError, EngineSession, type EngineEvent, type MailRecord, type StepRow, type TurnEvent, type UserBlock } from "@cmx2/engine/session";
 import { defaultSkillDirs, LspPool, McpPool, type McpScope, resizeImage, runCommand, Skills } from "@cmx2/tools";
-import { closeOpenSteps, decodeCursor, documentPart, encodeCursor, messageId, partId, projectMessage, projectTranscript, type SessionQuery, type SessionRevert, type SessionStateInfo, type RefreshUsage, Store, type StoredSession } from "@cmx2/store";
+import { closeOpenSteps, decodeCursor, documentPart, encodeCursor, ExportError, exportStream, importSession, messageId, partId, projectMessage, projectTranscript, readExport, type SessionQuery, type SessionRevert, type SessionStateInfo, type RefreshUsage, Store, type StoredSession } from "@cmx2/store";
 import { Value } from "typebox/value";
 import { Asks, permissionJson, questionJson, type ReplyOutcome } from "./asks.ts";
 import { Catalog, expandTemplate, providersJson } from "./catalog.ts";
@@ -194,6 +194,8 @@ export interface ServeOptions {
 	rootWarmHorizonMs?: number;
 	/** how long close, interrupt and abort wait for a stopped turn to go idle before ending its session (5 s) */
 	idleWaitMs?: number;
+	/** the biggest session bundle POST /session/import takes (IMPORT_MAX_BYTES; tests set a small one) */
+	importMaxBytes?: number;
 	/** tools every session also declares (tests add one that ignores the abort signal) */
 	extraTools?: () => NonNullable<SessionOptionsOf["extraTools"]>;
 }
@@ -202,6 +204,12 @@ type SessionOptionsOf = Parameters<typeof EngineSession.create>[0];
 
 /** a request body over this is refused with 413 (photos arrive resized; a transcript import is the biggest body) */
 export const MAX_BODY_BYTES = 128 * 1024 * 1024;
+/**
+ * a session bundle POST /session/import takes: twice the biggest real thread measured when the route was added (a 63 MB
+ * transcript plus 51 MB of parts, about 115 MB as a bundle). the body is read in chunks and cut off at the cap; parsing it
+ * needs the whole bundle in memory once
+ */
+export const IMPORT_MAX_BYTES = 256 * 1024 * 1024;
 /** the unauthenticated pairing exchange carries a token and a name */
 const PAIR_BODY_BYTES = 16 * 1024;
 
@@ -1483,6 +1491,71 @@ export function serve(opts: ServeOptions) {
 	// ---------- sessions ----------
 
 	/** a session row as clients see it. `states`, when given, holds the session_state rows of a whole list (read in one query) */
+	/** where an import moved the session from; nothing for a session that never moved, or a moved_from that does not read */
+	function movedFrom(row: StoredSession) {
+		if (!row.moved_from) return {};
+		try {
+			const m = JSON.parse(row.moved_from) as { from: { machine: string; os: string; directory: string }; at: number };
+			return { movedFrom: { machine: m.from.machine, os: m.from.os, directory: m.from.directory, at: m.at } };
+		} catch {
+			return {};
+		}
+	}
+
+	/** export and import over http: the cli's bundle (store/src/export.ts), streamed out, and written into this daemon's store */
+	function exportResponse(id: string): Response {
+		const stored = row(id);
+		if (sessions.get(id)?.state === "busy" || locks.holds(id)) throw new HttpError(409, "BusyError", `session ${id} is running a turn; export it once the turn ends, or abort it first`, { sessionID: id });
+		const chunks = exportStream(store, stored.id, { cmx2: VERSION });
+		const enc = new TextEncoder();
+		const body = new ReadableStream<Uint8Array>({
+			async pull(c) {
+				const { done, value } = await chunks.next();
+				if (done) c.close();
+				else c.enqueue(enc.encode(value));
+			},
+			async cancel() {
+				await chunks.return(undefined);
+			},
+		});
+		return new Response(body, { headers: { "content-type": "application/vnd.cmx2.session+json", "content-disposition": `attachment; filename="${stored.id}.cmx2.json"` } });
+	}
+
+	async function importBundle(req: Request, url: URL) {
+		const q = queryOf(url, "importSession");
+		let directory: string | undefined;
+		if (q.directory) {
+			directory = resolve(q.directory);
+			await reachFor(directory);
+			if (!existsSync(directory) || !statSync(directory).isDirectory()) throw badRequest(`directory ${directory} is not a folder on this machine`);
+			directory = realpathSync(directory);
+		}
+		const raw = await req.text();
+		let e: ReturnType<typeof readExport>;
+		try {
+			e = readExport(raw);
+		} catch (err) {
+			if (err instanceof ExportError) throw badRequest(err.message);
+			throw err;
+		}
+		const where = directory ?? e.session.directory;
+		if (!directory) await reachFor(where);
+		if (!directory && (!existsSync(where) || !statSync(where).isDirectory())) throw badRequest(`the session's folder ${where} is not on this machine; send directory, the repo's folder here`);
+		let r: ReturnType<typeof importSession>;
+		try {
+			r = importSession(store, e, { dataDir: data, ...(directory ? { directory } : {}), ...(q.asNew === "true" ? { asNew: true } : {}), ...(q.title?.trim() ? { title: q.title.trim() } : {}), projectId: projectFor(where) });
+		} catch (err) {
+			if (err instanceof ExportError) throw err.code === "clash" ? new HttpError(409, "ConflictError", err.message) : badRequest(err.message);
+			// a bundle whose rows do not fit the store: the transaction rolled back, nothing was written
+			throw badRequest(`that bundle could not be imported: ${err instanceof Error ? err.message : String(err)}; nothing was changed`);
+		}
+		console.error(`cmx2: imported ${r.id}: ${r.messages} messages, ${r.parts} parts${r.moved ? `, moved from ${r.moved.from.machine} ${r.moved.from.directory}` : ""}`);
+		await loadVcsDir(where);
+		await publishSession("session.created", r.id);
+		await publishSession("session.updated", r.id);
+		return Response.json(info(row(r.id)), { status: 201 });
+	}
+
 	function info(row: StoredSession, states?: Map<string, SessionStateInfo>) {
 		const live = sessions.get(row.id);
 		const slash = row.model.indexOf("/");
@@ -1495,6 +1568,7 @@ export function serve(opts: ServeOptions) {
 			directory: row.directory,
 			...(row.parent_id ? { parentID: row.parent_id } : {}),
 			...(row.forked_from ? { forkedFrom: { sessionID: row.forked_from, ...(row.forked_at_message ? { messageID: row.forked_at_message } : {}) } } : {}),
+			...movedFrom(row),
 			title: row.title,
 			version: row.version ?? VERSION,
 			time: { created: row.created_at, updated: row.updated_at ?? row.created_at, ...(row.archived_at ? { archived: row.archived_at } : {}) },
@@ -3131,6 +3205,10 @@ export function serve(opts: ServeOptions) {
 			return json(info(row(s.id)), 201);
 		}
 
+		if (p === "/session/import" && method === "POST") return importBundle(req, url);
+		const exporting = m(/^\/session\/([^/]+)\/export$/);
+		if (exporting && method === "GET") return exportResponse(exporting[1]!);
+
 		let r = m(/^\/session\/([^/]+)$/);
 		if (r && method === "GET") {
 			await loadVcs([row(r[1]!)]);
@@ -3574,6 +3652,7 @@ export function serve(opts: ServeOptions) {
 			const pairing = new URL(req.url).pathname === "/pair" && req.method === "POST";
 			if (pairing) return { maxBody: PAIR_BODY_BYTES };
 			if (!authorized(req)) return { response: unauthorized() };
+			if (new URL(req.url).pathname === "/session/import" && req.method === "POST") return { maxBody: opts.importMaxBytes ?? IMPORT_MAX_BYTES };
 			return { maxBody: MAX_BODY_BYTES };
 		},
 		stream: streamRequest,

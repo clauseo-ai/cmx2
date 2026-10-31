@@ -62,6 +62,17 @@ export const SessionInfo = Type.Object(
 				{ description: "set on a session made by fork: where it came from" },
 			),
 		),
+		movedFrom: Type.Optional(
+			Type.Object(
+				{
+					machine: Type.String({ description: "the short hostname of the machine the session was exported from" }),
+					os: Type.String({ description: "macos, linux, windows, or the platform name" }),
+					directory: Type.String({ description: "the session's folder there" }),
+					at: Type.Number({ description: "when it was imported here (ms)" }),
+				},
+				{ description: "set on a session imported from another machine or folder (POST /session/import): where it ran before. its timeline holds the move as a notice message (notice.source moved, with moved on the info and the part). absent on a session that never moved, and on one imported from a bundle with no origin (written before this field)" },
+			),
+		),
 		title: Type.String(),
 		version: Type.String({ description: "daemon version that created the session" }),
 		time: Type.Object({ created: Type.Number(), updated: Type.Number(), archived: Type.Optional(Type.Number({ description: "when the session was archived (deleted from view); its history stays" })) }),
@@ -117,6 +128,16 @@ export const FileDiff = Type.Object(
 	{ description: "one file's change: full text before and after" },
 );
 
+const MovePlace = Type.Object(
+	{ machine: Type.String(), os: Type.String(), arch: Type.String(), directory: Type.String({ description: "the session's folder: the repo root paths translate between" }), home: Type.String() },
+	{ additionalProperties: true },
+);
+/** a session imported onto another machine or folder: where from, where to, when */
+export const Move = Type.Object(
+	{ from: MovePlace, to: MovePlace, at: Type.Number() },
+	{ additionalProperties: true, description: "on the notice message (notice.source moved) an import onto another machine or folder writes, and on its one text part: where the session ran before and where it runs now, for a client to draw a divider (moved from <machine>). the part's text is the line the model reads with its next request; the part is synthetic, so it is not the person's words" },
+);
+
 export const MessageInfo = Type.Object(
 	{
 		id: Type.String(),
@@ -130,6 +151,8 @@ export const MessageInfo = Type.Object(
 		model: Type.Optional(Type.Object({ providerID: Type.String(), modelID: Type.String() }, { description: "on a queued or steered user message: the model it asked for, applied when it runs" })),
 		variant: Type.Optional(Type.String({ description: "on a queued or steered user message: the effort it asked for, applied when it runs (a steer's from the next turn)" })),
 		btw: Type.Optional(Type.String({ description: "on a user message made by promoting a btw: the btw's id. its text is the question and the answer, framed as a btw the user asked" })),
+		notice: Type.Optional(Type.Object({ source: Type.String() }, { additionalProperties: true, description: "on a user message that is runtime words, not the person's: what said it (job ..., moved)" })),
+		moved: Type.Optional(Move),
 	},
 	{ additionalProperties: true, description: "opencode-shaped message info; assistant messages add modelID, providerID, cost, tokens, finish, variant (effort)" },
 );
@@ -158,7 +181,8 @@ export const TextPart = Type.Object(
 		...partBase,
 		type: Type.Literal("text"),
 		text: Type.String(),
-		synthetic: Type.Optional(Type.Boolean({ description: "context the user did not type (a mentioned file, the turn context)" })),
+		synthetic: Type.Optional(Type.Boolean({ description: "context the user did not type (a mentioned file, the turn context, a move)" })),
+		moved: Type.Optional(Move),
 		streaming: Type.Optional(PartStreaming),
 		time: Type.Optional(PartTime),
 	},
@@ -977,6 +1001,42 @@ export const ROUTES: RouteDef[] = [
 			"give the session a new title from what it is about now: one small structured request on the session's own model (never another provider, so the thread's content stays where it already goes) over its first user message and latest text. it replaces any title, given or generated, and answers with the session once session.updated is out. concurrent calls for one session share one request. 409 when the session has no text yet or is history imported from cmx, 502 when the model gave no title; the title is unchanged either way",
 		response: SessionInfo,
 		errors: [409, 502],
+	},
+	{
+		method: "GET",
+		path: "/session/:sessionID/export",
+		operationId: "exportSession",
+		summary:
+			"the session as one json bundle, the same file cmx2 session export writes (format cmx2.session, version 1): the session row (title, model, effort, totals), every message with its parts (tool calls and results, attached files as data urls), the engine transcript the session resumes from, the recorded prompt prefix, the step telemetry, and origin { machine, os, arch, directory, home }. one session: its subagents, snapshots and notes are not in it. streamed as it is read (content-type application/vnd.cmx2.session+json, content-disposition with a filename, no content-length). 409 BusyError while the session runs a turn",
+		response: Type.String({ format: "binary", description: "the bundle, json" }),
+		bytes: true,
+		errors: [409],
+		headers: { "content-type": "application/vnd.cmx2.session+json", "content-disposition": 'attachment; filename="<sessionID>.cmx2.json"' },
+	},
+	{
+		method: "POST",
+		path: "/session/import",
+		operationId: "importSession",
+		summary:
+			"put a bundle from GET /session/:id/export (or cmx2 session export) into this daemon: the body is the bundle as json, up to 256 MB (413 PayloadTooLargeError past it). the session keeps its id and its messages' ids; one already here is refused with 409 ConflictError and nothing changes, unless asNew=true imports a copy under a fresh id. it answers 201 with the session once session.created and session.updated are out, so it lists and opens at once. a bundle from another machine or folder than its origin gets a move: movedFrom on the session, a notice message in its timeline, and one line the model reads with its next request. 400 for a body that is not a bundle, a bundle from a newer cmx2 (upgrade with cmx2 upgrade), a directory that is not a folder here, or no directory when the bundle's folder is not on this machine",
+		query: Type.Object({
+			directory: Type.Optional(Type.String({ description: "the session's folder on this machine (the repo's checkout here); its tools run there. default: the folder the bundle names, which must exist here" })),
+			title: Type.Optional(Type.String({ description: "a new title; default: the bundle's" })),
+			asNew: Type.Optional(Type.Union([Type.Literal("true"), Type.Literal("false")], { description: "true imports a session that is already here as a copy under a fresh id instead of answering 409" })),
+		}),
+		body: Type.Object(
+			{
+				format: Type.Literal("cmx2.session"),
+				version: Type.Integer({ description: "1; a higher one is refused" }),
+				session: Type.Object({ id: Type.String(), directory: Type.String() }, { additionalProperties: true }),
+				messages: Type.Array(Type.Record(Type.String(), Type.Unknown())),
+				transcript: Type.Union([Type.String(), Type.Null()]),
+			},
+			{ additionalProperties: true, description: "the bundle GET /session/:id/export answers, unchanged" },
+		),
+		response: SessionInfo,
+		status: 201,
+		errors: [409, 413],
 	},
 	{ method: "DELETE", path: "/session/:sessionID", operationId: "deleteSession", summary: "end a session: abort its turn, stop its processes (keep'd ones stay) and archive it. nothing is deleted; listings leave it out", response: Ok },
 	{ method: "GET", path: "/session/:sessionID/children", operationId: "children", summary: "sessions this one started (its subagents), newest first", response: Type.Array(SessionInfo), headers: Seq },

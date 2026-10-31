@@ -719,6 +719,8 @@ export class EngineSession {
 			for (const m of messages as any[]) {
 				const d = JSON.stringify(m.content ?? "").match(/turn context: [^"]*?date: (\d{4}-\d{2}-\d{2})/)?.[1];
 				if (d) this.lastDate = d;
+				// a session imported onto another machine or folder: the next turn context says where it runs now
+				if ((m as { role?: string; source?: string }).role === "notice" && (m as { source?: string }).source === "moved") this.lastDate = undefined;
 			}
 			this.stepSeq = t.messages.filter((m: any) => m.role === "assistant").length;
 			this.lastAssistantSeq = t.messages.findLastIndex((m: any) => m.role === "assistant") + 1;

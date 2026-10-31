@@ -491,6 +491,30 @@ export function createClient(opts: ClientOptions) {
 		/** give the session a new title from what it is about now: one small structured request on the session's own model (never another provider, so the thread's content stays where it already goes) over its first user message and latest text. it replaces any title, given or generated, and answers with the session once session.updated is out. concurrent calls for one session share one request. 409 when the session has no text yet or is history imported from cmx, 502 when the model gave no title; the title is unchanged either way */
 		regenerateTitle: (params: { sessionID: string }, o?: CallOptions) =>
 			call<SessionInfo>("POST", `/session/${encodeURIComponent(params.sessionID)}/title`, undefined, undefined, o),
+		/** the session as one json bundle, the same file cmx2 session export writes (format cmx2.session, version 1): the session row (title, model, effort, totals), every message with its parts (tool calls and results, attached files as data urls), the engine transcript the session resumes from, the recorded prompt prefix, the step telemetry, and origin { machine, os, arch, directory, home }. one session: its subagents, snapshots and notes are not in it. streamed as it is read (content-type application/vnd.cmx2.session+json, content-disposition with a filename, no content-length). 409 BusyError while the session runs a turn */
+		exportSession: (params: { sessionID: string }, o?: BytesOptions) => callBytes(`/session/${encodeURIComponent(params.sessionID)}/export`, undefined, o),
+		/** put a bundle from GET /session/:id/export (or cmx2 session export) into this daemon: the body is the bundle as json, up to 256 MB (413 PayloadTooLargeError past it). the session keeps its id and its messages' ids; one already here is refused with 409 ConflictError and nothing changes, unless asNew=true imports a copy under a fresh id. it answers 201 with the session once session.created and session.updated are out, so it lists and opens at once. a bundle from another machine or folder than its origin gets a move: movedFrom on the session, a notice message in its timeline, and one line the model reads with its next request. 400 for a body that is not a bundle, a bundle from a newer cmx2 (upgrade with cmx2 upgrade), a directory that is not a folder here, or no directory when the bundle's folder is not on this machine */
+		importSession: (body: {
+			format: "cmx2.session";
+			/** 1; a higher one is refused */
+			version: number;
+			session: {
+				id: string;
+				directory: string;
+				[key: string]: unknown;
+			};
+			messages: Array<Record<string, unknown>>;
+			transcript: string | null;
+			[key: string]: unknown;
+		}, query: {
+			/** the session's folder on this machine (the repo's checkout here); its tools run there. default: the folder the bundle names, which must exist here */
+			directory?: string;
+			/** a new title; default: the bundle's */
+			title?: string;
+			/** true imports a session that is already here as a copy under a fresh id instead of answering 409 */
+			asNew?: "true" | "false";
+		} = {}, o?: CallOptions) =>
+			call<SessionInfo>("POST", "/session/import", query, body, o),
 		/** end a session: abort its turn, stop its processes (keep'd ones stay) and archive it. nothing is deleted; listings leave it out */
 		deleteSession: (params: { sessionID: string }, o?: CallOptions) =>
 			call<true>("DELETE", `/session/${encodeURIComponent(params.sessionID)}`, undefined, undefined, o),
