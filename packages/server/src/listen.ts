@@ -306,7 +306,8 @@ export interface ListenOptions<W> {
 	 * looks at a request's head (no body) before anything is read: a response to send at once (a refusal),
 	 * or how many body bytes the request may carry. without it every body is read whole.
 	 */
-	precheck?: (head: Request) => { response: Response } | { maxBody: number };
+	/** streamBody: the handler reads the body as a stream (a big upload written to disk), not buffered; past maxBody the stream errors with BodyTooLarge */
+	precheck?: (head: Request) => { response: Response } | { maxBody: number; streamBody?: boolean };
 	/** takes an event stream and writes it to the response it is given (the public socket's, or node's behind the hop); false leaves the request to fetch */
 	stream: (req: Request, res: StreamResponse) => boolean;
 	/** bun's side: websocket upgrades, answered with undefined once upgraded */
@@ -340,12 +341,30 @@ function headersOf(req: IncomingMessage): Headers {
 const urlOf = (req: IncomingMessage) => `http://${req.headers.host ?? "127.0.0.1"}${req.url ?? "/"}`;
 
 /** a node request as a fetch request; its signal aborts when the peer goes away before the answer is done */
-async function toRequest(req: IncomingMessage, res: ServerResponse, maxBody = Number.POSITIVE_INFINITY): Promise<Request> {
+async function toRequest(req: IncomingMessage, res: ServerResponse, maxBody = Number.POSITIVE_INFINITY, streamBody = false): Promise<Request> {
 	const headers = headersOf(req);
 	const ctl = new AbortController();
 	res.on("close", () => {
 		if (!res.writableFinished) ctl.abort();
 	});
+	if (streamBody && req.method !== "GET" && req.method !== "HEAD") {
+		if (Number(req.headers["content-length"] ?? 0) > maxBody) throw new BodyTooLarge();
+		const chunks = (req as AsyncIterable<Buffer>)[Symbol.asyncIterator]();
+		let size = 0;
+		const body = new ReadableStream<Uint8Array>({
+			async pull(c) {
+				const { done, value } = await chunks.next();
+				if (done) return c.close();
+				size += value.length;
+				if (size > maxBody) return c.error(new BodyTooLarge());
+				c.enqueue(value);
+			},
+			cancel() {
+				req.resume();
+			},
+		});
+		return new Request(urlOf(req), { method: req.method, headers, body, signal: ctl.signal, duplex: "half" } as RequestInit);
+	}
 	let body: Buffer | undefined;
 	if (req.method !== "GET" && req.method !== "HEAD") {
 		if (Number(req.headers["content-length"] ?? 0) > maxBody) throw new BodyTooLarge();
@@ -444,7 +463,7 @@ export function listen<W>(opts: ListenOptions<W>): Listener {
 			try {
 				const verdict = opts.precheck?.(new Request(urlOf(req), { method: req.method, headers: headersOf(req) }));
 				if (verdict && "response" in verdict) return void (await refuseEarly(verdict.response, res));
-				const request = await toRequest(req, res, verdict?.maxBody);
+				const request = await toRequest(req, res, verdict?.maxBody, verdict && "streamBody" in verdict ? verdict.streamBody : false);
 				if (opts.stream(request, res)) return;
 				await writeResponse(await opts.fetch(request), res, req);
 			} catch (e) {

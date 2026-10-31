@@ -10,7 +10,7 @@ export { MIGRATIONS } from "./migrations.ts";
 export { AgentStore, type AgentRow, type AgentState, type MailKind, type MailRow } from "./agents.ts";
 export { ARCHIVE_FILE, ARCHIVE_MIGRATIONS, archivePathFor, openArchiveWriter } from "./archive.ts";
 export { closeIfDone, closeOpenSteps, documentPart, messageId, partId, projectMessage, projectTranscript, type Touched } from "./projection.ts";
-export { EXPORT_FORMAT, EXPORT_VERSION, type ExportedMessage, ExportError, exportSession, exportStream, importSession, type ImportResult, type MoveRecord, movedText, type Place, readExport, type SessionExport, sessionMarkdown, thisMachine } from "./export.ts";
+export { EXPORT_FORMAT, EXPORT_VERSION, type ExportedMessage, ExportError, exportSession, exportStream, type BundleImportOptions, importBundleFile, importSession, type ImportResult, type MoveRecord, movedText, type Place, readExport, type SessionExport, sessionMarkdown, thisMachine } from "./export.ts";
 export { DEFAULT_SINCE_DAYS, fileBytes, importCmx, ImportError, type ImportCounts, type ImportOptions, parseSince } from "./import-cmx.ts";
 
 export interface StoredSession {

@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, mkdirSync, openSync, readSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { arch, homedir, hostname, platform } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
+import { BundleError, BundleReader, type Range } from "./bundle.ts";
 import type { MessageRow, PartRow, Store, StoredSession } from "./index.ts";
-import { projectTranscript } from "./projection.ts";
+import { projectMessage } from "./projection.ts";
 
 /**
  * a session as one file: the session row, every projected message with its parts, the engine
@@ -93,64 +94,119 @@ function parse(s: string): Record<string, unknown> {
 
 const exported = ({ parts, info, ...m }: MessageRow & { parts: PartRow[] }): ExportedMessage => ({ ...m, info: parse(info), parts: parts.map(({ data, ...p }) => ({ ...p, data: parse(data) })) });
 
-/** the fields before the messages, and where the transcript is */
+/** messages per page read from the store, and the most an export chunk holds before it is handed on */
+const PAGE = 50;
+const CHUNK_BYTES = 1024 * 1024;
+
+/**
+ * where an export stops reading the transcript: its size when the export began, cut back to the end of its last whole
+ * line, so a turn that appends while the export streams neither tears a line nor adds one
+ */
+function transcriptEnd(file: string): number {
+	const size = statSync(file).size;
+	const fd = openSync(file, "r");
+	try {
+		const buf = Buffer.allocUnsafe(64 * 1024);
+		for (let to = size; to > 0; ) {
+			const from = Math.max(0, to - buf.length);
+			const n = readSync(fd, buf, 0, to - from, from);
+			const nl = buf.subarray(0, n).lastIndexOf(10);
+			if (nl >= 0) return from + nl + 1;
+			to = from;
+		}
+		return 0;
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/** the fields before the messages, where the transcript is and where it ends, and the newest message when the export began */
 function exportHead(store: Store, id: string, opts: { cmx2?: string }) {
 	const s = store.session(id);
 	if (!s) throw new ExportError(`there is no session ${id} in ${store.path}; cmx2 session list shows the ids`, "missing");
 	// the transcript revision belongs to this store's writes; an import starts its own at 0
 	const { session_file, archived_at: _a, transcript_rev: _r, ...session } = s;
 	const file = session_file && existsSync(session_file) ? session_file : null;
-	return { file, head: { format: EXPORT_FORMAT as typeof EXPORT_FORMAT, version: EXPORT_VERSION, exported_at: Date.now(), ...(opts.cmx2 ? { cmx2: opts.cmx2 } : {}), origin: thisMachine(session.directory), session } };
+	const end = file ? transcriptEnd(file) : 0;
+	const last = store.messages(id, { limit: 1 }).rows[0]?.seq ?? Number.NEGATIVE_INFINITY;
+	return { file, end, last, head: { format: EXPORT_FORMAT as typeof EXPORT_FORMAT, version: EXPORT_VERSION, exported_at: Date.now(), ...(opts.cmx2 ? { cmx2: opts.cmx2 } : {}), origin: thisMachine(session.directory), session } };
+}
+
+/** the messages that were there when the export began, oldest first, a page at a time */
+function* messagePages(store: Store, id: string, last: number) {
+	let after = -1;
+	for (;;) {
+		const page = store.messages(id, { limit: PAGE, after });
+		const rows = page.rows.filter((r) => r.seq <= last);
+		if (rows.length) yield rows;
+		if (page.next === null || rows.length < page.rows.length) return;
+		after = page.next;
+	}
 }
 
 /** reads one session out of the store; works for live and archived (imported cmx) sessions alike */
 export function exportSession(store: Store, id: string, opts: { cmx2?: string } = {}): SessionExport {
-	const { file, head: h } = exportHead(store, id, opts);
+	const { file, end, last, head: h } = exportHead(store, id, opts);
 	const messages: ExportedMessage[] = [];
-	let after = -1;
-	for (;;) {
-		const page = store.messages(id, { limit: 200, after });
-		for (const r of page.rows) messages.push(exported(r));
-		if (page.next === null) break;
-		after = page.next;
+	for (const rows of messagePages(store, id, last)) for (const r of rows) messages.push(exported(r));
+	let transcript: string | null = null;
+	if (file) {
+		const fd = openSync(file, "r");
+		try {
+			const buf = Buffer.allocUnsafe(end);
+			readSync(fd, buf, 0, end, 0);
+			transcript = buf.toString("utf8");
+		} finally {
+			closeSync(fd);
+		}
 	}
-	return { ...h, messages, transcript: file ? readFileSync(file, "utf8") : null, prefix: store.prefix(id) ?? null, steps: store.steps(id) };
+	return { ...h, messages, transcript, prefix: store.prefix(id) ?? null, steps: store.steps(id) };
 }
 
 /**
- * the same export as exportSession (JSON.parse of the joined chunks deep-equals it), written as it is read: 200 messages
- * at a time and the transcript in 1 MB pieces, so a large session never sits in memory whole. a missing session throws
- * before the first chunk
+ * the same export as exportSession (JSON.parse of the joined chunks deep-equals it), written as it is read: 50 messages
+ * at a time, the transcript in 1 MB pieces, no chunk much over 1 MB, so a large session never sits in memory whole. it
+ * holds what was there when it began: the messages up to the newest one then, the transcript up to its last whole line
+ * then. a missing session throws before the first chunk
  */
 export function exportStream(store: Store, id: string, opts: { cmx2?: string } = {}): AsyncGenerator<string> {
-	const { file, head: h } = exportHead(store, id, opts);
+	const { file, end, last, head: h } = exportHead(store, id, opts);
 	return (async function* () {
-		yield `${JSON.stringify(h).slice(0, -1)},"messages":[`;
-		let after = -1;
+		let chunk = `${JSON.stringify(h).slice(0, -1)},"messages":[`;
 		let first = true;
-		for (;;) {
-			const page = store.messages(id, { limit: 200, after });
-			let chunk = "";
-			for (const r of page.rows) {
+		for (const rows of messagePages(store, id, last)) {
+			for (const r of rows) {
 				chunk += (first ? "" : ",") + JSON.stringify(exported(r));
 				first = false;
+				if (chunk.length >= CHUNK_BYTES) {
+					yield chunk;
+					chunk = "";
+				}
 			}
-			if (chunk) yield chunk;
-			if (page.next === null) break;
-			after = page.next;
 		}
-		yield '],"transcript":';
+		yield `${chunk}],"transcript":`;
 		if (file) {
 			yield '"';
 			// a utf8 read stream never splits a character, so each piece escapes on its own
-			for await (const piece of createReadStream(file, { encoding: "utf8", highWaterMark: 1024 * 1024 })) yield JSON.stringify(piece).slice(1, -1);
+			if (end > 0) for await (const piece of createReadStream(file, { encoding: "utf8", start: 0, end: end - 1, highWaterMark: CHUNK_BYTES })) yield JSON.stringify(piece).slice(1, -1);
 			yield '"';
 		} else yield "null";
 		yield `,"prefix":${JSON.stringify(store.prefix(id) ?? null)},"steps":${JSON.stringify(store.steps(id))}}\n`;
 	})();
 }
 
-/** checks the shape of a file before anything is written */
+/** a session id an import takes: ses_ and at least 16 letters or digits, so it is safe in a file name and unique in text */
+const SESSION_ID = /^ses_[A-Za-z0-9]{16,64}$/;
+
+/** the fields an import checks before it writes anything */
+function checkHead(v: any) {
+	if (v?.format !== EXPORT_FORMAT) throw new ExportError(`that file is not a cmx2 session export (format is ${JSON.stringify(v?.format)}, want ${EXPORT_FORMAT})`);
+	if (typeof v.version !== "number" || v.version > EXPORT_VERSION) throw new ExportError(`that export is version ${v.version}; this cmx2 reads up to ${EXPORT_VERSION}. upgrade with cmx2 upgrade`);
+	if (typeof v.session?.id !== "string" || typeof v.session.directory !== "string") throw new ExportError("that export has no session; it is cut short or edited");
+	if (!SESSION_ID.test(v.session.id)) throw new ExportError(`that export's session id ${JSON.stringify(v.session.id).slice(0, 80)} is not a cmx2 session id`);
+}
+
+/** checks the shape of an export held in memory before anything is written */
 export function readExport(raw: string): SessionExport {
 	let v: any;
 	try {
@@ -158,23 +214,45 @@ export function readExport(raw: string): SessionExport {
 	} catch {
 		throw new ExportError("that file is not json; it should be what cmx2 session export wrote");
 	}
-	if (v?.format !== EXPORT_FORMAT) throw new ExportError(`that file is not a cmx2 session export (format is ${JSON.stringify(v?.format)}, want ${EXPORT_FORMAT})`);
-	if (typeof v.version !== "number" || v.version > EXPORT_VERSION) throw new ExportError(`that export is version ${v.version}; this cmx2 reads up to ${EXPORT_VERSION}. upgrade with cmx2 upgrade`);
-	if (typeof v.session?.id !== "string" || !/^ses_[A-Za-z0-9_-]+$/.test(v.session.id) || typeof v.session.directory !== "string" || !Array.isArray(v.messages)) throw new ExportError("that export has no session or no messages; it is cut short or edited");
+	checkHead(v);
+	if (!Array.isArray(v.messages)) throw new ExportError("that export has no messages; it is cut short or edited");
 	if (v.transcript !== null && typeof v.transcript !== "string") throw new ExportError("that export's transcript is not text; it is cut short or edited");
 	return v as SessionExport;
 }
 
 const bare = (id: string) => id.replace(/^ses_/, "");
+const ID_KEY = /(^id$|ID$|Id$|_id$)/;
+const OWN_ID = /^(ses|msg|prt)_/;
 
-/** the same export under another session id: message and part ids carry the session's, so every mention moves */
-function renamed(e: SessionExport, to: string): SessionExport {
-	const from = bare(e.session.id);
-	return JSON.parse(JSON.stringify(e).replaceAll(from, bare(to))) as SessionExport;
+/**
+ * a copy's ids: in one parsed row or transcript line, the values of id fields (id, sessionID, messageID, parentID,
+ * session_id, tail_start_id, ...) that are this session's, its messages' or its parts' ids move to the new session id.
+ * text, tool input and output are left as they are
+ */
+function renamer(from: string, to: string) {
+	const a = bare(from);
+	const b = bare(to);
+	const walk = (v: unknown, key?: string): unknown => {
+		if (typeof v === "string") return key && ID_KEY.test(key) && OWN_ID.test(v) && v.includes(a) ? v.replaceAll(a, b) : v;
+		if (Array.isArray(v)) {
+			for (let i = 0; i < v.length; i++) v[i] = walk(v[i]);
+			return v;
+		}
+		if (v && typeof v === "object") {
+			const o = v as Record<string, unknown>;
+			for (const k of Object.keys(o)) o[k] = walk(o[k], k);
+		}
+		return v;
+	};
+	return (v: unknown) => walk(v);
 }
 
 export interface ImportResult {
 	id: string;
+	/** the session id in the bundle; differs from id for a copy (asNew) */
+	source: string;
+	/** where the session runs here */
+	directory: string;
 	/** set when the import landed on another machine or in another folder than the export's origin */
 	moved?: MoveRecord;
 	messages: number;
@@ -183,77 +261,236 @@ export interface ImportResult {
 	transcript: string | null;
 }
 
+export interface BundleImportOptions {
+	/** where this store keeps transcripts (`<dataDir>/sessions/<id>.jsonl`) */
+	dataDir: string;
+	/** an absolute folder on this machine the session moves to */
+	directory?: string;
+	/** import a session that is already here as a copy under a fresh id instead of refusing */
+	asNew?: boolean;
+	title?: string;
+	/** this machine's project for the folder the session lands in; it may refuse the folder by throwing, before anything is written */
+	project?: (directory: string) => string | null;
+	/** stands in for this machine (tests) */
+	here?: Omit<Place, "directory">;
+	now?: number;
+}
+
+/** a folder an import is given: absolute, and the real path when it exists */
+function folder(dir: string): string {
+	if (!isAbsolute(dir)) throw new ExportError(`the directory ${dir} is not an absolute path`);
+	const r = resolve(dir);
+	return existsSync(r) ? realpathSync(r) : r;
+}
+
+/** a buffered append to a file opened with wx */
+class Out {
+	private pending: string[] = [];
+	private size = 0;
+	constructor(private fd: number) {}
+	write(s: string) {
+		this.pending.push(s);
+		this.size += s.length;
+		if (this.size >= CHUNK_BYTES) this.flush();
+	}
+	flush() {
+		if (this.pending.length) writeSync(this.fd, this.pending.join(""));
+		this.pending = [];
+		this.size = 0;
+	}
+}
+
 /**
- * writes an export into the store. `dataDir` is where the importing daemon keeps transcripts
- * (`<dataDir>/sessions/<id>.jsonl`); `directory` moves the session to a folder on this machine;
- * `asNew` imports a session that is already here under a fresh id instead of refusing; `title` renames it; `projectId`
- * files it under this machine's project for its folder. an export with an origin that names another machine or folder
- * gets a moved record (see the top of this file); `here` stands in for this machine in tests.
+ * writes a bundle file into the store without reading it into memory: the small fields are parsed whole, the messages
+ * one at a time, the transcript a line at a time straight into its new file. nothing is overwritten or deleted (rule 15):
+ * an id that is already here is refused (or imported under a fresh id with asNew), and the transcript file is created
+ * with wx. it is all or nothing: the transcript is written first, the rows in one transaction after it, and a failure in
+ * either removes the file it made. an export with an origin that names another machine or folder gets a moved record
+ * (see the top of this file).
  */
-export function importSession(
-	store: Store,
-	input: SessionExport,
-	opts: { dataDir: string; directory?: string; asNew?: boolean; title?: string; projectId?: string | null; here?: Omit<Place, "directory">; now?: number },
-): ImportResult {
-	let e = input;
+export function importBundleFile(store: Store, path: string, opts: BundleImportOptions): ImportResult {
+	let reader: BundleReader;
+	try {
+		reader = new BundleReader(path);
+	} catch {
+		throw new ExportError(`there is no readable file at ${path}`);
+	}
+	try {
+		return importFrom(store, reader, opts);
+	} catch (e) {
+		if (e instanceof BundleError) throw new ExportError(e.message);
+		throw e;
+	} finally {
+		reader.close();
+	}
+}
+
+function importFrom(store: Store, r: BundleReader, opts: BundleImportOptions): ImportResult {
+	const top = r.top();
+	const small = (k: string) => {
+		const at = top.get(k);
+		return at ? r.parse(at) : undefined;
+	};
+	const head = { format: small("format"), version: small("version"), session: small("session") as Record<string, any> | undefined, origin: small("origin") as Place | undefined };
+	checkHead(head);
+	const session = head.session!;
+	const messages = top.get("messages");
+	if (!messages || r.byte(messages.start) !== 0x5b) throw new ExportError("that export has no messages; it is cut short or edited");
+	const tr: Range | undefined = top.get("transcript");
+	const hasTranscript = !!tr && r.byte(tr.start) === 0x22;
+	if (tr && !hasTranscript && small("transcript") !== null) throw new ExportError("that export's transcript is not text; it is cut short or edited");
+	const prefix = (small("prefix") ?? null) as SessionExport["prefix"];
+	const steps = (small("steps") ?? []) as Record<string, unknown>[];
+	if (!Array.isArray(steps)) throw new ExportError("that export's steps are not a list; it is cut short or edited");
+
 	const asNew = "pass --as-new (asNew=true over http) to import a copy under a fresh id";
-	if (store.session(e.session.id)) {
-		if (!opts.asNew) throw new ExportError(`session ${e.session.id} is already in this database; nothing was changed. ${asNew}`, "clash");
-		e = renamed(e, `ses_${randomUUID().replace(/-/g, "").slice(0, 20)}`);
+	const source = session.id as string;
+	let id = source;
+	let rename: ((v: unknown) => unknown) | undefined;
+	if (store.session(source)) {
+		if (!opts.asNew) throw new ExportError(`session ${source} is already in this database; nothing was changed. ${asNew}`, "clash");
+		id = `ses_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+		rename = renamer(source, id);
 	}
-	const id = e.session.id;
-	const file = e.transcript === null ? null : join(opts.dataDir, "sessions", `${id}.jsonl`);
+	const file = hasTranscript ? join(opts.dataDir, "sessions", `${id}.jsonl`) : null;
 	if (file && existsSync(file)) throw new ExportError(`${file} already exists; nothing was changed. ${asNew}`, "clash");
-	const directory = opts.directory ?? e.session.directory;
+	const directory = opts.directory ? folder(opts.directory) : (session.directory as string);
+	const projectId = opts.project?.(directory);
 	const here: Place = { ...(opts.here ?? thisMachine(directory)), directory };
-	const o = e.origin;
-	const moved: MoveRecord | undefined = o && (o.machine !== here.machine || o.directory !== directory) ? { from: { ...o, directory: e.session.directory }, to: here, at: opts.now ?? Date.now() } : undefined;
-	const stepCols = new Set((store.db.query("pragma table_info(step)").all() as Array<{ name: string }>).map((c) => c.name));
-	let parts = 0;
-	store.db.transaction(() => {
-		store.putSession({
-			...e.session,
-			directory,
-			session_file: file,
-			updated_at: e.session.updated_at ?? e.session.created_at,
-			...(opts.title ? { title: opts.title } : {}),
-			...(opts.projectId !== undefined ? { project_id: opts.projectId } : {}),
-			...(moved ? { moved_from: JSON.stringify(moved) } : {}),
-		} as StoredSession);
-		const msg = store.db.query(
-			`insert into message (id, session_id, seq, role, created_at, completed_at, model, effort, tokens_input, tokens_output,
-			   tokens_cache_read, tokens_cache_write, cost, stop_reason, info)
-			 values ($id, $session_id, $seq, $role, $created_at, $completed_at, $model, $effort, $tokens_input, $tokens_output,
-			   $tokens_cache_read, $tokens_cache_write, $cost, $stop_reason, $info)`,
-		);
-		const part = store.db.query("insert into part (id, message_id, session_id, seq, type, data) values ($id, $message_id, $session_id, $seq, $type, $data)");
-		for (const { parts: ps, info, ...m } of e.messages) {
-			const i = { ...info, ...(typeof (info as { path?: unknown }).path === "object" && opts.directory ? { path: { cwd: directory, root: directory } } : {}) };
-			msg.run({ ...m, completed_at: m.completed_at ?? null, model: m.model ?? null, effort: m.effort ?? null, stop_reason: m.stop_reason ?? null, session_id: id, info: JSON.stringify(i) } as never);
-			for (const { data, ...p } of ps) {
-				part.run({ ...p, session_id: id, data: JSON.stringify(data) } as never);
-				parts++;
-			}
-		}
-		if (e.prefix) store.putPrefix(id, e.prefix.hash, e.prefix.bytes);
-		for (const s of e.steps) store.putStep(Object.fromEntries(Object.entries({ ...s, session_id: id }).filter(([k]) => stepCols.has(k))));
-	})();
-	if (file && e.transcript !== null) {
+	const o = head.origin;
+	const moved: MoveRecord | undefined = o && typeof o === "object" && (o.machine !== here.machine || o.directory !== directory) ? { from: { ...o, directory: session.directory }, to: here, at: opts.now ?? Date.now() } : undefined;
+	// a subagent's parent stays behind; pointing at a session that is not here would hide the import as an orphan
+	const parent = session.parent_id && store.session(session.parent_id) ? session.parent_id : null;
+
+	// 1. the transcript, a line at a time, into a file only this import made
+	let lines = 0;
+	if (file && tr) {
 		mkdirSync(join(opts.dataDir, "sessions"), { recursive: true });
-		// the header's cwd is where tools run on resume; it follows the session's directory
-		const lines = e.transcript.split("\n");
-		const head = lines[0] ? parse(lines[0]) : undefined;
-		if (head?.type === "header") lines[0] = JSON.stringify({ ...head, id, cwd: directory });
-		if (moved) {
-			// the moved record: a runtime notice the engine hands the model as user text on the next request, projected as
-			// a timeline entry marked moved. appended after the last line, so it reads as the newest thing that happened
-			while (lines.length && lines.at(-1) === "") lines.pop();
-			lines.push(JSON.stringify({ type: "message", message: { role: "notice", source: "moved", text: movedText(moved), moved, timestamp: moved.at } }), "");
+		const fd = openSync(file, "wx");
+		try {
+			const out = new Out(fd);
+			const oldBare = bare(source);
+			let first = true;
+			let ended = true;
+			for (let line of r.lines(tr)) {
+				if (first) {
+					first = false;
+					// the header's cwd is where tools run on resume; it follows the session's directory
+					const h = line.startsWith('{"type":"header"') ? parseLine(line) : undefined;
+					if (h?.type === "header") line = `${JSON.stringify({ ...h, id, cwd: directory })}${line.endsWith("\n") ? "\n" : ""}`;
+				} else if (rename && line.includes(oldBare)) {
+					const v = parseLine(line);
+					if (v) line = `${JSON.stringify(rename(v))}${line.endsWith("\n") ? "\n" : ""}`;
+				}
+				if (line.startsWith('{"type":"message"') || (!line.startsWith('{"type":"header"') && parseLine(line)?.type === "message")) lines++;
+				ended = line.endsWith("\n");
+				out.write(line);
+			}
+			if (moved) {
+				// the moved record: a runtime notice the engine hands the model as user text on the next request, projected as
+				// a timeline entry marked moved. appended after the last line, so it reads as the newest thing that happened
+				out.write(`${ended ? "" : "\n"}${JSON.stringify({ type: "message", message: { role: "notice", source: "moved", text: movedText(moved), moved, timestamp: moved.at } })}\n`);
+			}
+			out.flush();
+		} catch (e) {
+			closeSync(fd);
+			rmSync(file, { force: true });
+			throw e;
 		}
-		writeFileSync(file, lines.join("\n"), { flag: "wx" });
-		if (moved) projectTranscript(store, id, file, directory);
+		closeSync(fd);
 	}
-	return { id, messages: e.messages.length, parts, steps: e.steps.length, transcript: file, ...(moved ? { moved } : {}) };
+
+	// 2. the rows, all in one transaction; a failure rolls them back and removes the transcript made above
+	const stepCols = new Set((store.db.query("pragma table_info(step)").all() as Array<{ name: string }>).map((c) => c.name));
+	let count = 0;
+	let parts = 0;
+	// one transaction of hundreds of megabytes keeps its dirty pages in memory unless sqlite may spill them to the wal as it
+	// goes: 1 MB of pages here, the connection's own setting back after (measured: 124 MB peak for 280 MB of rows without, 48 with)
+	const spill = (store.db.query("pragma cache_spill").get() as { cache_spill: number } | null)?.cache_spill;
+	store.db.exec("pragma cache_spill = 256");
+	try {
+		store.db.transaction(() => {
+			const s = { ...session };
+			for (const k of ["session_file", "archived_at", "transcript_rev"]) delete s[k];
+			store.putSession({
+				...s,
+				id,
+				directory,
+				parent_id: parent,
+				session_file: file,
+				updated_at: session.updated_at ?? session.created_at,
+				...(opts.title ? { title: opts.title } : {}),
+				...(projectId !== undefined ? { project_id: projectId } : {}),
+				...(moved ? { moved_from: JSON.stringify(moved) } : {}),
+			} as StoredSession);
+			const msg = store.db.query(
+				`insert into message (id, session_id, seq, role, created_at, completed_at, model, effort, tokens_input, tokens_output,
+				   tokens_cache_read, tokens_cache_write, cost, stop_reason, info)
+				 values ($id, $session_id, $seq, $role, $created_at, $completed_at, $model, $effort, $tokens_input, $tokens_output,
+				   $tokens_cache_read, $tokens_cache_write, $cost, $stop_reason, $info)`,
+			);
+			const part = store.db.query("insert into part (id, message_id, session_id, seq, type, data) values ($id, $message_id, $session_id, $seq, $type, $data)");
+			for (const el of r.elements(messages)) {
+				const m = (rename ? rename(el) : el) as ExportedMessage;
+				if (!m || typeof m !== "object" || !Array.isArray(m.parts) || !m.info || typeof m.info !== "object") throw new ExportError("a message in that export has no parts or no info; it is cut short or edited");
+				const { parts: ps, info, ...row } = m;
+				const i = { ...info, ...(typeof (info as { path?: unknown }).path === "object" && opts.directory ? { path: { cwd: directory, root: directory } } : {}) };
+				msg.run({
+					id: row.id,
+					seq: row.seq,
+					role: row.role,
+					created_at: row.created_at,
+					completed_at: row.completed_at ?? null,
+					model: row.model ?? null,
+					effort: row.effort ?? null,
+					tokens_input: row.tokens_input ?? 0,
+					tokens_output: row.tokens_output ?? 0,
+					tokens_cache_read: row.tokens_cache_read ?? 0,
+					tokens_cache_write: row.tokens_cache_write ?? 0,
+					cost: row.cost ?? 0,
+					stop_reason: row.stop_reason ?? null,
+					session_id: id,
+					info: JSON.stringify(i),
+				} as never);
+				count++;
+				for (const { data, ...p } of ps) {
+					part.run({ id: p.id, message_id: p.message_id, seq: p.seq, type: p.type, session_id: id, data: JSON.stringify(data) } as never);
+					parts++;
+				}
+			}
+			if (prefix) store.putPrefix(id, prefix.hash, prefix.bytes);
+			for (const st of steps) store.putStep(Object.fromEntries(Object.entries({ ...st, session_id: id }).filter(([k]) => stepCols.has(k))));
+			if (moved && file) projectMessage(store, { sessionId: id, cwd: directory, seq: lines + 1 }, { role: "notice", source: "moved", text: movedText(moved), moved, timestamp: moved.at });
+		})();
+	} catch (e) {
+		if (file) rmSync(file, { force: true });
+		if (e instanceof ExportError || e instanceof BundleError) throw e;
+		throw new ExportError(`that bundle could not be imported: ${e instanceof Error ? e.message : String(e)}; nothing was changed`);
+	} finally {
+		if (spill !== undefined) store.db.exec(`pragma cache_spill = ${spill}`);
+	}
+	return { id, source, directory, messages: count, parts, steps: steps.length, transcript: file, ...(moved ? { moved } : {}) };
+}
+
+function parseLine(line: string): Record<string, any> | undefined {
+	try {
+		return JSON.parse(line) as Record<string, any>;
+	} catch {
+		return undefined;
+	}
+}
+
+/** an export held in memory, imported through the same path as a file (tests and small callers) */
+export function importSession(store: Store, input: SessionExport, opts: BundleImportOptions): ImportResult {
+	const dir = join(opts.dataDir, "import");
+	mkdirSync(dir, { recursive: true });
+	const tmp = join(dir, `${randomUUID()}.json`);
+	writeFileSync(tmp, JSON.stringify(input), { flag: "wx" });
+	try {
+		return importBundleFile(store, tmp, opts);
+	} finally {
+		rmSync(tmp, { force: true });
+	}
 }
 
 // ---------- markdown ----------

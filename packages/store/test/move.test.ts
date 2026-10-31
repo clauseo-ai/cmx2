@@ -17,7 +17,7 @@ function source() {
 	const data = join(dir, "data-a");
 	mkdirSync(join(data, "sessions"), { recursive: true });
 	const s = new Store(join(data, "cmx2.db"), { archivePath: null });
-	const id = "ses_move0001";
+	const id = "ses_move0001aaaaaaaaaaaa";
 	const file = join(data, "sessions", `${id}.jsonl`);
 	writeFileSync(file, `${JSON.stringify({ type: "header", version: 1, id, cwd: "/Users/rohan/x", created: 1 })}\n`);
 	appendFileSync(file, `${JSON.stringify({ type: "message", message: { role: "user", content: "read /Users/rohan/x/a.txt", timestamp: 10 } })}\n`);
@@ -63,7 +63,7 @@ test("an import onto another machine writes one moved record: moved_from, a noti
 
 test("an export with no origin (from before 0.9.6) imports with no move", () => {
 	const s = new Store(join(dir, "data-a", "cmx2.db"), { archivePath: null });
-	const e = exportSession(s, "ses_move0001");
+	const e = exportSession(s, "ses_move0001aaaaaaaaaaaa");
 	s.close();
 	delete e.origin;
 	const data = join(dir, "data-c");

@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
-import { readdir, realpath, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { open as openFile, readdir, realpath, stat } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 import { CONTRACT_VERSION, EVENTS, type EventType } from "@cmx2/contract";
 import { ActorError, Actors, agentTools, type Host, IDLE_WAIT_MS, ReportFiles, type SpawnInput } from "@cmx2/actors";
 import { type Config, ConfigError, configDir, dataDir as defaultDataDir, type Effort, loadConfig, loadConfigAsync, machineName, userNotes } from "@cmx2/engine/config";
@@ -12,7 +12,7 @@ import { Transcript } from "@cmx2/engine/transcript";
 import { evaluate, type PermissionRule, rulesFromConfig, subagentEnv } from "@cmx2/engine/permission";
 import { BusyError, EngineSession, type EngineEvent, type MailRecord, type StepRow, type TurnEvent, type UserBlock } from "@cmx2/engine/session";
 import { defaultSkillDirs, LspPool, McpPool, type McpScope, resizeImage, runCommand, Skills } from "@cmx2/tools";
-import { closeOpenSteps, decodeCursor, documentPart, encodeCursor, ExportError, exportStream, importSession, messageId, partId, projectMessage, projectTranscript, readExport, type SessionQuery, type SessionRevert, type SessionStateInfo, type RefreshUsage, Store, type StoredSession } from "@cmx2/store";
+import { closeOpenSteps, decodeCursor, documentPart, encodeCursor, ExportError, exportStream, importBundleFile, messageId, partId, projectMessage, projectTranscript, type SessionQuery, type SessionRevert, type SessionStateInfo, type RefreshUsage, Store, type StoredSession } from "@cmx2/store";
 import { Value } from "typebox/value";
 import { Asks, permissionJson, questionJson, type ReplyOutcome } from "./asks.ts";
 import { Catalog, expandTemplate, providersJson } from "./catalog.ts";
@@ -31,7 +31,7 @@ import { type ProcEvent, type ProcInfo, Procs, type SweepResult } from "@cmx2/pr
 import { badRequest, bodyOf, errorResponse, HttpError, intParam, notFound, queryOf } from "./http.ts";
 import { RunLockHeld, RunLocks } from "./lock.ts";
 import { defaultTitle, Titles } from "./title.ts";
-import { listen, type StreamResponse } from "./listen.ts";
+import { BodyTooLarge, listen, type StreamResponse } from "./listen.ts";
 import { gzipSink, plainSink, type RawSink, type Sink, type StreamSwitches, Supersession, switchesOf, wants } from "./stream.ts";
 import { requestReviewTool, worktreeTools } from "./worktree-tools.ts";
 import { type Created, type Policy, type SetupRun, WorktreeError, type WorktreeInfo, Worktrees } from "@cmx2/worktrees";
@@ -206,8 +206,8 @@ type SessionOptionsOf = Parameters<typeof EngineSession.create>[0];
 export const MAX_BODY_BYTES = 128 * 1024 * 1024;
 /**
  * a session bundle POST /session/import takes: twice the biggest real thread measured when the route was added (a 63 MB
- * transcript plus 51 MB of parts, about 115 MB as a bundle). the body is read in chunks and cut off at the cap; parsing it
- * needs the whole bundle in memory once
+ * transcript plus 51 MB of parts, about 115 MB as a bundle). the body streams to a file under the data dir, cut off at the
+ * cap, and the import reads that file a piece at a time
  */
 export const IMPORT_MAX_BYTES = 256 * 1024 * 1024;
 /** the unauthenticated pairing exchange carries a token and a name */
@@ -1508,11 +1508,19 @@ export function serve(opts: ServeOptions) {
 		if (sessions.get(id)?.state === "busy" || locks.holds(id)) throw new HttpError(409, "BusyError", `session ${id} is running a turn; export it once the turn ends, or abort it first`, { sessionID: id });
 		const chunks = exportStream(store, stored.id, { cmx2: VERSION });
 		const enc = new TextEncoder();
+		let sinceGc = 0;
 		const body = new ReadableStream<Uint8Array>({
 			async pull(c) {
 				const { done, value } = await chunks.next();
-				if (done) c.close();
-				else c.enqueue(enc.encode(value));
+				if (done) return c.close();
+				c.enqueue(enc.encode(value));
+				// each chunk leaves its rows, strings and bytes for a gc that a fast reader never gives time to run; collecting
+				// every 8 MB keeps a 256 MB export near flat (measured on a 256 MB export: +223 MB peak rss without, +50 MB with)
+				sinceGc += value.length;
+				if (sinceGc >= 8 * 1024 * 1024) {
+					sinceGc = 0;
+					Bun.gc(true);
+				}
 			},
 			async cancel() {
 				await chunks.return(undefined);
@@ -1521,39 +1529,66 @@ export function serve(opts: ServeOptions) {
 		return new Response(body, { headers: { "content-type": "application/vnd.cmx2.session+json", "content-disposition": `attachment; filename="${stored.id}.cmx2.json"` } });
 	}
 
+	/** one import at a time: each holds a body on disk and its rows in one transaction, and two would double the peak */
+	let importing = false;
+
 	async function importBundle(req: Request, url: URL) {
 		const q = queryOf(url, "importSession");
-		let directory: string | undefined;
-		if (q.directory) {
-			directory = resolve(q.directory);
-			await reachFor(directory);
-			if (!existsSync(directory) || !statSync(directory).isDirectory()) throw badRequest(`directory ${directory} is not a folder on this machine`);
-			directory = realpathSync(directory);
-		}
-		const raw = await req.text();
-		let e: ReturnType<typeof readExport>;
+		if (importing) throw new HttpError(409, "BusyError", "another import is running on this daemon; send this one again when it is done");
+		importing = true;
+		const tmp = join(data, "import", `${crypto.randomUUID()}.json`);
 		try {
-			e = readExport(raw);
-		} catch (err) {
-			if (err instanceof ExportError) throw badRequest(err.message);
-			throw err;
+			let directory: string | undefined;
+			if (q.directory) {
+				if (!isAbsolute(q.directory)) throw badRequest(`directory ${q.directory} is not an absolute path`);
+				directory = resolve(q.directory);
+				await reachFor(directory);
+				if (!existsSync(directory) || !statSync(directory).isDirectory()) throw badRequest(`directory ${directory} is not a folder on this machine`);
+				directory = realpathSync(directory);
+			}
+			// the body goes to a file under the data dir as it arrives; the import reads it from there a piece at a time
+			mkdirSync(join(data, "import"), { recursive: true });
+			const out = await openFile(tmp, "wx");
+			try {
+				const body = req.body?.getReader();
+				for (;;) {
+					const chunk = body ? await body.read() : { done: true as const, value: undefined };
+					if (chunk.done) break;
+					await out.write(chunk.value);
+				}
+			} catch (e) {
+				if (e instanceof BodyTooLarge) return Response.json({ name: "PayloadTooLargeError", data: { message: "that request body is bigger than the daemon takes" } }, { status: 413, headers: { connection: "close" } });
+				throw e;
+			} finally {
+				await out.close();
+			}
+			let r: ReturnType<typeof importBundleFile>;
+			try {
+				r = importBundleFile(store, tmp, {
+					dataDir: data,
+					...(directory ? { directory } : {}),
+					...(q.asNew === "true" ? { asNew: true } : {}),
+					...(q.title?.trim() ? { title: q.title.trim() } : {}),
+					project: (dir) => {
+						if (!directory && (!existsSync(dir) || !statSync(dir).isDirectory())) throw new ExportError(`the session's folder ${dir} is not on this machine; send directory, the repo's folder here`);
+						return projectFor(dir);
+					},
+				});
+			} catch (err) {
+				if (err instanceof ExportError) throw err.code === "clash" ? new HttpError(409, "ConflictError", err.message) : badRequest(err.message);
+				throw err;
+			}
+			console.error(`cmx2: imported ${r.id}: ${r.messages} messages, ${r.parts} parts${r.moved ? `, moved from ${r.moved.from.machine} ${r.moved.from.directory}` : ""}`);
+			await loadVcsDir(r.directory);
+			await publishSession("session.created", r.id);
+			await publishSession("session.updated", r.id);
+			return Response.json(info(row(r.id)), { status: 201 });
+		} finally {
+			importing = false;
+			rmSync(tmp, { force: true });
+			// what the import parsed is garbage now; collect it while the daemon is quiet rather than at its next turn
+			Bun.gc(true);
 		}
-		const where = directory ?? e.session.directory;
-		if (!directory) await reachFor(where);
-		if (!directory && (!existsSync(where) || !statSync(where).isDirectory())) throw badRequest(`the session's folder ${where} is not on this machine; send directory, the repo's folder here`);
-		let r: ReturnType<typeof importSession>;
-		try {
-			r = importSession(store, e, { dataDir: data, ...(directory ? { directory } : {}), ...(q.asNew === "true" ? { asNew: true } : {}), ...(q.title?.trim() ? { title: q.title.trim() } : {}), projectId: projectFor(where) });
-		} catch (err) {
-			if (err instanceof ExportError) throw err.code === "clash" ? new HttpError(409, "ConflictError", err.message) : badRequest(err.message);
-			// a bundle whose rows do not fit the store: the transaction rolled back, nothing was written
-			throw badRequest(`that bundle could not be imported: ${err instanceof Error ? err.message : String(err)}; nothing was changed`);
-		}
-		console.error(`cmx2: imported ${r.id}: ${r.messages} messages, ${r.parts} parts${r.moved ? `, moved from ${r.moved.from.machine} ${r.moved.from.directory}` : ""}`);
-		await loadVcsDir(where);
-		await publishSession("session.created", r.id);
-		await publishSession("session.updated", r.id);
-		return Response.json(info(row(r.id)), { status: 201 });
 	}
 
 	function info(row: StoredSession, states?: Map<string, SessionStateInfo>) {
@@ -3652,7 +3687,7 @@ export function serve(opts: ServeOptions) {
 			const pairing = new URL(req.url).pathname === "/pair" && req.method === "POST";
 			if (pairing) return { maxBody: PAIR_BODY_BYTES };
 			if (!authorized(req)) return { response: unauthorized() };
-			if (new URL(req.url).pathname === "/session/import" && req.method === "POST") return { maxBody: opts.importMaxBytes ?? IMPORT_MAX_BYTES };
+			if (new URL(req.url).pathname === "/session/import" && req.method === "POST") return { maxBody: opts.importMaxBytes ?? IMPORT_MAX_BYTES, streamBody: true };
 			return { maxBody: MAX_BODY_BYTES };
 		},
 		stream: streamRequest,

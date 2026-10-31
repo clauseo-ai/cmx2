@@ -7,7 +7,7 @@
  * run: bun test packages/server/test/transfer.test.ts
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { DEFAULTS } from "@cmx2/engine/config";
@@ -312,4 +312,66 @@ test("an oversized, corrupt, cut-short or newer bundle is refused with a plain e
 	expect(noDir.status).toBe(400);
 	expect(noDir.json.data.message).toContain("send directory");
 	expect(counts(b)).toEqual(before);
+});
+
+/** a request body sent in pieces, with no content-length, released by the test */
+function piecewise(text: string) {
+	const enc = new TextEncoder().encode(text);
+	const half = Math.floor(enc.length / 2);
+	let release!: () => void;
+	const gate = new Promise<void>((r) => (release = r));
+	let step = 0;
+	const body = new ReadableStream<Uint8Array>({
+		async pull(c) {
+			if (step === 0) c.enqueue(enc.slice(0, half));
+			else if (step === 1) {
+				await gate;
+				c.enqueue(enc.slice(half));
+			} else c.close();
+			step++;
+		},
+	});
+	return { body, release };
+}
+
+test("one import at a time: a second while the first is streaming gets 409 BusyError, the first then lands", async () => {
+	const before = counts(b);
+	const slow = piecewise(bundle);
+	const first = fetch(`${B}/session/import?asNew=true`, { method: "POST", headers: { "content-type": "application/json" }, body: slow.body, duplex: "half" } as RequestInit);
+	await Bun.sleep(150);
+	const second = await importTo(B, bundle, "?asNew=true");
+	expect(second.status).toBe(409);
+	expect(second.json.name).toBe("BusyError");
+	slow.release();
+	const r = await first;
+	expect(r.status).toBe(201);
+	expect(counts(b).sessions).toBe(before.sessions + 1);
+	// the temporary body is gone once the import is done
+	expect(readdirSync(join(ROOT, "data-b", "import"))).toEqual([]);
+});
+
+test("a streamed body past the cap with no content-length is cut off with 413 and writes nothing", async () => {
+	const before = counts(b);
+	const big = new TextEncoder().encode(JSON.stringify({ ...JSON.parse(bundle), padding: "x".repeat(SMALL_CAP) }));
+	let at = 0;
+	const body = new ReadableStream<Uint8Array>({
+		pull(c) {
+			if (at >= big.length) return c.close();
+			c.enqueue(big.slice(at, at + 256 * 1024));
+			at += 256 * 1024;
+		},
+	});
+	const r = await fetch(`${B}/session/import?asNew=true`, { method: "POST", headers: { "content-type": "application/json" }, body, duplex: "half" } as RequestInit).catch((e) => e as Error);
+	if (r instanceof Error) throw r;
+	expect(r.status).toBe(413);
+	expect(counts(b)).toEqual(before);
+	expect(readdirSync(join(ROOT, "data-b", "import"))).toEqual([]);
+	// the daemon still takes the next import
+	expect((await importTo(B, bundle, "?asNew=true")).status).toBe(201);
+});
+
+test("a relative directory is refused", async () => {
+	const r = await importTo(B, bundle, `?asNew=true&directory=${encodeURIComponent("elsewhere")}`);
+	expect(r.status).toBe(400);
+	expect(r.json.data.message).toContain("not an absolute path");
 });

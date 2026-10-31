@@ -1,9 +1,9 @@
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { dataDir } from "@cmx2/engine/config";
 import { VERSION } from "@cmx2/server";
-import { ExportError, exportSession, importSession, readExport, sessionMarkdown, Store } from "@cmx2/store";
+import { ExportError, exportSession, importBundleFile, sessionMarkdown, Store } from "@cmx2/store";
 import { fail } from "../util.ts";
 
 export const help = `cmx2 session: the sessions on this machine
@@ -114,11 +114,11 @@ function importCmd(args: string[]) {
 	}
 	const store = openStore();
 	try {
-		const e = readExport(readFileSync(file, "utf8"));
 		const before = { sessions: store.sessionCount(), messages: store.messageCount() };
-		const r = importSession(store, e, { dataDir: dataDir(), ...(directory ? { directory } : {}), ...(values["as-new"] ? { asNew: true } : {}) });
-		const where = directory ?? e.session.directory;
-		console.log(`imported ${r.id}${r.id !== e.session.id ? ` (a copy of ${e.session.id})` : ""}: ${r.messages} messages, ${r.parts} parts, ${r.steps} steps${r.transcript ? "" : ", no transcript so it is browse only"}`);
+		// read a piece at a time, so a large export never sits in memory whole
+		const r = importBundleFile(store, resolve(file), { dataDir: dataDir(), ...(directory ? { directory } : {}), ...(values["as-new"] ? { asNew: true } : {}) });
+		const where = r.directory;
+		console.log(`imported ${r.id}${r.id !== r.source ? ` (a copy of ${r.source})` : ""}: ${r.messages} messages, ${r.parts} parts, ${r.steps} steps${r.transcript ? "" : ", no transcript so it is browse only"}`);
 		if (r.moved) console.log(`moved from ${r.moved.from.machine} (${r.moved.from.os}, ${r.moved.from.directory}); the model reads that with its next turn`);
 		console.log(`sessions ${before.sessions} -> ${store.sessionCount()}, messages ${before.messages} -> ${store.messageCount()}`);
 		if (!existsSync(where)) console.log(`its directory ${where} is not on this machine; import again with --as-new --directory <folder> to continue it here`);

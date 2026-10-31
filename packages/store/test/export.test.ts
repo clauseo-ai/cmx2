@@ -10,7 +10,7 @@
  */
 import { liveNote, liveProfile, liveTest, port } from "../../eval/src/harness.ts";
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig } from "../../engine/src/config.ts";
 import { serve } from "../../server/src/index.ts";
@@ -25,6 +25,8 @@ liveNote("export.test.ts (real model turns)");
 
 afterAll(async () => {
 	for (const d of daemons) await d.stop();
+	// made at load, so a run that skips the live tests leaves it too
+	rmSync(SCRATCH, { recursive: true, force: true });
 });
 
 async function send(base: string, id: string, text: string) {
