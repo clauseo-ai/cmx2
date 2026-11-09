@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { bashArgv, bashEnv, IS_WINDOWS } from "@cmx2/platform";
+import { bashCommand, IS_WINDOWS } from "@cmx2/platform";
 import type { Api, AssistantMessageEventStream, Model, SimpleStreamOptions, TranscriptContext } from "@earendil-works/pi-ai";
 import type { Config, ProviderApi, ProviderOverride } from "./config.ts";
 
@@ -100,14 +100,14 @@ export async function resolveModel(config: Config, ref: string): Promise<Model<A
 export function resolveSecret(v: string | undefined): string | undefined {
 	if (v?.startsWith("$")) return process.env[v.slice(1).replace(/^\{|\}$/g, "")];
 	if (v?.startsWith("!")) {
-		let argv: string[];
+		let run: { argv: string[]; env?: Record<string, string | undefined> };
 		try {
-			argv = IS_WINDOWS ? bashArgv(v.slice(1)) : ["sh", "-c", v.slice(1)];
+			run = IS_WINDOWS ? bashCommand(v.slice(1)) : { argv: ["sh", "-c", v.slice(1)] };
 		} catch (e) {
 			console.error(`cmx2: a key from a command needs a bash: ${e instanceof Error ? e.message : String(e)}`);
 			return undefined;
 		}
-		const r = spawnSync(argv[0]!, argv.slice(1), { encoding: "utf8", timeout: 10_000, ...(IS_WINDOWS ? { env: { ...process.env, ...bashEnv() }, windowsHide: true } : {}) });
+		const r = spawnSync(run.argv[0]!, run.argv.slice(1), { encoding: "utf8", timeout: 10_000, ...(IS_WINDOWS ? { env: run.env, windowsHide: true } : {}) });
 		return r.status === 0 ? r.stdout.trim() || undefined : undefined;
 	}
 	return v || undefined;
