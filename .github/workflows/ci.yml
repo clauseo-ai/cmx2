@@ -18,7 +18,18 @@ jobs:
           git config --global user.email ci@example.invalid
       - run: bun install --frozen-lockfile
       - run: bunx tsc --noEmit -p .
-      - run: bun test packages
+      # one step per package, each run even when an earlier one failed, so a failure names its area
+      - { name: "test platform", if: "!cancelled()", run: bun test packages/platform }
+      - { name: "test tools", if: "!cancelled()", run: bun test packages/tools }
+      - { name: "test procs", if: "!cancelled()", run: bun test packages/procs }
+      - { name: "test worktrees", if: "!cancelled()", run: bun test packages/worktrees }
+      - { name: "test store", if: "!cancelled()", run: bun test packages/store }
+      - { name: "test engine", if: "!cancelled()", run: bun test packages/engine }
+      - { name: "test actors", if: "!cancelled()", run: bun test packages/actors }
+      - { name: "test routing, prompts, contract, client", if: "!cancelled()", run: bun test packages/routing packages/prompts packages/contract packages/client }
+      - { name: "test cli", if: "!cancelled()", run: bun test packages/cli }
+      - { name: "test server", if: "!cancelled()", run: bun test packages/server }
+      - { name: "test tui", if: "!cancelled()", run: bun test packages/tui }
       - name: the generated client matches the contract
         run: bun packages/contract/src/generate.ts --check
       - name: no strings from the maintainer's pattern list
