@@ -15,7 +15,7 @@ const LOCK_EX = 2;
 const LOCK_NB = 4;
 const LOCK_UN = 8;
 
-const libc = process.platform === "win32" ? { symbols: { flock: (_fd: number, _op: number) => 0 } } : (() => {
+const libc = (() => {
 	const path = process.platform === "darwin" ? "/usr/lib/libSystem.B.dylib" : "libc.so.6";
 	return dlopen(path, { flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 } });
 })();
