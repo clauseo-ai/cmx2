@@ -175,6 +175,11 @@ format: slug, what happened, the fix or the rule.
 - **`bun` on a windows PATH can be npm's `bun.cmd`.** spawning `["bun", ...]` then runs cmd.exe, which refuses arguments with cmd metacharacters and does not pass a kill on to bun.exe. tests spawn `process.execPath`. likewise a project's `node_modules/.bin` holds `.exe` (bun) or `.cmd` (npm) shims; `.cmd` runs through `cmd.exe /d /s /c` with a command line built by hand (tools/src/shim.ts).
 - **`realpathSync` keeps 8.3 short names.** the runner's temp dir is `C:\\Users\\RUNNER~1\\...` while git reports `C:/Users/runneradmin/...`; only `realpathSync.native` gives the long form. compare paths case-insensitively there.
 - **typescript-language-server sends `file:///c%3A/...`.** a lower-case drive with its colon escaped; diagnostics are filed under a normalised key (lsp.ts `uriKey`).
+- **ripgrep's `--path-separator /` does not reach `--json`.** `rg --files --path-separator /` prints `src/a.ts` on windows, but the json events of a search still carry `.\\src\\a.ts`; `findText` turns the backslashes itself.
+- **windows powershell writes a progress record to stderr on a session's first module load.** `#< CLIXML ... Preparing modules for first use.` arrived on stderr of a script that otherwise worked; the toast script sets `$ProgressPreference = 'SilentlyContinue'`.
+- **a `.cmd` first on PATH stands in for a tool.** `Bun.spawn(["git", ...])` ran a `git.cmd` from a directory put first on PATH (the server's hung-git tests do this, joined with `path.delimiter`), the way an extensionless sh script does on posix. in the script, `findstr` reads a backslash as an escape, so match on a name without one; `ping -n N 127.0.0.1` is the sleep.
+- **os.homedir() on windows reads USERPROFILE**, not HOME; a test that points the daemon at another home sets both.
+- **bun's `fs.promises.realpath` expands 8.3 names; `realpathSync` does not.** a request's directory went through the first (`C:\\Users\\runneradmin\\...`), the test's expectation through the second (`RUNNER~1`). the server's sync `real()` uses `realpathSync.native` on windows so both give the long form.
 
 ## measured at m3: the archive (2026-09-30)
 
