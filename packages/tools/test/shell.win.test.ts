@@ -25,28 +25,48 @@ async function until<T>(get: () => T | undefined | false | Promise<T | undefined
 }
 
 
+// every platform: on windows these prove the command reaches git's bash through the env var intact
+describe("a command reaches bash byte for byte", () => {
+	// a quoted heredoc prints its body untouched, so the output is exactly the text the command carried
+	const payloads: Record<string, string> = {
+		"quotes, backslashes, variables and globs": `"double" 'single' back\\slash \\\\two \\" $HOME \${PATH} *.ts ? [ab] {x,y} ~ & | ; < > ( ) ^ % ! \`tick\``,
+		"non-ascii text and tabs": "ünïcødé 日本語 🙂\ttab",
+		"a trailing backslash": "ends with \\",
+		"doubled quotes": `""q"" \\"\\" \\\\" '"' "'"`,
+		"several lines": "one\n  two\n\nfour\\\nfive",
+	};
+	for (const [name, payload] of Object.entries(payloads)) {
+		test(`a command reaches bash intact: ${name}`, async () => {
+			const command = `cat <<'CMX2_EOF'\n${payload}\nCMX2_EOF`;
+			const r = await runCommand(scratch("quote"), command, 30);
+			if (r.output !== `${payload}\n`) console.log(`[win quoting] ${name}: sent ${JSON.stringify(payload)} got ${JSON.stringify(r.output)}`);
+			expect(r.exit_code).toBe(0);
+			expect(r.output).toBe(`${payload}\n`);
+		});
+	}
+
+	test("a command with no whitespace, a glob and quotes reaches bash intact", async () => {
+		const r = await runCommand(scratch("quote"), `{printf,%s,'a\\\\b"c*'}`, 30);
+		expect(r.output).toBe('a\\\\b"c*');
+	});
+
+	test("the variable that carries the command is gone before it runs, and exit codes come through", async () => {
+		const env = scratch("quote");
+		const r = await runCommand(env, 'printf "%s|%s" "${CMX2_COMMAND-unset}" "$PWD"; exit 3', 30);
+		expect(r.exit_code).toBe(3);
+		const [v, pwd] = r.output.split("|");
+		expect(v).toBe("unset");
+		// the command runs in the working directory (the last part of the name; windows may spell the rest in short form)
+		expect(pwd!.split("/").pop()).toBe(env.cwd.split(/[\\/]/).pop()!);
+	});
+});
+
 describe.if(process.platform === "win32")("the shell tool on windows", () => {
 	test("commands run in git bash", async () => {
 		const r = await runCommand(scratch("uname"), "uname -s", 30);
 		expect(r.exit_code).toBe(0);
 		expect(r.output.trim()).toMatch(/^(MINGW|MSYS)/);
 	});
-
-	const cases: Record<string, string> = {
-		"quotes, backslashes, variables and globs": `printf %s "$BASH_EXECUTION_STRING" # "double" 'single' back\\slash \\\\two \\" $HOME \${PATH} *.ts ? [ab] {x,y} ~ & | ; < > ( ) ^ % ! \`tick\``,
-		"newlines and non-ascii text": `printf %s "$BASH_EXECUTION_STRING"\n# ünïcødé 日本語 🙂\n# tab\there`,
-		"a trailing backslash": `printf %s "$BASH_EXECUTION_STRING" # \\`,
-		"doubled quotes": `printf %s "$BASH_EXECUTION_STRING" # ""q"" \\"\\" \\\\" '"' "'"`,
-		"no whitespace at all, with a glob and quotes": `{printf,%s,"$BASH_EXECUTION_STRING"};:'*.ts'"?"`,
-	};
-	for (const [name, command] of Object.entries(cases)) {
-		test(`a command reaches bash intact: ${name}`, async () => {
-			const r = await runCommand(scratch("quote"), command, 30);
-			if (r.output !== command) console.log(`[win quoting] ${name}: sent ${JSON.stringify(command)} got ${JSON.stringify(r.output)}`);
-			expect(r.exit_code).toBe(0);
-			expect(r.output).toBe(command);
-		});
-	}
 
 	test("a timeout kills the whole tree, the native grandchild included", async () => {
 		let gc = 0;

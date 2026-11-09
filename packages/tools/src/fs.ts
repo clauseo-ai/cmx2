@@ -17,9 +17,11 @@ export function resolvePath(env: ToolEnv, p: string): string {
 	return isAbsolute(expanded) ? expanded : resolve(env.cwd, expanded);
 }
 
+/** a path as the model is shown it: relative to the working directory when inside it, with / between parts on every platform */
 export function shown(env: ToolEnv, abs: string): string {
 	const rel = relative(env.cwd, abs);
-	return rel && !rel.startsWith("..") ? rel : abs;
+	if (!rel || rel.startsWith("..") || isAbsolute(rel)) return abs;
+	return process.platform === "win32" ? rel.replace(/\\/g, "/") : rel;
 }
 
 export interface ReadDetails {

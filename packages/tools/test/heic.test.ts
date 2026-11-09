@@ -326,7 +326,8 @@ async function someJpeg(width: number, height: number): Promise<Uint8Array | und
 	return new Uint8Array(readFileSync(join(dir, "s.jpg")));
 }
 
-test("libheif's command line is called with a quality, a source and a target, and its jpeg is fitted when it is big", async () => {
+// the stand-in decoders are #!/bin/sh scripts, which windows cannot start
+test.skipIf(process.platform === "win32")("libheif's command line is called with a quality, a source and a target, and its jpeg is fitted when it is big", async () => {
 	const jpeg = await someJpeg(2600, 1800);
 	if (!jpeg) return console.log("skipped: no image converter to make the stand-in's jpeg");
 	const dir = scratch("jpegfile").root;
@@ -381,7 +382,8 @@ test("a host with no heic decoder says what to install", async () => {
 	expect((parts[0] as { text: string }).text).toStartWith("image IMG_9.HEIC: (image not attached");
 });
 
-test("a decoder is tried after another one that failed", async () => {
+// the stand-in decoders are #!/bin/sh scripts, which windows cannot start
+test.skipIf(process.platform === "win32")("a decoder is tried after another one that failed", async () => {
 	const jpeg = await someJpeg(200, 100);
 	if (!jpeg) return console.log("skipped: no image converter to make the stand-in's jpeg");
 	const dir = scratch("second").root;
@@ -481,7 +483,8 @@ test("a host with no decoder is probed again for the next photo, and photos that
 	setHeicProbe(undefined);
 });
 
-test("a decoder that times out ends the attempt: the next decoder is not given the same file", async () => {
+// the stand-in decoders are #!/bin/sh scripts, which windows cannot start
+test.skipIf(process.platform === "win32")("a decoder that times out ends the attempt: the next decoder is not given the same file", async () => {
 	imageTimeouts.toolMs = 400;
 	const second = counting(new Uint8Array());
 	setHeicDecoders([heifCliDecoder(stub("hang1", "sleep 30"), "first"), heifCliDecoder(stub("hang2", "sleep 30"), "second"), second]);
@@ -498,7 +501,8 @@ test("a decoder that times out ends the attempt: the next decoder is not given t
 	expect(second.calls).toBe(0);
 });
 
-test("one budget covers a whole photo, whatever each tool is allowed", async () => {
+// the stand-in decoders are #!/bin/sh scripts, which windows cannot start
+test.skipIf(process.platform === "win32")("one budget covers a whole photo, whatever each tool is allowed", async () => {
 	imageTimeouts.heicMs = 500;
 	setHeicDecoders([heifCliDecoder(stub("budget", "sleep 30"), "slow")]);
 	const t = Date.now();

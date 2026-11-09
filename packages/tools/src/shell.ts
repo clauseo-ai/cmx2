@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import { BashMissing, bashArgv, bashEnv, forgetTree, killTree, trackTree, treeSpawnOptions } from "@cmx2/platform";
+import { BashMissing, bashCommand, forgetTree, killTree, trackTree, treeSpawnOptions } from "@cmx2/platform";
 import { Type } from "typebox";
 import { imageMimeOf, imageParts } from "./image.ts";
 import { clip, clipNote } from "./limits.ts";
@@ -69,10 +69,10 @@ export function outputImages(output: string, cwd: string, since: number): string
 export async function runCommand(env: ToolEnv, command: string, timeoutS: number, signal?: AbortSignal, onProgress?: (tail: string) => void): Promise<ShellResult> {
 	const t0 = performance.now();
 	const startedAt = Date.now();
-	const procEnv = { ...process.env, PAGER: "cat", GIT_PAGER: "cat", TERM: "dumb", ...bashEnv(), ...env.env };
-	const proc = Bun.spawn(bashArgv(command, { env: procEnv }), {
+	const bash = bashCommand(command, { env: { ...process.env, PAGER: "cat", GIT_PAGER: "cat", TERM: "dumb", ...env.env } });
+	const proc = Bun.spawn(bash.argv, {
 		cwd: env.cwd,
-		env: procEnv,
+		env: bash.env,
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",

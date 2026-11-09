@@ -4,6 +4,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { forgetTree, IS_WINDOWS, killTree, trackTree, treeAlive, treeSpawnOptions } from "@cmx2/platform";
 import { Type } from "typebox";
 import { resolvePath, shown } from "./fs.ts";
+import { binNames, launch } from "./shim.ts";
 import { clip, clipNote } from "./limits.ts";
 import { text, type Tool, defineTool, type ToolEnv, type ToolResult } from "./types.ts";
 
@@ -68,6 +69,20 @@ export interface LspSymbol extends LspLocation {
 const SEVERITY = ["", "error", "warning", "info", "hint"] as const;
 const SYMBOL_KINDS = ["", "file", "module", "namespace", "package", "class", "method", "property", "field", "constructor", "enum", "interface", "function", "variable", "constant", "string", "number", "boolean", "array", "object", "key", "null", "enum member", "struct", "event", "operator", "type parameter"];
 
+/**
+ * a file uri as a path. windows servers (typescript-language-server through vscode-uri) send the drive in lower case
+ * and its colon escaped (`file:///c%3A/...`); the path gets the drive in upper case, as node writes it
+ */
+export function uriPath(uri: string): string {
+	const p = fileURLToPath(uri);
+	return IS_WINDOWS ? p.replace(/^([a-z]):/, (_m, d: string) => `${d.toUpperCase()}:`) : p;
+}
+
+/** what a uri is filed under, so a server's spelling of a file matches ours (windows: drive case and escaping) */
+function uriKey(uri: string): string {
+	return IS_WINDOWS && uri.startsWith("file:") ? uriPath(uri).toLowerCase() : uri;
+}
+
 function walkUp(from: string, test: (dir: string) => string | undefined): string | undefined {
 	let dir = from;
 	for (;;) {
@@ -84,7 +99,7 @@ function walkUp(from: string, test: (dir: string) => string | undefined): string
  * the extensionless sh script windows cannot run: bun's are .exe, npm's are .cmd
  */
 export function executable(name: string, root: string, from = import.meta.dir): string | undefined {
-	const names = IS_WINDOWS && !/\.(exe|cmd|bat|com)$/i.test(name) ? [`${name}.exe`, `${name}.cmd`] : [name];
+	const names = binNames(name);
 	const local = (dir: string) => {
 		for (const n of names) {
 			const p = join(dir, "node_modules", ".bin", n);
@@ -95,11 +110,6 @@ export function executable(name: string, root: string, from = import.meta.dir): 
 	return walkUp(root, local) ?? walkUp(from, local) ?? Bun.which(name) ?? undefined;
 }
 
-/** argv that runs `exe` with `args`: a .cmd or .bat shim runs through cmd.exe, which Bun.spawn cannot skip */
-export function launchArgv(exe: string, args: string[]): string[] {
-	if (IS_WINDOWS && /\.(cmd|bat)$/i.test(exe)) return [process.env.ComSpec || "cmd.exe", "/d", "/s", "/c", exe, ...args];
-	return [exe, ...args];
-}
 
 function tsserverPath(root: string): string | undefined {
 	const hit = walkUp(root, (d) => {
@@ -132,8 +142,9 @@ export class LspServer {
 		readonly config: LspServerConfig,
 		readonly root: string,
 		argv: string[],
+		how: { windowsVerbatimArguments?: true } = {},
 	) {
-		const proc = Bun.spawn(argv, { cwd: root, stdin: "pipe", stdout: "pipe", stderr: "pipe", ...treeSpawnOptions() });
+		const proc = Bun.spawn(argv, { ...how, cwd: root, stdin: "pipe", stdout: "pipe", stderr: "pipe", ...treeSpawnOptions() });
 		this.proc = proc;
 		trackTree(proc.pid);
 		void this.pump(proc.stdout as unknown as AsyncIterable<Uint8Array>);
@@ -197,7 +208,7 @@ export class LspServer {
 			return;
 		}
 		if (msg.method === "textDocument/publishDiagnostics") {
-			this.diagnostics.set(msg.params.uri, { gen: this.gen, items: msg.params.diagnostics ?? [] });
+			this.diagnostics.set(uriKey(msg.params.uri), { gen: this.gen, items: msg.params.diagnostics ?? [] });
 			for (const w of this.waiters) w();
 		}
 	}
@@ -261,7 +272,7 @@ export class LspServer {
 	async diagnosticsFor(uri: string, timeoutMs = 20_000, settleMs = 600): Promise<any[]> {
 		const want = this.gen;
 		const fresh = () => {
-			const d = this.diagnostics.get(uri);
+			const d = this.diagnostics.get(uriKey(uri));
 			return d && d.gen >= want ? d : undefined;
 		};
 		const t0 = Date.now();
@@ -331,7 +342,8 @@ export class LspPool {
 				if (tsserver) cfg = { ...config, initializationOptions: { tsserver: { path: tsserver }, ...config.initializationOptions } };
 			}
 			const server = (async () => {
-				const s = new LspServer(cfg, root, launchArgv(exe, config.command.slice(1)));
+				const { argv, ...how } = launch(exe, config.command.slice(1));
+				const s = new LspServer(cfg, root, argv, how);
 				try {
 					await s.initialize();
 				} catch (e) {
@@ -407,7 +419,7 @@ function toLocation(l: any): LspLocation | undefined {
 	const uri = l?.uri ?? l?.targetUri;
 	const range = l?.range ?? l?.targetSelectionRange ?? l?.targetRange;
 	if (!uri || !range) return undefined;
-	return { path: uri.startsWith("file:") ? fileURLToPath(uri) : uri, line: range.start.line + 1, character: range.start.character + 1, endLine: range.end.line + 1, endCharacter: range.end.character + 1 };
+	return { path: uri.startsWith("file:") ? uriPath(uri) : uri, line: range.start.line + 1, character: range.start.character + 1, endLine: range.end.line + 1, endCharacter: range.end.character + 1 };
 }
 
 function hoverText(contents: any): string {
@@ -420,7 +432,7 @@ function hoverText(contents: any): string {
 function flattenSymbols(items: any[], container?: string, out: LspSymbol[] = [], path = ""): LspSymbol[] {
 	for (const s of items ?? []) {
 		const range = s.selectionRange ?? s.range ?? s.location?.range;
-		const p = s.location?.uri ? fileURLToPath(s.location.uri) : path;
+		const p = s.location?.uri ? uriPath(s.location.uri) : path;
 		if (range) out.push({ name: s.name, kind: SYMBOL_KINDS[s.kind] ?? String(s.kind), path: p, line: range.start.line + 1, character: range.start.character + 1, ...(container ?? s.containerName ? { container: container ?? s.containerName } : {}) });
 		if (s.children) flattenSymbols(s.children, s.name, out, p);
 	}

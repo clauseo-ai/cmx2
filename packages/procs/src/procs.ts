@@ -3,8 +3,7 @@ import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-	bashArgv,
-	bashEnv,
+	bashCommand,
 	bashPath,
 	forgetTree,
 	IS_WINDOWS,
@@ -401,12 +400,12 @@ export class Procs {
 		if (!existsSync(cwd)) throw new Error(`working directory ${cwd} does not exist`);
 		// windows: git's bash, whatever SHELL says (it may name a bash that only means something inside git bash)
 		const shell = IS_WINDOWS ? (opts.argv ? "bash" : bashPath()) : process.env.SHELL || "/bin/bash";
-		const env: Record<string, string | undefined> = tty
-			? { ...process.env, TERM: "xterm-256color", ...bashEnv(), ...opts.env }
-			: { ...process.env, TERM: "dumb", PAGER: "cat", GIT_PAGER: "cat", ...bashEnv(), ...opts.env };
+		let env: Record<string, string | undefined> = tty
+			? { ...process.env, TERM: "xterm-256color", ...opts.env }
+			: { ...process.env, TERM: "dumb", PAGER: "cat", GIT_PAGER: "cat", ...opts.env };
 		// a person's terminal is their login shell; a model's command is plain bash, the same as the shell tool
-		const argv =
-			opts.argv ?? (opts.command.trim() === "" ? [shell, "-l"] : opts.origin === "user" && tty ? [shell, "-lc", opts.command] : bashArgv(opts.command, { env }));
+		let argv = opts.argv ?? (opts.command.trim() === "" ? [shell, "-l"] : opts.origin === "user" && tty ? [shell, "-lc", opts.command] : undefined);
+		if (!argv) ({ argv, env } = bashCommand(opts.command, { env }));
 		const id = randomId(tty ? "pty" : "job");
 		const buffer = new OutputBuffer(this.head, this.tail);
 		const info: ProcInfo = {

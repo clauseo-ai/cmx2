@@ -200,7 +200,7 @@ test("attach replays from a cursor and streams live bytes", async () => {
 
 test("crash: a daemon killed with jobs alive; the next daemon's sweep stops the orphan and adopts the kept", async () => {
 	const dataDir = join(root, "crash");
-	const child = Bun.spawn(["bun", join(import.meta.dir, "fixtures/crash-daemon.ts"), dataDir], { stdout: "pipe", stderr: "inherit" });
+	const child = Bun.spawn([process.execPath, join(import.meta.dir, "fixtures/crash-daemon.ts"), dataDir], { stdout: "pipe", stderr: "inherit" });
 	const reader = child.stdout.getReader();
 	const { value } = await reader.read();
 	const pids = JSON.parse(new TextDecoder().decode(value)) as { orphan: number; kept: number };
