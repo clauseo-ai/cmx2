@@ -329,7 +329,8 @@ export async function findText(cwd: string, opts: { pattern: string; limit: numb
 			const at = (b: number) => bytes.subarray(0, b).toString().length;
 			const text = raw.length > MATCH_LINE_CHARS ? `${raw.slice(0, MATCH_LINE_CHARS)}…` : raw;
 			matches.push({
-				path: (ev.data.path.text ?? "").replace(/^\.\//, ""),
+				// --path-separator does not reach ripgrep's json, so windows' backslashes are turned here
+				path: (IS_WINDOWS ? (ev.data.path.text ?? "").replaceAll("\\", "/") : (ev.data.path.text ?? "")).replace(/^\.\//, ""),
 				line: ev.data.line_number,
 				text,
 				submatches: ev.data.submatches.map((s) => ({ start: at(s.start), end: at(s.end), text: s.match.text ?? "" })).filter((s) => s.end <= text.length),

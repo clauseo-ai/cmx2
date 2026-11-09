@@ -50,6 +50,8 @@ export function toastScript(note: Note): string {
 	const tag = note.group.slice(0, 64).replace(/[^\w-]/g, "_");
 	return [
 		"$ErrorActionPreference = 'Stop'",
+		// the first run of a session prints a module progress record to stderr otherwise
+		"$ProgressPreference = 'SilentlyContinue'",
 		"[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]",
 		"[void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime]",
 		"$x = New-Object Windows.Data.Xml.Dom.XmlDocument",

@@ -131,8 +131,8 @@ test("a key from a command is its trimmed stdout; a failed command is no key; on
 	expect(resolveSecret("!exit 3")).toBeUndefined();
 	expect(resolveSecret("!true")).toBeUndefined();
 	expect(resolveSecret("literal")).toBe("literal");
-	// msys is git for windows' bash; the wsl launcher would say linux-gnu
-	if (process.platform === "win32") expect(resolveSecret('!printf %s "$OSTYPE"')).toBe("msys");
+	// git for windows' bash says msys or cygwin; the wsl launcher would say linux-gnu
+	if (process.platform === "win32") expect(resolveSecret('!printf %s "$OSTYPE"')).toMatch(/^(msys|cygwin)$/);
 	// a doubled backslash reaches the command as written (git bash folds it on a command line)
 	expect(resolveSecret("!printf '%s' 'a\\\\b'")).toBe("a\\\\b");
 });

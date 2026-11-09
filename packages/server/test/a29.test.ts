@@ -247,8 +247,8 @@ describe("a29: /global/fs home", () => {
 		const realHome = dirOf("real-home");
 		const linkHome = join(SCRATCH, "link-home");
 		symlinkSync(realHome, linkHome);
-		// os.homedir() reads HOME once, so the daemon is a process of its own with the symlinked HOME
-		const home = new Daemon({ port: port(4834), dataDir: join(SCRATCH, "data-home"), log: join(SCRATCH, "home.log"), env: { HOME: linkHome } });
+		// os.homedir() reads HOME (USERPROFILE on windows) once, so the daemon is a process of its own with the symlinked HOME
+		const home = new Daemon({ port: port(4834), dataDir: join(SCRATCH, "data-home"), log: join(SCRATCH, "home.log"), env: { HOME: linkHome, USERPROFILE: linkHome } });
 		await home.start();
 		try {
 			const r = await home.api("/global/fs");

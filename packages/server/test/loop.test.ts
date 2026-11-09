@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -6,6 +6,9 @@ import { messagesJson } from "../src/pages.ts";
 import { ProjectLists } from "../src/project-lists.ts";
 import { SessionUpdates } from "../src/session-updates.ts";
 import { VcsCache } from "../src/vcs.ts";
+
+// windows starts git, cmd.exe and a daemon slower than bun's 5 s default allows for these
+if (process.platform === "win32") setDefaultTimeout(30_000);
 
 /** the event loop's helpers: spliced message pages, git off the loop, session.updated once per tick, cached checkout lists */
 

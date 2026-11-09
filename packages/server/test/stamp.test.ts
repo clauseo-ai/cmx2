@@ -5,12 +5,15 @@
  *
  * run: bun test packages/server/test/stamp.test.ts
  */
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { DEFAULTS } from "@cmx2/engine/config";
 import { nonce, port } from "../../eval/src/harness.ts";
 import { serve } from "../src/index.ts";
+
+// windows starts git, cmd.exe and a daemon slower than bun's 5 s default allows for these
+if (process.platform === "win32") setDefaultTimeout(30_000);
 
 const ROOT = realpathSync(mkdtempSync("/tmp/cmx2-stamp-"));
 const FAST = join(ROOT, "fastrepo");
