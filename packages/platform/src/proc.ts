@@ -1,8 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { IS_WINDOWS } from "./bash.ts";
+import { processCreationMs, processRunning } from "./win32.ts";
 
-/** whether a pid runs (EPERM means it runs as someone else) */
+/** whether a pid runs (EPERM means it runs as someone else). windows: its exit code is still STILL_ACTIVE */
 export function pidAlive(pid: number): boolean {
+	if (IS_WINDOWS) {
+		if (!(pid > 0)) return false;
+		const running = processRunning(pid);
+		if (running !== undefined) return running;
+		// not openable even for a limited query: no such pid, or a protected process (which runs)
+	}
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -28,9 +35,9 @@ export function startStamp(pid: number): string | undefined {
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/** when a live pid started, in ms since the epoch (to the second off windows), or undefined when that cannot be read */
+/** when a live pid started, in ms since the epoch (to the second off windows, from GetProcessTimes on windows), or undefined when that cannot be read */
 export function processStartMs(pid: number): number | undefined {
-	if (IS_WINDOWS) return undefined; // windows: GetProcessTimes (win32.ts)
+	if (IS_WINDOWS) return pid > 0 ? processCreationMs(pid) : undefined;
 	// ps prints the start in local time; asked in utc and read field by field, it does not depend on the reader's TZ
 	const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
 	const [, mon, day, time, year] = r.status === 0 ? r.stdout.trim().split(/\s+/) : [];

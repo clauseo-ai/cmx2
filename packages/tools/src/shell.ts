@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import { BashMissing, bashCommand, forgetTree, killTree, trackTree, treeSpawnOptions } from "@cmx2/platform";
 import { Type } from "typebox";
 import { imageMimeOf, imageParts } from "./image.ts";
 import { clip, clipNote } from "./limits.ts";
@@ -64,25 +65,23 @@ export function outputImages(output: string, cwd: string, since: number): string
 	return found;
 }
 
-/** runs one command in its own process group so a timeout or abort takes its children with it */
+/** runs one command as a process tree of its own (a process group, a job object on windows) so a timeout or abort takes its children with it */
 export async function runCommand(env: ToolEnv, command: string, timeoutS: number, signal?: AbortSignal, onProgress?: (tail: string) => void): Promise<ShellResult> {
 	const t0 = performance.now();
 	const startedAt = Date.now();
-	const proc = Bun.spawn(["bash", "-c", command], {
+	const bash = bashCommand(command, { env: { ...process.env, PAGER: "cat", GIT_PAGER: "cat", TERM: "dumb", ...env.env } });
+	const proc = Bun.spawn(bash.argv, {
 		cwd: env.cwd,
-		env: { ...process.env, PAGER: "cat", GIT_PAGER: "cat", TERM: "dumb", ...env.env },
+		env: bash.env,
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
-		detached: true,
+		...treeSpawnOptions(),
 	});
+	trackTree(proc.pid);
 	let timedOut = false;
 	const kill = () => {
-		try {
-			process.kill(-proc.pid, "SIGKILL");
-		} catch {
-			proc.kill("SIGKILL");
-		}
+		killTree(proc.pid, "SIGKILL");
 	};
 	const timer = setTimeout(() => {
 		timedOut = true;
@@ -144,6 +143,8 @@ export async function runCommand(env: ToolEnv, command: string, timeoutS: number
 			late = adopted.output;
 		}
 	}
+	// a tree procs took over is procs' to forget once it has exited; any other is done with here
+	if (!jobID) forgetTree(proc.pid);
 	closed = true;
 	const full = chunks.join("");
 	const c = clip(full, { keep: "tail", spillDir: env.spillDir, label: "shell" });
@@ -200,7 +201,14 @@ serve: a dev server or preview the person will open. a server you start only to 
 			const timeout = Math.min(Math.max(1, params.timeout ?? DEFAULT_TIMEOUT_S), MAX_TIMEOUT_S);
 			// a running command reports its output tail at most once a second, so clients can show it live
 			const progress = onUpdate ? (tail: string) => onUpdate({ content: [text(tail)], details: { progress: true, tail } }) : undefined;
-			const r = await runCommand(env, params.command, timeout, signal, progress);
+			let r: ShellResult;
+			try {
+				r = await runCommand(env, params.command, timeout, signal, progress);
+			} catch (e) {
+				// no git bash on windows: the model gets what to install, as a failed call
+				if (e instanceof BashMissing) return { content: [text(e.message)], details: { error: "bash_missing" }, isError: true };
+				throw e;
+			}
 			const status = r.timed_out ? `killed after ${timeout}s` : r.exit_code === null ? "aborted" : `exit ${r.exit_code}`;
 			const body = r.output.trim() ? r.output.replace(/\n+$/, "") : "(no output)";
 			const held = r.output_held ? `\n\n${heldNote(r.job_id)}` : "";

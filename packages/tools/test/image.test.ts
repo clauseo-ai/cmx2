@@ -3,7 +3,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { readTool } from "../src/fs.ts";
-import { imageConverter, imageParts, MAX_EDGE, readDimensions, REENCODE_ABOVE, resizeDataUrl, resizeImage, sniffImage } from "../src/image.ts";
+import { findMagick, imageConverter, imageParts, MAX_EDGE, readDimensions, REENCODE_ABOVE, resizeDataUrl, resizeImage, sniffImage } from "../src/image.ts";
 import { shellTool, type ShellResult } from "../src/shell.ts";
 import type { ImagePart } from "../src/types.ts";
 import { makePng, scratch, textOf } from "./helpers.ts";
@@ -167,4 +167,18 @@ test("a png whose header says no size comes back as a placeholder, not an image 
 	const r = await resizeImage(bytes, "image/png");
 	expect(r.ok).toBe(false);
 	if (!r.ok) expect(r.placeholder).toContain("start like a png but have no readable size");
+});
+
+test("imagemagick lookup: magick then convert off windows; on windows only magick, never one under the windows directory", () => {
+	const on = (...found: string[]) => (cmd: string) => found.find((f) => f.toLowerCase().replace(/\.exe$/, "").endsWith(cmd)) ?? null;
+	expect(findMagick({ platform: "linux", which: on("/usr/bin/magick", "/usr/bin/convert") })).toEqual({ name: "magick", bin: "magick" });
+	expect(findMagick({ platform: "linux", which: on("/usr/bin/convert") })).toEqual({ name: "convert", bin: "convert" });
+	expect(findMagick({ platform: "linux", which: on() })).toBeUndefined();
+	const sys = "C:\\Windows";
+	// System32's convert.exe is the fat-to-ntfs disk converter
+	expect(findMagick({ platform: "win32", systemRoot: sys, which: on("C:\\Windows\\System32\\convert.exe") })).toBeUndefined();
+	expect(findMagick({ platform: "win32", systemRoot: sys, which: on("C:\\Windows\\System32\\magick.exe") })).toBeUndefined();
+	expect(findMagick({ platform: "win32", systemRoot: "c:\\windows\\", which: on("C:\\WINDOWS\\magick.exe") })).toBeUndefined();
+	const im = "C:\\Program Files\\ImageMagick-7.1.1-Q16-HDRI\\magick.exe";
+	expect(findMagick({ platform: "win32", systemRoot: sys, which: on(im, "C:\\Windows\\System32\\convert.exe") })).toEqual({ name: "magick", bin: im });
 });

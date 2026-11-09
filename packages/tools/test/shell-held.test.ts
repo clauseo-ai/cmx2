@@ -15,6 +15,9 @@ function lastPid(output: string): number {
 	return pid;
 }
 
+/** the background process's pid as this test can signal it: git bash's $! is its own numbering, the windows pid is in /proc */
+const BG_PID = process.platform === "win32" ? "$(cat /proc/$!/winpid)" : "$!";
+
 function alive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
@@ -35,7 +38,7 @@ function stop(pid: number) {
 test("a background sleep that inherits the pipes returns at once with the note, and the output before it", async () => {
 	const env = scratch("held-pipe");
 	const t0 = performance.now();
-	const r = await shellTool(env).execute("c", { command: "echo before; sleep 30 & echo $!" });
+	const r = await shellTool(env).execute("c", { command: `echo before; sleep 30 & echo ${BG_PID}` });
 	const elapsed = performance.now() - t0;
 	const s = r.structuredContent as ShellResult;
 	const pid = lastPid(s.output);
@@ -56,7 +59,7 @@ test("a background sleep that inherits the pipes returns at once with the note, 
 test("a background process whose output goes to a file does not hold the call", async () => {
 	const env = scratch("held-file");
 	const t0 = performance.now();
-	const r = await shellTool(env).execute("c", { command: "sleep 30 > bg.log 2>&1 & echo $!" });
+	const r = await shellTool(env).execute("c", { command: `sleep 30 > bg.log 2>&1 & echo ${BG_PID}` });
 	const elapsed = performance.now() - t0;
 	const s = r.structuredContent as ShellResult;
 	const pid = lastPid(s.output);
