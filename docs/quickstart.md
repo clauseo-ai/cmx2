@@ -4,7 +4,7 @@ from nothing to a first session in five minutes.
 
 ## prerequisites
 
-- macos or linux, on arm64 or x64.
+- macos, linux or windows 11, on arm64 or x64. windows has its own steps in [windows](windows.md).
 - [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) on your `PATH`. the grep and glob tools and file search run it. `brew install ripgrep` on macos, `apt install ripgrep` or `dnf install ripgrep` on linux.
 - git. the worktree features and many coding tasks call it.
 - a way to reach a model: an anthropic api key, or any other provider you set up in your profile (step 2).
@@ -12,6 +12,8 @@ from nothing to a first session in five minutes.
 - optional, for heic photos (iphone images) sent to a model: nothing on macos (the built-in `sips` converts them). on linux, imagemagick built with heic support, or libheif's `heif-dec` or `heif-convert` with an hevc decoder. without one, cmx2 refuses a heic image and says what to install. png, jpeg, gif and webp need nothing.
 
 ## 1. install
+
+on windows, follow [windows](windows.md#install) instead.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/clauseo-ai/cmx2/main/scripts/install.sh | sh
@@ -121,7 +123,7 @@ command needs one running. when none is up, cmx2 starts one on loopback inside i
 
 a daemon that stays up lets a turn keep going after you close the terminal, and lets clients on your phone or
 another machine reach your sessions. `serve --install` needs the compiled binary from step 1, not the source
-checkout.
+checkout. on windows the service is a task scheduler task; see [windows](windows.md#install).
 
 ```sh
 cmx2 serve --install            # launchd on macos, systemd --user on linux; starts at login

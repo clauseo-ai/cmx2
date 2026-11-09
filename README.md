@@ -17,7 +17,7 @@ one daemon holds your sessions. helpers park between tasks instead of dying.
 
 <a href="LICENSE"><img src="https://img.shields.io/github/license/clauseo-ai/cmx2?style=flat-square&labelColor=1b1546&color=5a43d6" alt="license: mit"></a>
 <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/status-pre--1.0-5a43d6?style=flat-square&labelColor=1b1546" alt="status: pre-1.0"></a>
-<img src="https://img.shields.io/badge/platform-macos%20%7C%20linux-5a43d6?style=flat-square&labelColor=1b1546" alt="platform: macos and linux">
+<img src="https://img.shields.io/badge/platform-macos%20%7C%20linux%20%7C%20windows-5a43d6?style=flat-square&labelColor=1b1546" alt="platform: macos, linux and windows">
 
 <a href="#how-it-works">how it works</a> &nbsp;·&nbsp;
 <a href="#quickstart">quickstart</a> &nbsp;·&nbsp;
@@ -70,7 +70,7 @@ one daemon runs per machine and owns every session on it. clients send http requ
 
 ## quickstart
 
-prerequisites: macos or linux (arm64 or x64), [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) on your `PATH`, git, and an [anthropic api key](https://console.anthropic.com/) (google and openai-compatible endpoints work too, see the [quickstart](docs/quickstart.md)). to build from source you also need [bun](https://bun.sh) 1.3.14.
+prerequisites: macos, linux or windows 11 (arm64 or x64; windows setup is in [docs/windows.md](docs/windows.md)), [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) on your `PATH`, git, and an [anthropic api key](https://console.anthropic.com/) (google and openai-compatible endpoints work too, see the [quickstart](docs/quickstart.md)). to build from source you also need [bun](https://bun.sh) 1.4.3.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/clauseo-ai/cmx2/main/scripts/install.sh | sh
@@ -110,7 +110,7 @@ bun run dev                     # or run the daemon straight from source on 127.
 | command | what it does |
 |---|---|
 | `cmx2 doctor` | what is wrong on this machine, in plain words |
-| `cmx2 serve --install` | keep the daemon running as a login service (launchd on macos, systemd on linux) |
+| `cmx2 serve --install` | keep the daemon running as a login service (launchd on macos, systemd on linux, task scheduler on windows) |
 | `cmx2 pair` | print a url and a one-time token for a client such as boxbox |
 | `cmx2 run "<prompt>"` | one prompt, headless. `--session <id>` continues an earlier session |
 | `cmx2 session list` | what you have done so far |

@@ -13,7 +13,7 @@ cmx2 is one daemon per machine. the daemon owns every agent session on that mach
 </picture>
 </p>
 
-`cmx2 run` and a plain `cmx2` talk http to the running daemon. when none is up they start one on loopback inside their own process, so you do not have to start anything first. `cmx2 serve --install` makes the daemon a login service, so it stays up. it binds 127.0.0.1 unless you pass `--hostname`.
+`cmx2 run` and a plain `cmx2` talk http to the running daemon. when none is up they start one on loopback inside their own process, so you do not have to start anything first. `cmx2 serve --install` makes the daemon a login service (a launchd agent on macos, a systemd user unit on linux, a task scheduler logon task on windows), so it stays up. it binds 127.0.0.1 unless you pass `--hostname`.
 
 ## how the pieces split
 
@@ -26,7 +26,7 @@ cmx2 is one daemon per machine. the daemon owns every agent session on that mach
 | path | what it holds |
 |---|---|
 | `packages/` | the bun workspace, one folder per package (below) |
-| `docs/` | user docs: quickstart, tui, permissions, agents, routing, and this file |
+| `docs/` | user docs: quickstart, windows, tui, permissions, agents, routing, and this file |
 | `docs/engineering/` | design docs for contributors: goals, architecture rules, decisions, gotchas |
 | `examples/` | sample config: a profile, a routing table, a permission preset, launchd and systemd service files |
 | `scripts/` | `build.ts` (single-file binaries), `install.sh` (the installer), `check-public.sh` (a pre-publish check) |
@@ -51,6 +51,7 @@ each package is `@cmx2/<name>` in the workspace.
 | `store` | sqlite schema, migrations, message projection from transcripts, session export and import, and the read-only archive of imported history. |
 | `prompts` | the system prompt text per model family (anthropic, gemini, openai and a default), as plain markdown files. the explore and review agent types are defined in `packages/actors/src/actors.ts`. |
 | `tui` | the terminal client, built on pi's terminal ui library. |
+| `platform` | what differs between macos, linux and windows: the bash commands run in (git for windows' bash on windows), process trees (process groups, or job objects on windows), process start times and listening ports (lsof, or netstat on windows). |
 | `eval` | scripts that drive a real daemon against real models to measure behaviour. they cost money and are not part of `bun test`. |
 
 ## one request, end to end

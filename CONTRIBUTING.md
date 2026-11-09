@@ -4,7 +4,7 @@ cmx2 is a coding-agent daemon written in typescript on [bun](https://bun.sh). it
 
 ## prerequisites
 
-- macos or linux.
+- macos, linux or windows. on windows, git for windows (its bash runs the shell tests).
 - [bun](https://bun.sh) 1.4.3, the version CI uses.
 - git.
 - [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) on your `PATH`. the grep and glob tools run it, and some tests need it.
