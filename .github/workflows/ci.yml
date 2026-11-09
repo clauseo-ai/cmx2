@@ -71,8 +71,13 @@ jobs:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+        id: setup-bun
+        continue-on-error: true
         with:
           bun-version: 1.3.14
+      - name: bun from npm when the github release download fails
+        if: steps.setup-bun.outcome == 'failure'
+        run: npm install -g bun@1.3.14
       - name: what the binary needs on the machine (ripgrep, a git identity)
         run: |
           choco install ripgrep -y --no-progress
