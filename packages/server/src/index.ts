@@ -249,7 +249,8 @@ function samePassword(given: string, want: string): boolean {
 
 function real(p: string): string {
 	try {
-		return realpathSync(p);
+		// windows: realpathSync keeps 8.3 short names (RUNNER~1); the native one gives the long form realpath() does
+		return IS_WINDOWS ? realpathSync.native(p) : realpathSync(p);
 	} catch {
 		return p;
 	}
@@ -267,6 +268,8 @@ async function realAsync(p: string): Promise<string> {
 export function serve(opts: ServeOptions) {
 	const data = opts.dataDir ?? defaultDataDir();
 	const store = new Store(join(data, "cmx2.db"));
+	/** set by stop just before the store closes */
+	let storeClosed = false;
 	// imports that stopped part way (a crash, a killed cli): their marked rows, markers and temp files; nothing unmarked
 	const unfinished = sweepImports(store, data);
 	if (unfinished.length) console.error(`cmx2: cleared ${unfinished.length} unfinished import(s): ${unfinished.join(", ")}`);
@@ -778,6 +781,8 @@ export function serve(opts: ServeOptions) {
 	}
 
 	function publish<T extends EventType>(directory: string, type: T, properties: Record<string, unknown>, how?: { unlogged?: true; rev?: number }) {
+		// a timer that outlived stop (a provider retry's wait) has nowhere to log to
+		if (storeClosed) return;
 		if (opts.checkEvents) {
 			const def = EVENTS[type];
 			if (!def) {
@@ -3951,6 +3956,7 @@ export function serve(opts: ServeOptions) {
 		for (const s of [...subscribers]) s.close();
 		await Bun.sleep(50);
 		await server.stop();
+		storeClosed = true;
 		store.close();
 	}
 	return { server, stop, store, sessions, procs, actors, routing, handle, violations: () => violations, healed: () => healed, idleSince: idleSince as ReadonlyMap<string, number> };
