@@ -11,9 +11,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-      - name: what the tests need on the machine (ripgrep, a git identity)
+      - name: what the tests need on the machine (ripgrep, imagemagick, a git identity)
         run: |
-          sudo apt-get install -y ripgrep
+          sudo apt-get install -y ripgrep imagemagick
           git config --global user.name ci
           git config --global user.email ci@example.invalid
       - run: bun install --frozen-lockfile
@@ -30,8 +30,13 @@ jobs:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+        id: setup-bun
+        continue-on-error: true
         with:
           bun-version: 1.3.14
+      - name: bun from npm when the github release download fails (it has answered 504 on windows runners)
+        if: steps.setup-bun.outcome == 'failure'
+        run: npm install -g bun@1.3.14
       - name: what the tests need on the machine (ripgrep, a git identity)
         run: |
           choco install ripgrep -y --no-progress
