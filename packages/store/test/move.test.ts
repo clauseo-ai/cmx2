@@ -69,7 +69,8 @@ test.skipIf(process.platform === "win32")("an import onto another machine writes
 	t.close();
 });
 
-test("an export with no origin (from before 0.9.6) imports with no move", async () => {
+// reads the session the test above made, which windows skips
+test.skipIf(process.platform === "win32")("an export with no origin (from before 0.9.6) imports with no move", async () => {
 	const s = new Store(join(dir, "data-a", "cmx2.db"), { archivePath: null });
 	const e = exportSession(s, "ses_move0001aaaaaaaaaaaa");
 	s.close();

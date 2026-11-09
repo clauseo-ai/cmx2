@@ -111,7 +111,7 @@ export function bashEnv(): Record<string, string> {
 /** on windows a command reaches bash in this env var, not on the command line */
 export const COMMAND_VAR = "CMX2_COMMAND";
 /** what windows' bash runs: the command from the env var, the var unset first so the command's children do not inherit it */
-const WINDOWS_WRAPPER = `eval "unset ${COMMAND_VAR}; ${COMMAND_VAR}"`;
+export const WINDOWS_WRAPPER = `eval "unset ${COMMAND_VAR}; $${COMMAND_VAR}"`;
 
 /**
  * argv and env that run one command line in bash: `bash -c <command>` (`-lc` with login) and `env` plus bashEnv().

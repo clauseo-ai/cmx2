@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compiledRoot, findGitBash, gitRootOf, parseNetstat, pidAlive, processStartMs, startStamp } from "../src/index.ts";
+import { COMMAND_VAR, WINDOWS_WRAPPER, compiledRoot, findGitBash, gitRootOf, parseNetstat, pidAlive, processStartMs, startStamp } from "../src/index.ts";
 
 describe("compiledRoot", () => {
 	test("names the virtual root of a binary on each platform, and nothing for source", () => {
@@ -81,5 +81,16 @@ describe("process start times", () => {
 		await child.exited;
 		expect(pidAlive(child.pid)).toBe(false);
 		expect(startStamp(child.pid)).toBeUndefined();
+	});
+});
+
+describe("the windows command wrapper", () => {
+	// windows runs every command as bash -c WINDOWS_WRAPPER with the command in COMMAND_VAR; any bash runs it the same way
+	test.skipIf(process.platform === "win32")("runs the command from the env var, byte for byte, with the var gone", () => {
+		const command = 'printf "%s|" "${CMX2_COMMAND-unset}" \'a\\\\b "c"\' "$((1 + 2))"; exit 4';
+		const r = Bun.spawnSync(["bash", "-c", WINDOWS_WRAPPER], { env: { ...process.env, [COMMAND_VAR]: command } });
+		expect(r.stdout.toString()).toBe('unset|a\\\\b "c"|3|');
+		expect(r.exitCode).toBe(4);
+		expect(WINDOWS_WRAPPER).not.toContain("\\");
 	});
 });
