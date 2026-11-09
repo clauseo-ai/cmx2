@@ -43,7 +43,8 @@ jobs:
           git config --global user.name ci
           git config --global user.email ci@example.invalid
       - run: bun install --frozen-lockfile
-      - run: bunx tsc --noEmit -p .
+      # bun run, not bunx: the bunx an npm-installed bun leaves on windows does not start
+      - run: bun run typecheck
       # one step per package, each run even when an earlier one failed, so a failure names its area
       - { name: "test platform", if: "!cancelled()", run: bun test packages/platform }
       - { name: "test tools", if: "!cancelled()", run: bun test packages/tools }
