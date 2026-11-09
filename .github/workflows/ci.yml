@@ -1,12 +1,10 @@
 name: ci
 on:
   push:
-    branches: [main, "win/**"]
+    branches: [main]
   pull_request:
 jobs:
   check:
-    # skipped on the win/** work branches while the port is in progress (runners are scarce); the pr runs it
-    if: github.event_name != 'push' || !startsWith(github.ref_name, 'win/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
