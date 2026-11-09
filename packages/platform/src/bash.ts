@@ -116,9 +116,8 @@ export const WINDOWS_WRAPPER = `eval "unset ${COMMAND_VAR}; $${COMMAND_VAR}"`;
 /**
  * argv and env that run one command line in bash: `bash -c <command>` (`-lc` with login) and `env` plus bashEnv().
  * windows passes the command in COMMAND_VAR instead. bun quotes argv for windows' parser, and the msys runtime
- * that starts git's bash reads its command line by other rules: it folds a doubled backslash into one, and it
- * globs and unquotes words the windows quoting left bare. an env var arrives byte for byte, so the command line
- * holds only a fixed wrapper, which has no backslash in it
+ * that starts git's bash reads its command line by other rules: it folds a doubled backslash into one. an env
+ * var arrives byte for byte, so the command line holds only a fixed wrapper, which has no backslash in it
  */
 export function bashCommand(command: string, o: { login?: boolean; env?: Record<string, string | undefined> } = {}): { argv: string[]; env: Record<string, string | undefined> } {
 	const env = { ...(o.env ?? process.env), ...bashEnv() };
