@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { IS_WINDOWS } from "@cmx2/platform";
 
 /**
  * permission rules, wire- and config-compatible with cmx: `{permission, pattern, action}` entries,
@@ -36,8 +37,8 @@ const ALIASES: Record<string, string> = { bash: "shell" };
 
 function expandHome(p: string): string {
 	if (p === "~" || p === "$HOME") return homedir();
-	if (p.startsWith("~/")) return homedir() + p.slice(1);
-	if (p.startsWith("$HOME/")) return homedir() + p.slice(5);
+	if (p.startsWith("~/") || (IS_WINDOWS && p.startsWith("~\\"))) return homedir() + p.slice(1);
+	if (p.startsWith("$HOME/") || (IS_WINDOWS && p.startsWith("$HOME\\"))) return homedir() + p.slice(5);
 	return p;
 }
 
@@ -55,9 +56,13 @@ export function rulesFromConfig(c: PermissionConfig | undefined): PermissionRule
 
 const compiled = new Map<string, RegExp>();
 
-/** `*` is any run of characters, `?` one character; a trailing ` *` also matches the bare command */
-export function wildcardMatch(value: string, pattern: string): boolean {
-	let re = compiled.get(pattern);
+/**
+ * `*` is any run of characters, `?` one character; a trailing ` *` also matches the bare command. backslashes
+ * read as `/` on both sides. caseless is for paths on windows, where C:\Work and c:\work are one directory
+ */
+export function wildcardMatch(value: string, pattern: string, caseless = false): boolean {
+	const key = caseless ? `\0i${pattern}` : pattern;
+	let re = compiled.get(key);
 	if (!re) {
 		let body = pattern
 			.replace(/\\/g, "/")
@@ -65,14 +70,18 @@ export function wildcardMatch(value: string, pattern: string): boolean {
 			.replace(/\*/g, ".*")
 			.replace(/\?/g, ".");
 		if (body.endsWith(" .*")) body = `${body.slice(0, -3)}( .*)?`;
-		re = new RegExp(`^${body}$`, "s");
-		compiled.set(pattern, re);
+		re = new RegExp(`^${body}$`, caseless ? "si" : "s");
+		compiled.set(key, re);
 	}
 	return re.test(value.replace(/\\/g, "/"));
 }
 
+/** the permissions whose patterns are paths */
+const PATH_PERMISSIONS = new Set(["read", "edit", "grep", "glob", "lsp", "external_directory"]);
+
 export function evaluate(rules: PermissionRule[], permission: string, pattern: string): PermissionRule {
-	const match = rules.findLast((r) => wildcardMatch(permission, r.permission) && wildcardMatch(pattern, r.pattern));
+	const caseless = IS_WINDOWS && PATH_PERMISSIONS.has(permission);
+	const match = rules.findLast((r) => wildcardMatch(permission, r.permission) && wildcardMatch(pattern, r.pattern, caseless));
 	return match ?? { permission, pattern: "*", action: "ask" };
 }
 
@@ -82,6 +91,11 @@ export interface PermissionCheck {
 	patterns: string[];
 	always: string[];
 	metadata: Record<string, unknown>;
+}
+
+/** the pattern for everything under a directory: `/a/b/*`; on windows `C:\a\b\*`, and `C:\*` for a drive's root */
+function under(dir: string): string {
+	return IS_WINDOWS ? `${dir.replace(/[\\/]+$/, "")}\\*` : `${dir}/*`;
 }
 
 function within(cwd: string, p: string): boolean {
@@ -258,7 +272,7 @@ export function checksFor(tool: string, args: any, cwd: string): PermissionCheck
 		if (!inside) {
 			const out = within(cwd, abs) ? target : abs;
 			const dir = tool === "glob" || tool === "grep" ? out : dirname(out);
-			checks.push({ permission: "external_directory", patterns: [`${dir}/*`], always: [`${dir}/*`], metadata: { path: abs, directory: dir } });
+			checks.push({ permission: "external_directory", patterns: [under(dir)], always: [under(dir)], metadata: { path: abs, directory: dir } });
 		}
 	};
 	const shellCheck = (command: string, metadata: Record<string, unknown> = {}) => {
@@ -306,7 +320,7 @@ export function checksFor(tool: string, args: any, cwd: string): PermissionCheck
 			shellCheck(withEnv(String(args?.command ?? ""), args?.env), { ...(args?.tty ? { tty: true } : {}), ...(args?.keep ? { keep: args.keep } : {}) });
 			if (args?.cwd) {
 				const abs = resolve(cwd, expandHome(String(args.cwd)));
-				if (!within(cwd, abs)) checks.push({ permission: "external_directory", patterns: [`${abs}/*`], always: [`${abs}/*`], metadata: { path: abs, directory: abs } });
+				if (!within(cwd, abs)) checks.push({ permission: "external_directory", patterns: [under(abs)], always: [under(abs)], metadata: { path: abs, directory: abs } });
 			}
 			break;
 		}

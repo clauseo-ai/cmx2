@@ -229,7 +229,8 @@ describe("the spawn verb takes a model", () => {
 		expect(prefix.bytes).not.toContain("seat");
 		// the profile's AGENTS.md ends the prompt of the session the user started, trimmed and wrapped, and of no helper
 		const rootPrefix = (await api(`/session/${id}/prefix`)).bytes as string;
-		expect(rootPrefix).toContain(`notes from the user for every session they start, kept in ${join(CONFIG, "AGENTS.md")}:\\n\\n<user_notes>\\n${NOTES}\\n</user_notes>`);
+		// the prefix is json, so a windows path's backslashes read doubled
+		expect(rootPrefix).toContain(`notes from the user for every session they start, kept in ${JSON.stringify(join(CONFIG, "AGENTS.md")).slice(1, -1)}:\\n\\n<user_notes>\\n${NOTES}\\n</user_notes>`);
 		for (const helper of [rev, look]) expect((await api(`/session/${helper.id}/prefix`)).bytes).not.toContain("user_notes");
 	}, 90_000);
 });

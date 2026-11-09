@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Routing } from "@cmx2/routing";
 import { type AgentRow, Store } from "@cmx2/store";
 import { Actors, type Host } from "../src/actors.ts";
@@ -196,7 +196,8 @@ test("the read-only and review fragments say the final reply is the deliverable 
 });
 test("the report rules: * crosses /, so an edit to any report file is denied and a tree reads its own reports without an ask", () => {
 	// the same two rules the daemon appends after the saved ones (server/index.ts, reportRules)
-	const reportsDir = "/data/reports";
+	// absolute on this platform: D:\data\reports on windows, which the rules join with / as the daemon does
+	const reportsDir = resolve("/data/reports");
 	const rules: PermissionRule[] = [
 		...rulesFromConfig(DEFAULT_PERMISSION),
 		{ permission: "external_directory", pattern: `${reportsDir}/ses_root/*`, action: "allow" },

@@ -5,12 +5,15 @@
  *
  * run: bun test packages/server/test/stamp.test.ts
  */
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { DEFAULTS } from "@cmx2/engine/config";
 import { nonce, port } from "../../eval/src/harness.ts";
 import { serve } from "../src/index.ts";
+
+// windows starts git, cmd.exe and a daemon slower than bun's 5 s default allows for these
+if (process.platform === "win32") setDefaultTimeout(30_000);
 
 const ROOT = realpathSync(mkdtempSync("/tmp/cmx2-stamp-"));
 const FAST = join(ROOT, "fastrepo");
@@ -20,8 +23,17 @@ const SHIM = join(ROOT, "bin");
 const realGit = Bun.which("git")!;
 mkdirSync(SHIM, { recursive: true });
 // the stand-in: git status in the slow repository takes 1.5 s, in the hung one 60 s; everything else is git
-writeFileSync(join(SHIM, "git"), `#!/bin/sh\nfor a in "$@"; do case "$a" in "${SLOW}") sleep 1.5;; "${HUNG}") sleep 60;; esac; done\nexec "${realGit}" "$@"\n`);
-chmodSync(join(SHIM, "git"), 0o755);
+// windows runs a .cmd found on PATH; ping is its sleep (about a second per count after the first). findstr reads a
+// backslash as an escape, so it looks for the repositories' names, which no other path here has
+if (process.platform === "win32") {
+	writeFileSync(
+		join(SHIM, "git.cmd"),
+		`@echo off\r\necho %* | findstr /C:"slowrepo" >nul && ping -n 3 127.0.0.1 >nul\r\necho %* | findstr /C:"hungrepo" >nul && ping -n 61 127.0.0.1 >nul\r\n"${realGit}" %*\r\n`,
+	);
+} else {
+	writeFileSync(join(SHIM, "git"), `#!/bin/sh\nfor a in "$@"; do case "$a" in "${SLOW}") sleep 1.5;; "${HUNG}") sleep 60;; esac; done\nexec "${realGit}" "$@"\n`);
+	chmodSync(join(SHIM, "git"), 0o755);
+}
 for (const d of [FAST, SLOW, HUNG]) {
 	mkdirSync(d, { recursive: true });
 	Bun.spawnSync([realGit, "init", "-q", "-b", "trunk", d]);
@@ -36,7 +48,7 @@ let d: ReturnType<typeof serve>;
 
 beforeAll(() => {
 	process.env.CMX2_CONFIG_DIR = CONFIG;
-	process.env.PATH = `${SHIM}:${PATH_BEFORE}`;
+	process.env.PATH = `${SHIM}${delimiter}${PATH_BEFORE}`;
 	const c = { ...structuredClone(DEFAULTS), providers: { anthropic: { baseUrl: "http://127.0.0.1:9", apiKey: "unused" } }, sources: [] };
 	d = serve({ config: c, port: PORT, hostname: "127.0.0.1", dataDir: join(ROOT, "data"), checkEvents: true, reload: () => c, vcs: { freshMs: 400, timeoutMs: 3_000, unknownMs: 2_000 } });
 });
