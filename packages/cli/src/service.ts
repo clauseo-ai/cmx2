@@ -1,7 +1,7 @@
 import { authHeaders } from "./daemon.ts";
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, posix, resolve } from "node:path";
 import { dataDir, loadConfig } from "@cmx2/engine/config";
 import { killTree, pidAlive } from "@cmx2/platform";
 import { compareVersions, compiled, installedBinary } from "./release.ts";
@@ -92,9 +92,9 @@ ${env}
 	<key>ProcessType</key>
 	<string>Interactive</string>
 	<key>StandardOutPath</key>
-	<string>${xml(join(u.logDir, "serve.log"))}</string>
+	<string>${xml(posix.join(u.logDir, "serve.log"))}</string>
 	<key>StandardErrorPath</key>
-	<string>${xml(join(u.logDir, "serve.log"))}</string>
+	<string>${xml(posix.join(u.logDir, "serve.log"))}</string>
 </dict>
 </plist>
 `;
@@ -123,8 +123,8 @@ ${env}
 EnvironmentFile=-${u.envFile}
 Restart=always
 RestartSec=2
-StandardOutput=append:${join(u.logDir, "serve.log")}
-StandardError=append:${join(u.logDir, "serve.log")}
+StandardOutput=append:${posix.join(u.logDir, "serve.log")}
+StandardError=append:${posix.join(u.logDir, "serve.log")}
 
 [Install]
 WantedBy=default.target
