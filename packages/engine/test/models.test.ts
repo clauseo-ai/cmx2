@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { calculateCost } from "@earendil-works/pi-ai";
 import type { Usage } from "@earendil-works/pi-ai";
 import { loadConfig } from "../src/config.ts";
-import { listModels, resolveModel } from "../src/models.ts";
+import { listModels, resolveModel, resolveSecret } from "../src/models.ts";
 
 const config = () => loadConfig({ env: { CMX2_CONFIG_DIR: mkdtempSync(join(tmpdir(), "cmx2-models-")), ANTHROPIC_API_KEY: "test" } });
 
@@ -124,4 +124,15 @@ test("the overlay builds new records: pi's own catalog entry for sonnet is not c
 
 test("a model neither pi nor the overlay knows is still refused", async () => {
 	await expect(resolveModel(config(), "anthropic/claude-haiku-9-9")).rejects.toThrow(/not in pi's catalog/);
+});
+
+test("a key from a command is its trimmed stdout; a failed command is no key; on windows it runs in git's bash", () => {
+	expect(resolveSecret("!echo '  sk-from-a-command  '")).toBe("sk-from-a-command");
+	expect(resolveSecret("!exit 3")).toBeUndefined();
+	expect(resolveSecret("!true")).toBeUndefined();
+	expect(resolveSecret("literal")).toBe("literal");
+	// git for windows' bash says msys or cygwin; the wsl launcher would say linux-gnu
+	if (process.platform === "win32") expect(resolveSecret('!printf %s "$OSTYPE"')).toMatch(/^(msys|cygwin)$/);
+	// a doubled backslash reaches the command as written (git bash folds it on a command line)
+	expect(resolveSecret("!printf '%s' 'a\\\\b'")).toBe("a\\\\b");
 });

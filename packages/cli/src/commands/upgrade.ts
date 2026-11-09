@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { VERSION } from "@cmx2/server";
-import { assetName, compareVersions, compiled, fetchBytes, installedBinary, releaseBase, sha256, sumFor } from "../release.ts";
-import { binaryVersion, keepLink, linkNotes, placeBinary, restartCommand, restartService, same, serviceState } from "../service.ts";
+import { assetName, binaryName, compareVersions, compiled, fetchBytes, installedBinary, releaseBase, sha256, sumFor } from "../release.ts";
+import { binaryVersion, keepLink, linkNotes, placeBinary, removeOld, restartCommand, restartService, same, serviceState } from "../service.ts";
 import { signLine } from "../signing.ts";
 import { fail } from "../util.ts";
 
@@ -18,9 +18,11 @@ whose sum does not match, checks the new binary runs, then replaces the installe
 (~/.local/share/cmx2/bin/cmx2 when cmx2 serve --install set one up, else the binary you ran), and keeps
 the cmx2 link in ~/.local/bin (or $CMX2_INSTALL_DIR) pointing at it. when the
 service is installed it restarts it; turns running at that moment stop, sessions stay.
+on windows the running cmx2.exe is renamed to cmx2.exe.old-<time> and removed once nothing runs it.
 
   --version v     a specific release instead of the latest
-  --from x        a url or a directory laid out like a release (cmx2-<os>-<arch> and SHA256SUMS);
+  --from x        a url or a directory laid out like a release (cmx2-<os>-<arch>, .exe on windows, and
+                  SHA256SUMS), such as the one bun scripts/build.ts --all --out <dir> makes;
                   $CMX2_RELEASE_BASE does the same
   --force         install even when it is the version you have, or older
   --no-restart    replace the binary only and print the restart command`;
@@ -32,7 +34,8 @@ service is installed it restarts it; turns running at that moment stop, sessions
  * the copy it deletes (the release was compared with the copy that runs, not with the service's binary)
  */
 function relink(target: string, installed: string, o: { already: boolean }) {
-	if (target !== installed) return;
+	// windows has no link: install put the binary's directory on the user's PATH, and the path did not change
+	if (target !== installed || process.platform === "win32") return;
 	const have = binaryVersion(installed);
 	const current = have !== undefined && compareVersions(have, VERSION) >= 0;
 	if (!current && o.already) {
@@ -78,10 +81,10 @@ export async function main(args: string[]) {
 
 	// the new binary has to run before it replaces anything, and it names its own version
 	const dir = mkdtempSync(join(tmpdir(), "cmx2-upgrade-"));
-	const fresh = join(dir, "cmx2");
+	const fresh = join(dir, binaryName());
 	try {
 		writeFileSync(fresh, bytes);
-		chmodSync(fresh, 0o755);
+		if (process.platform !== "win32") chmodSync(fresh, 0o755);
 		const p = Bun.spawnSync([fresh, "--version"], { stdout: "pipe", stderr: "pipe", timeout: 30_000 });
 		const version = p.stdout.toString().trim();
 		if (p.exitCode !== 0 || !/^\d+\.\d+\.\d+/.test(version)) fail(`the downloaded binary did not run (${p.stderr.toString().trim().slice(0, 200) || `exit ${p.exitCode}`}); nothing was replaced`);
@@ -99,14 +102,22 @@ export async function main(args: string[]) {
 		if (signNote) console.log(signNote);
 		relink(target, installed, { already: false });
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		// best effort: on windows a virus scanner can hold the file it just read for a moment
+		try {
+			rmSync(dir, { recursive: true, force: true });
+		} catch {}
 	}
 
-	const s = serviceState();
+	const s = await serviceState();
 	if (!s.installed) return console.log("no service installed, so nothing to restart");
 	if (s.binary && s.binary !== target) console.log(`note: the service runs ${s.binary}, not ${target}. cmx2 serve --install points it at the copy`);
 	if (values["no-restart"]) return console.log(`the service still runs the old binary until it restarts: ${restartCommand()}`);
-	const r = restartService();
+	const r = await restartService();
 	if (!r.ok) fail(`the binary is replaced but the restart failed: ${r.out}. run ${restartCommand()}`);
-	console.log(`restarted the service (${restartCommand()})`);
+	if (process.platform === "win32") {
+		console.log(`restarted the service: ${r.out}`);
+		// the old exe goes once the daemon let go of it; the supervisor keeps its own until the task restarts
+		const left = removeOld(target);
+		if (left.length) console.log(`${left.join(", ")} still runs (the supervisor started from it) and goes at the next upgrade or logon`);
+	} else console.log(`restarted the service (${restartCommand()})`);
 }

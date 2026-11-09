@@ -1,0 +1,16 @@
+{
+  "name": "@cmx2/platform",
+  "version": "0.0.0",
+  "description": "what differs between macos, linux and windows for cmx2: the bash commands run in, process trees, process start times",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clauseo-ai/cmx2.git",
+    "directory": "packages/platform"
+  },
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

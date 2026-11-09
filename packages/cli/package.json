@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@cmx2/engine": "workspace:*",
+    "@cmx2/platform": "workspace:*",
     "@cmx2/routing": "workspace:*",
     "@cmx2/server": "workspace:*",
     "@cmx2/store": "workspace:*",

@@ -88,7 +88,8 @@ export class Pairing {
 
 	private write(n: "credentials" | "pending", rows: unknown[]) {
 		mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-		// mkdir's mode applies only when it creates the directory
+		// mkdir's mode applies only when it creates the directory. on windows these modes do nothing (ntfs has no
+		// mode bits): what keeps the files to their owner there is the user profile's acl, which the data dir sits in
 		chmodSync(this.dir, 0o700);
 		const tmp = `${this.path(n)}.${process.pid}.tmp`;
 		writeFileSync(tmp, `${JSON.stringify(rows, null, 1)}\n`, { mode: 0o600 });
@@ -124,6 +125,7 @@ export class Pairing {
 		this.write("credentials", [...rest, { id: `cred_${randomBytes(6).toString("hex")}`, name: "this machine", hash: sha(token), created_at: Date.now(), local: true } satisfies Credential]);
 		mkdirSync(this.dir, { recursive: true, mode: 0o700 });
 		writeFileSync(file, `${token}\n`, { mode: 0o600 });
+		// a no-op on windows; the profile's acl protects the token there (see write)
 		chmodSync(file, 0o600);
 		return token;
 	}

@@ -71,7 +71,8 @@ async function resume(cursor: number, which = id): Promise<{ text: string; meta:
 	return { text, meta };
 }
 
-test("a14: a cursor in output no longer kept replays the whole retained tail, then the meta frame", async () => {
+// terminals need bun's pty, which is posix only; on windows POST /pty answers 501 (boxbox.test.ts)
+test.skipIf(process.platform === "win32")("a14: a cursor in output no longer kept replays the whole retained tail, then the meta frame", async () => {
 	expect(FULL.length).toBeGreaterThan(HEAD + TAIL);
 	const whole = await resume(0);
 	// the terminal's own output, as kept: the head, then the tail after the gap
@@ -94,7 +95,7 @@ test("a14: a cursor in output no longer kept replays the whole retained tail, th
 	expect((await resume(late)).text).toBe(FULL.slice(late));
 }, 60_000);
 
-test("a14: the same on a terminal still running", async () => {
+test.skipIf(process.platform === "win32")("a14: the same on a terminal still running", async () => {
 	await Bun.sleep(1500);
 	const r = await resume(200_000, live);
 	// a running terminal may add bytes of its own after the script's lines; what comes back is the retained tail

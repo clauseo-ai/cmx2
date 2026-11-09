@@ -31,7 +31,7 @@ test("an m1 database (schema version 3) upgrades in place and keeps its rows", (
 test("processes opening one fresh database at once migrate it exactly once", async () => {
 	const path = join(mkdtempSync(join(tmpdir(), "cmx2-store-")), "cmx2.db");
 	const code = `import { Store } from ${JSON.stringify(join(import.meta.dir, "../src/index.ts"))}; const s = new Store(${JSON.stringify(path)}); console.log(s.version); s.close();`;
-	const procs = Array.from({ length: 4 }, () => Bun.spawn(["bun", "-e", code], { stdout: "pipe", stderr: "pipe" }));
+	const procs = Array.from({ length: 4 }, () => Bun.spawn([process.execPath, "-e", code], { stdout: "pipe", stderr: "pipe" }));
 	const results = await Promise.all(procs.map(async (p) => ({ code: await p.exited, out: (await new Response(p.stdout).text()).trim(), err: await new Response(p.stderr).text() })));
 	for (const r of results) {
 		expect(r.err).toBe("");

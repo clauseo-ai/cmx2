@@ -8,7 +8,7 @@ import { copyFileSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resizeImage, sniffImage } from "@cmx2/tools";
-import { blocksOf, type Resize } from "../src/parts.ts";
+import { blocksOf, type Resize, windowsFileUrlPath } from "../src/parts.ts";
 
 const PHOTO = join(import.meta.dir, "fixtures/photo.heic");
 const bytes = new Uint8Array(readFileSync(PHOTO));
@@ -125,4 +125,12 @@ readable("through the real resize an untyped file: heic becomes a jpeg block", a
 	const blocks = await blocksOf({ parts: [{ type: "file", filename: "IMG_0001.HEIC", url: `file://${join(cwd, "IMG_0001.HEIC")}` }] }, cwd, real);
 	expect(blocks).toMatchObject([{ type: "image", mimeType: "image/jpeg" }]);
 	expect(sniffImage(new Uint8Array(Buffer.from((blocks[0] as { data: string }).data, "base64")))).toBe("image/jpeg");
+});
+
+test("windows file urls: the standard form, and the forms clients build by hand from a windows path", () => {
+	expect(windowsFileUrlPath("file:///C:/Users/a/x.png")).toBe("C:\\Users\\a\\x.png");
+	expect(windowsFileUrlPath("file://C:\\Users\\a\\x.png")).toBe("C:\\Users\\a\\x.png");
+	expect(windowsFileUrlPath(`file://${encodeURI("C:\\Users\\a\\my x.png")}`)).toBe("C:\\Users\\a\\my x.png");
+	expect(windowsFileUrlPath("file://localhost/c:/a/../b")).toBe("c:\\b");
+	expect(windowsFileUrlPath("file://server/share/x.txt")).toBe("\\\\server\\share\\x.txt");
 });

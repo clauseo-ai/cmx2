@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { bashCommand, IS_WINDOWS } from "@cmx2/platform";
 import type { Api, AssistantMessageEventStream, Model, SimpleStreamOptions, TranscriptContext } from "@earendil-works/pi-ai";
 import type { Config, ProviderApi, ProviderOverride } from "./config.ts";
 
@@ -91,11 +92,22 @@ export async function resolveModel(config: Config, ref: string): Promise<Model<A
 	return { ...known, ...(o.baseUrl ? { baseUrl: o.baseUrl } : {}), ...(o.headers ? { headers: { ...known.headers, ...o.headers } } : {}) };
 }
 
-/** a key as the profile writes it: a literal, `$ENV` or `!command` whose stdout is the key */
+/**
+ * a key as the profile writes it: a literal, `$ENV` or `!command` whose stdout is the key. the command runs in
+ * `sh` off windows and in git for windows' bash on windows, the bash every other command there runs in; a
+ * machine with no git bash has no key from a command
+ */
 export function resolveSecret(v: string | undefined): string | undefined {
 	if (v?.startsWith("$")) return process.env[v.slice(1).replace(/^\{|\}$/g, "")];
 	if (v?.startsWith("!")) {
-		const r = spawnSync("sh", ["-c", v.slice(1)], { encoding: "utf8", timeout: 10_000 });
+		let run: { argv: string[]; env?: Record<string, string | undefined> };
+		try {
+			run = IS_WINDOWS ? bashCommand(v.slice(1)) : { argv: ["sh", "-c", v.slice(1)] };
+		} catch (e) {
+			console.error(`cmx2: a key from a command needs a bash: ${e instanceof Error ? e.message : String(e)}`);
+			return undefined;
+		}
+		const r = spawnSync(run.argv[0]!, run.argv.slice(1), { encoding: "utf8", timeout: 10_000, ...(IS_WINDOWS ? { env: run.env, windowsHide: true } : {}) });
 		return r.status === 0 ? r.stdout.trim() || undefined : undefined;
 	}
 	return v || undefined;

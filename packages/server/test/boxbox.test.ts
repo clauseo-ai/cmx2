@@ -24,7 +24,8 @@ if (!/utf-?8/i.test(process.env.LC_ALL || process.env.LANG || "")) {
 	process.env.LANG = "C.UTF-8";
 }
 
-const root = realpathSync(mkdtempSync(join(tmpdir(), "cmx2-boxbox-")));
+// native: windows' temp dir is an 8.3 short name (RUNNER~1) that only the native realpath expands, as the daemon does
+const root = realpathSync.native(mkdtempSync(join(tmpdir(), "cmx2-boxbox-")));
 const work = join(root, "proj");
 mkdirSync(join(work, "src"), { recursive: true });
 mkdirSync(join(work, ".cmx2", "command"), { recursive: true });
@@ -283,6 +284,14 @@ test("pending items and replies (reconcile on reconnect)", async () => {
 
 test("pocket terminal: list, shells, create, resize, connect with a cursor, delete", async () => {
 	expect(Array.isArray((await call("GET", "/pty")).json)).toBe(true);
+	if (process.platform === "win32") {
+		// bun's pty is posix only: windows lists no shells and a terminal request is a clear 501, not a crash
+		expect((await call("GET", "/pty/shells")).json).toEqual([]);
+		const refused = await call("POST", "/pty", { origin: "tui", cwd: work });
+		expect(refused.status).toBe(501);
+		expect(refused.json).toMatchObject({ name: "NotSupportedError", data: { message: "terminals are not available on windows yet; run the command without tty (as a plain job or in the foreground)" } });
+		return;
+	}
 	expect((await call("GET", "/pty/shells")).json.length).toBeGreaterThan(0);
 	const pty = (await call("POST", "/pty", { origin: "tui", cwd: work })).json;
 	expect(pty).toMatchObject({ status: "running", origin: "tui", cwd: work });

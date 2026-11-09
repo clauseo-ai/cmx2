@@ -2,7 +2,8 @@ import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { IS_WINDOWS } from "@cmx2/platform";
 import { badRequest } from "./http.ts";
 
 /**
@@ -15,8 +16,9 @@ export async function browse(raw: string | undefined, showHidden: boolean) {
 	const home = await realpath(homedir()).catch(() => homedir());
 	let path = raw && raw !== "" ? raw : home;
 	if (path === "~") path = home;
-	else if (path.startsWith("~/")) path = join(home, path.slice(2));
-	if (!path.startsWith("/")) throw badRequest(`path must be absolute, ~ or ~/..., got ${path}`);
+	else if (path.startsWith("~/") || (IS_WINDOWS && path.startsWith("~\\"))) path = join(home, path.slice(2));
+	// windows: C:\Users, C:/Users or \\server\share; a bare \Users is on the daemon's drive
+	if (IS_WINDOWS ? !isAbsolute(path) : !path.startsWith("/")) throw badRequest(`path must be absolute, ~ or ~/..., got ${path}`);
 	path = resolve(path);
 	let st: Awaited<ReturnType<typeof stat>>;
 	try {
@@ -43,7 +45,9 @@ export async function browse(raw: string | undefined, showHidden: boolean) {
 	const entries = found
 		.filter((e): e is NonNullable<typeof e> => !!e && (showHidden || !e.hidden))
 		.sort((a, b) => Number(a.hidden) - Number(b.hidden) || a.name.localeCompare(b.name));
-	return { path, parent: path === "/" ? null : dirname(path), home, entries };
+	// the root has no parent: / here, a drive's C:\ on windows
+	const up = dirname(path);
+	return { path, parent: up === path ? null : up, home, entries };
 }
 
 const roots = new Map<string, string>();
@@ -56,7 +60,7 @@ const roots = new Map<string, string>();
 export function projectOf(directory: string): string {
 	const hit = roots.get(directory);
 	if (hit) return hit;
-	const r = spawnSync("git", ["-C", directory, ...ROOT_ARGS], { encoding: "utf8", timeout: 2000 });
+	const r = spawnSync("git", ["-C", directory, ...ROOT_ARGS], { encoding: "utf8", timeout: 2000, windowsHide: true });
 	return rootFrom(directory, r.status === 0 ? r.stdout : undefined);
 }
 
@@ -87,7 +91,7 @@ export async function projectOfAsync(directory: string): Promise<string> {
 	const hit = roots.get(directory);
 	if (hit) return hit;
 	try {
-		const p = Bun.spawn(["git", "-C", directory, ...ROOT_ARGS], { stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+		const p = Bun.spawn(["git", "-C", directory, ...ROOT_ARGS], { stdout: "pipe", stderr: "ignore", stdin: "ignore", windowsHide: true });
 		const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
 		return rootFrom(directory, code === 0 ? out : undefined);
 	} catch {

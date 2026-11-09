@@ -273,7 +273,8 @@ test("import into another folder: a fresh id with asNew, a new title, movedFrom,
 	expect(first.split(line).length - 1).toBe(1);
 	expect(first).toContain(`runtime-notice source=\\"moved\\"`);
 	// the turn context says where it runs now
-	expect(first).toContain(`cwd: ${WORK2}`);
+	// the messages are json here, so a windows path's backslashes read doubled
+	expect(first).toContain(JSON.stringify(`cwd: ${WORK2}`).slice(1, -1));
 	await turn(B, moved, "and again");
 	const second = JSON.stringify(seen.at(-1).messages);
 	expect(second.split(line).length - 1).toBe(1);

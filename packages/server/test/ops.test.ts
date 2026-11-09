@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFile
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "@cmx2/engine/config";
-import { Notifier, notifyCommand, notifyConfig } from "../src/notify.ts";
+import { Notifier, notifyCommand, notifyConfig, toastScript } from "../src/notify.ts";
 import { Pairing } from "../src/pair.ts";
 import { blacklisted, REDACTED, redactConfig, variantEffort } from "../src/profile.ts";
 import { serve } from "../src/index.ts";
@@ -46,7 +46,8 @@ test("pairing: a one-time token becomes a bearer once; after that requests need 
 	expect((await get("/global/health")).status).toBe(200);
 	const pairing = new Pairing(data);
 	const local = readFileSync(join(data, "auth", "local.token"), "utf8").trim();
-	expect(statSync(join(data, "auth", "local.token")).mode & 0o777).toBe(0o600);
+	// ntfs has no mode bits; the user profile's acl guards the file there
+	if (process.platform !== "win32") expect(statSync(join(data, "auth", "local.token")).mode & 0o777).toBe(0o600);
 	const { token } = pairing.begin();
 	const r = await fetch(`${base}/pair`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token, name: "phone" }) });
 	expect(r.status).toBe(200);
@@ -167,7 +168,7 @@ test("the desktop note: opt-in, only with nobody watching, one per session per q
 	let enabled = false;
 	let watchers = 1;
 	const sent: string[][] = [];
-	const n = new Notifier({ enabled: () => enabled, watchers: () => watchers, titleOf: () => "fix the build", send: (a) => sent.push(a) });
+	const n = new Notifier({ enabled: () => enabled, watchers: () => watchers, titleOf: () => "fix the build", send: (a) => sent.push(a), command: (note) => notifyCommand(note, "linux", () => "/usr/bin/notify-send") });
 	const ask = { sessionID: "ses_1", permission: "shell", patterns: ["rm -rf dist"] };
 	expect(n.onEvent("permission.asked", ask, 0)).toBeUndefined();
 	enabled = true;
@@ -184,6 +185,35 @@ test("the desktop note: opt-in, only with nobody watching, one per session per q
 	expect(notifyCommand(note, "linux", (c) => (c === "notify-send" ? "/usr/bin/notify-send" : undefined))).toEqual(["/usr/bin/notify-send", "--app-name=cmx2", "cmx2 · fix the build", "wants permission for shell: rm -rf dist"]);
 	expect(notifyCommand(note, "linux", () => undefined)).toBeUndefined();
 	expect(sent.length).toBe(2);
+	expect(sent[0]).toEqual(["/usr/bin/notify-send", "--app-name=cmx2", "cmx2 · fix the build", "wants permission for shell: rm -rf dist"]);
+});
+
+test("the desktop note on windows: a hidden windows powershell, and a title cannot close the script's strings", () => {
+	const ps = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+	const note = { title: "cmx2 · it's \u2019done\u2018 <b> & \"more\"", body: "asks: '); Remove-Item C:\\x; ('", group: "cmx2-ses_1" };
+	const argv = notifyCommand(note, "win32", (c) => (c === "powershell" ? ps : undefined))!;
+	expect(argv.slice(0, 6)).toEqual([ps, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand"]);
+	const script = Buffer.from(argv[6]!, "base64").toString("utf16le");
+	expect(script).toBe(toastScript(note));
+	const load = script.split("\n").find((l) => l.startsWith("$x.LoadXml("))!;
+	const inner = load.slice("$x.LoadXml('".length, -"')".length);
+	expect(inner).not.toMatch(/['\u2018\u2019\u201a\u201b]/);
+	expect(inner).toContain("it&#39;s &#8217;done&#8216; &lt;b&gt; &amp; &#34;more&#34;");
+	expect(inner).toContain("asks: &#39;); Remove-Item C:\\x; (&#39;");
+	expect(script).toContain("$t.Tag = 'cmx2-ses_1'");
+	expect(notifyCommand(note, "win32", () => undefined)).toBeUndefined();
+});
+
+// the runner has no desktop to show a toast on; what can be checked there is that the winrt types load and the xml parses
+test.skipIf(process.platform !== "win32")("on windows the toast script loads its types and builds the toast it would show", () => {
+	const note = { title: "cmx2 · it's \u2019done\u2018 <b> & \"more\"", body: "asks: '); exit 3; ('", group: "cmx2-ses_1" };
+	const script = toastScript(note).split("\n").slice(0, -1).join("\n") + "\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\n$x.GetXml()";
+	const r = Bun.spawnSync(["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], { windowsHide: true });
+	expect(r.stderr.toString()).toBe("");
+	expect(r.exitCode).toBe(0);
+	const xml = r.stdout.toString();
+	expect(xml).toContain("s \u2019done\u2018 &lt;b&gt; &amp; ");
+	expect(xml).toContain("); exit 3; (");
 });
 
 test("/init is a built-in command a project file can replace", async () => {

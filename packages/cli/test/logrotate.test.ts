@@ -20,7 +20,8 @@ test("serve.log rotates past 10 MB and keeps three older copies", () => {
 	expect(existsSync(`${log}.4`)).toBe(false);
 });
 
-test("an append-mode writer goes on at the start of the truncated file", async () => {
+// windows has no sh here, and nothing holds serve.log open for append there: the supervisor opens it for each write
+test.skipIf(process.platform === "win32")("an append-mode writer goes on at the start of the truncated file", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "cmx2-logrotate-"));
 	const log = join(dir, "serve.log");
 	// the shell's >> opens for append, as launchd and systemd's append: do

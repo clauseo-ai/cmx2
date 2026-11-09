@@ -16,6 +16,7 @@
     "./web": "./src/web.ts"
   },
   "dependencies": {
+    "@cmx2/platform": "workspace:*",
     "@earendil-works/pi-codemode": "0.99.1",
     "@earendil-works/pi-mcp": "0.99.1",
     "quickjs-wasi": "3.6.2",

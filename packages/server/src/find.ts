@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { IS_WINDOWS } from "@cmx2/platform";
 
 /**
  * `/find/file`: fuzzy paths inside a directory for the `@` picker. the file list comes from
@@ -62,7 +63,10 @@ function terminate(proc: { exitCode: number | null; kill(signal?: number | NodeJ
 	proc.exited.then(() => clearTimeout(hard));
 }
 
-const spawnRg = (cwd: string) => Bun.spawn(["rg", "--files", "--hidden", "--no-messages", "-g", "!.git"], { cwd, env: process.env, stdout: "pipe", stderr: "ignore" });
+/** paths go to clients with /, so windows asks ripgrep for them that way instead of with backslashes */
+const SLASHES = IS_WINDOWS ? ["--path-separator", "/"] : [];
+
+const spawnRg = (cwd: string) => Bun.spawn(["rg", "--files", "--hidden", "--no-messages", "-g", "!.git", ...SLASHES], { cwd, env: process.env, stdout: "pipe", stderr: "ignore", windowsHide: true });
 
 /**
  * ripgrep's file list for a directory, read as it arrives. one timer bounds the whole walk (the read
@@ -299,11 +303,11 @@ const MATCH_LINE_CHARS = 500;
  * the daemon.
  */
 export async function findText(cwd: string, opts: { pattern: string; limit: number; literal?: boolean; glob?: string }): Promise<{ matches: TextMatch[]; truncated: boolean }> {
-	const args = ["--json", "--no-messages", "--smart-case", "--hidden", "-g", "!.git", "--max-columns", "2000", "--sort", "path"];
+	const args = ["--json", "--no-messages", "--smart-case", "--hidden", "-g", "!.git", "--max-columns", "2000", "--sort", "path", ...SLASHES];
 	if (opts.literal) args.push("-F");
 	if (opts.glob) args.push("-g", opts.glob);
 	args.push("-e", opts.pattern, ".");
-	const proc = Bun.spawn(["rg", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+	const proc = Bun.spawn(["rg", ...args], { cwd, stdout: "pipe", stderr: "pipe", windowsHide: true });
 	const matches: TextMatch[] = [];
 	let truncated = false;
 	const dec = new TextDecoder();
@@ -325,7 +329,8 @@ export async function findText(cwd: string, opts: { pattern: string; limit: numb
 			const at = (b: number) => bytes.subarray(0, b).toString().length;
 			const text = raw.length > MATCH_LINE_CHARS ? `${raw.slice(0, MATCH_LINE_CHARS)}…` : raw;
 			matches.push({
-				path: (ev.data.path.text ?? "").replace(/^\.\//, ""),
+				// --path-separator does not reach ripgrep's json, so windows' backslashes are turned here
+				path: (IS_WINDOWS ? (ev.data.path.text ?? "").replaceAll("\\", "/") : (ev.data.path.text ?? "")).replace(/^\.\//, ""),
 				line: ev.data.line_number,
 				text,
 				submatches: ev.data.submatches.map((s) => ({ start: at(s.start), end: at(s.end), text: s.match.text ?? "" })).filter((s) => s.end <= text.length),

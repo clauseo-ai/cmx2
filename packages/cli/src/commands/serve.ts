@@ -16,9 +16,14 @@ usage:
                                   ~/.local/bin (or $CMX2_INSTALL_DIR; it says when that is not on PATH)
                                   and run it as a service that starts at login and comes back if it
                                   dies: a launchd agent on macos, a systemd user unit on linux. run it
-                                  again to update the unit
+                                  again to update the unit. on windows: a task scheduler task with no
+                                  window, the binary in <data dir>\\bin, and that dir on your user PATH
   cmx2 serve --uninstall          stop the service and remove its unit (sessions and data stay)
   cmx2 serve --status             whether the service is installed and running
+  cmx2 serve --supervise [--env-file f] [--port n] [--hostname addr]
+                                  run the daemon as a child and start it again when it exits; what the
+                                  windows task runs. it reads f for the daemon's environment and appends
+                                  the daemon's output to serve.log
 
 binding: keep 127.0.0.1 on any machine with a public interface. use 0.0.0.0 only on a private network
 (a tailnet), and pair clients with cmx2 pair so every request carries a credential.
@@ -34,8 +39,15 @@ export async function main(args: string[]) {
 			install: { type: "boolean" },
 			uninstall: { type: "boolean" },
 			status: { type: "boolean" },
+			supervise: { type: "boolean" },
+			"env-file": { type: "string" },
 		},
 	});
+	if (values.supervise) {
+		const { supervise } = await import("../supervise.ts");
+		const serveArgs = [...(values.port ? ["--port", values.port] : []), ...(values.hostname ? ["--hostname", values.hostname] : []), ...(values["log-level"] ? ["--log-level", values["log-level"]] : [])];
+		return supervise({ envFile: values["env-file"], serveArgs, ...(values.port ? { port: Number(values.port) } : {}) });
+	}
 	if (values.install || values.uninstall || values.status) {
 		const service = await import("../service.ts");
 		if (values.install) return service.install({ port: values.port, hostname: values.hostname });

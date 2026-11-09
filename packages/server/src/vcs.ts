@@ -24,7 +24,7 @@ export interface FileStatus {
 const FRESH_MS = 30_000;
 
 function git(dir: string, args: string[]): string | undefined {
-	const r = Bun.spawnSync(["git", "-C", dir, ...args], { stdout: "pipe", stderr: "ignore", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
+	const r = Bun.spawnSync(["git", "-C", dir, ...args], { stdout: "pipe", stderr: "ignore", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, windowsHide: true });
 	return r.exitCode === 0 ? r.stdout.toString() : undefined;
 }
 
@@ -44,7 +44,7 @@ type GitAnswer = { out: string | undefined } | "timeout";
 
 async function gitAsync(dir: string, args: string[], timeoutMs: number): Promise<GitAnswer> {
 	try {
-		const p = Bun.spawn(["git", "-C", dir, ...args], { stdout: "pipe", stderr: "ignore", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } });
+		const p = Bun.spawn(["git", "-C", dir, ...args], { stdout: "pipe", stderr: "ignore", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }, windowsHide: true });
 		const done = Promise.all([new Response(p.stdout).text(), p.exited]);
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		// raced, not awaited: a child git left behind can hold the pipe open after git itself is killed

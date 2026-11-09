@@ -6,18 +6,22 @@ import { VERSION } from "@cmx2/server";
 import { assetName } from "../src/release.ts";
 import { keepLink, linkBinary, linkDir, linkNotes, placeBinary, run } from "../src/service.ts";
 
+// the link in ~/.local/bin and the sh scripts standing in for binaries are macos and linux things; windows puts
+// the bin dir on PATH instead (windows.test.ts)
+const posix = test.skipIf(process.platform === "win32");
+
 const home = realpathSync(mkdtempSync(join(tmpdir(), "cmx2-link-")));
 const binary = join(home, ".local", "share", "cmx2", "bin", "cmx2");
 writeFileSync(join(home, "old"), "v1");
 
-test("the link dir is $CMX2_INSTALL_DIR, else ~/.local/bin", () => {
+posix("the link dir is $CMX2_INSTALL_DIR, else ~/.local/bin", () => {
 	expect(linkDir({}, "/home/x")).toBe("/home/x/.local/bin");
 	expect(linkDir({ CMX2_INSTALL_DIR: "/opt/bin" }, "/home/x")).toBe("/opt/bin");
 	// a relative one is made absolute, so the PATH check and the link agree
 	expect(linkDir({ CMX2_INSTALL_DIR: "rel/bin" }, "/home/x")).toBe(join(process.cwd(), "rel/bin"));
 });
 
-test("install links cmx2 into the dir, and the link survives an upgrade that replaces the binary", () => {
+posix("install links cmx2 into the dir, and the link survives an upgrade that replaces the binary", () => {
 	placeBinary(join(home, "old"), binary);
 	const dir = join(home, ".local", "bin");
 	const r = linkBinary(binary, dir);
@@ -32,7 +36,7 @@ test("install links cmx2 into the dir, and the link survives an upgrade that rep
 	expect(linkBinary(binary, dir).kind).toBe("ok");
 });
 
-test("a dangling link is pointed back; a working link elsewhere and another regular file are left alone and named", () => {
+posix("a dangling link is pointed back; a working link elsewhere and another regular file are left alone and named", () => {
 	const dir = join(home, "other-bin");
 	mkdirSync(dir);
 	symlinkSync(join(home, "gone"), join(dir, "cmx2"));
@@ -55,7 +59,7 @@ test("a dangling link is pointed back; a working link elsewhere and another regu
 	expect(linkNotes(r, binary, "", home).join("\n")).toContain("separate copy");
 });
 
-test("the copy scripts/install.sh left, when it is the binary doing the install, becomes the link; the binary's own dir is untouched", () => {
+posix("the copy scripts/install.sh left, when it is the binary doing the install, becomes the link; the binary's own dir is untouched", () => {
 	const dir = join(home, "readme-bin");
 	mkdirSync(dir);
 	writeFileSync(join(dir, "cmx2"), "v1");
@@ -69,7 +73,7 @@ test("the copy scripts/install.sh left, when it is the binary doing the install,
 	expect(Bun.file(binary).size).toBe(2);
 });
 
-test("upgrade makes the first link, repairs a dangling one, and leaves a removed one removed", () => {
+posix("upgrade makes the first link, repairs a dangling one, and leaves a removed one removed", () => {
 	const saved = { d: process.env.CMX2_DATA_DIR, i: process.env.CMX2_INSTALL_DIR };
 	process.env.CMX2_DATA_DIR = join(home, "data");
 	process.env.CMX2_INSTALL_DIR = join(home, "first-bin");
@@ -99,7 +103,7 @@ test("upgrade makes the first link, repairs a dangling one, and leaves a removed
 	}
 });
 
-test("cmx2 upgrade that stops at already-on still makes the link (a real run of the cli with a release laid out in a dir)", () => {
+posix("cmx2 upgrade that stops at already-on still makes the link (a real run of the cli with a release laid out in a dir)", () => {
 	const h = realpathSync(mkdtempSync(join(tmpdir(), "cmx2-upg-")));
 	const installed = join(h, "data", "bin", "cmx2");
 	mkdirSync(join(h, "data", "bin"), { recursive: true });
@@ -121,7 +125,7 @@ test("cmx2 upgrade that stops at already-on still makes the link (a real run of 
 	expect(run().stdout.toString()).not.toContain("linked");
 });
 
-test("the PATH check ignores a trailing slash, and the hint fits the shell", () => {
+posix("the PATH check ignores a trailing slash, and the hint fits the shell", () => {
 	const dir = join(home, ".local", "bin");
 	const r = { kind: "linked" as const, path: join(dir, "cmx2") };
 	expect(linkNotes(r, binary, `/usr/bin:${dir}/`, home).join("\n")).not.toContain("PATH");
@@ -130,7 +134,7 @@ test("the PATH check ignores a trailing slash, and the hint fits the shell", () 
 	expect(linkNotes(r, binary, "/usr/bin", home, "/bin/zsh").join("\n")).toContain(">> ~/.zshrc");
 });
 
-test("it says so, and says when the dir is not on PATH", () => {
+posix("it says so, and says when the dir is not on PATH", () => {
 	const r = { kind: "linked" as const, path: join(home, ".local", "bin", "cmx2") };
 	const off = linkNotes(r, binary, "/usr/bin:/bin", home).join("\n");
 	expect(off).toContain(`linked     ${r.path} -> ${binary}`);
@@ -152,7 +156,7 @@ test("cmx2 providers lists the providers the daemon lists models for", () => {
 	expect((JSON.parse(r.stdout.toString()) as Array<{ name: string }>).map((x) => x.name)).toEqual(["glm"]);
 });
 
-test("upgrade that stops at already-on leaves the install.sh copy alone when the service's binary is older, and swaps it when it is not", () => {
+posix("upgrade that stops at already-on leaves the install.sh copy alone when the service's binary is older, and swaps it when it is not", () => {
 	// a machine set up the README way: the copy on PATH is this very binary (a copy of bun running the cli source),
 	// at the release's version; the service's binary under the data dir is behind
 	const h = realpathSync(mkdtempSync(join(tmpdir(), "cmx2-newer-")));
@@ -198,7 +202,7 @@ test("upgrade that stops at already-on leaves the install.sh copy alone when the
 test("a command that is not installed is a failed run that says so, not an exception", () => {
 	const r = run(["cmx2-no-such-command-xyz", "--version"]);
 	expect(r).toEqual({ ok: false, out: "cmx2-no-such-command-xyz was not found on PATH", missing: true });
-	expect(run(["true"]).ok).toBe(true);
+	if (process.platform !== "win32") expect(run(["true"]).ok).toBe(true);
 });
 
 const script = (version: string) => `#!/bin/sh\necho ${version}\n`;
@@ -208,7 +212,7 @@ function exe(path: string, body: string) {
 	chmodSync(path, 0o755);
 }
 
-test("a regular copy no newer than the installed binary becomes the link; a newer or silent one stays and is named", () => {
+posix("a regular copy no newer than the installed binary becomes the link; a newer or silent one stays and is named", () => {
 	const svc = join(home, "svc", "cmx2");
 	exe(svc, script("0.8.7"));
 	const dirOf = (name: string, body: string) => {
@@ -261,7 +265,7 @@ test("a regular copy no newer than the installed binary becomes the link; a newe
 	}
 });
 
-test.if(process.getuid?.() !== 0)("a replacement that cannot be made leaves the copy on PATH as it was", () => {
+test.if(process.platform !== "win32" && process.getuid?.() !== 0)("a replacement that cannot be made leaves the copy on PATH as it was", () => {
 	const svc = join(home, "svc-ro", "cmx2");
 	exe(svc, script("0.8.7"));
 	const dir = join(home, "ro-bin");
@@ -279,7 +283,7 @@ test.if(process.getuid?.() !== 0)("a replacement that cannot be made leaves the 
 	expect(readdirSync(dir)).toEqual(["cmx2"]);
 });
 
-test("cmx2 upgrade run by the installed binary links over an older copy on PATH and leaves a newer one (a real run, as after install.sh)", () => {
+posix("cmx2 upgrade run by the installed binary links over an older copy on PATH and leaves a newer one (a real run, as after install.sh)", () => {
 	for (const [copyVersion, swapped] of [["0.8.6", true], ["99.0.0", false]] as const) {
 		const h = realpathSync(mkdtempSync(join(tmpdir(), "cmx2-copy-")));
 		// the installed binary is this runtime (it answers --version with its own version, which is newer than both a 0.8.6 copy and nothing else here)

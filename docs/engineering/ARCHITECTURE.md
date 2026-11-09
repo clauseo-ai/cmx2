@@ -34,6 +34,7 @@ pi is the open source agent engine cmx2 builds on; boxbox is the web client; the
 | `tools` | core tools with typed results and spill (read, edit, write, apply_patch, glob, grep, webfetch, websearch, skill, question, lsp), image attach and resize (heic and heif always become jpeg, upright and without exif), `run` code-mode namespaces (`fs`, `search`, `shell`, `pty`, later `edit`, `agents`) | pi ships several; ours wrap for typed metadata and permissions |
 | `prompts` | system prompt profiles per model family, agent-type prompts, fragments (capability hints, delegation rules), the audit checklist | text, versioned |
 | `cli` | `cmx2 tui/run/serve/pair/doctor/upgrade/session/models/providers/agent/mcp/stats/db` | thin |
+| `platform` | what differs between macos, linux and windows: the bash a command runs in (`bashCommand`, git for windows' bash and the `CMX2_COMMAND` wrapper on windows), process trees (process groups on posix, job objects through kernel32 ffi with a `taskkill /T /F` fallback on windows), process start times, listening ports (`netstat` on windows), the compiled binary's root | new; windows decisions in D30 |
 | `eval` | the ten-minute smoke suite, the routing-eval runner, provider record/replay fixtures | see `VERIFICATION.md` |
 
 rule: `actors`, `procs`, `worktrees`, `server` never import pi directly; they

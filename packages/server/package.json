@@ -15,16 +15,17 @@
     "./pair": "./src/pair.ts"
   },
   "dependencies": {
-    "@cmx2/engine": "workspace:*",
-    "@cmx2/store": "workspace:*",
-    "@cmx2/contract": "workspace:*",
-    "typebox": "1.3.27",
-    "jsonc-parser": "3.3.1",
-    "@cmx2/tools": "workspace:*",
-    "@cmx2/procs": "workspace:*",
     "@cmx2/actors": "workspace:*",
+    "@cmx2/contract": "workspace:*",
+    "@cmx2/engine": "workspace:*",
+    "@cmx2/platform": "workspace:*",
+    "@cmx2/procs": "workspace:*",
     "@cmx2/routing": "workspace:*",
-    "@cmx2/worktrees": "workspace:*"
+    "@cmx2/store": "workspace:*",
+    "@cmx2/tools": "workspace:*",
+    "@cmx2/worktrees": "workspace:*",
+    "jsonc-parser": "3.3.1",
+    "typebox": "1.3.27"
   },
   "devDependencies": {
     "@cmx2/client": "workspace:*"

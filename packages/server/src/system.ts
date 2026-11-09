@@ -2,13 +2,15 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { readFile, statfs } from "node:fs/promises";
-import { arch, cpus, freemem, homedir, loadavg, platform, release, totalmem, uptime } from "node:os";
+import { arch, cpus, freemem, homedir, loadavg, platform, release, totalmem, uptime, version } from "node:os";
+import { parse } from "node:path";
 
 /**
  * `/global/system`: what machine the daemon runs on and how it is doing, for a client that lists machines.
  * the static half (os name and version, model, cpu, the data volume's mount point) is worked out once, on the
  * first request, and may spawn a few short commands then. the live half (load, memory, disk, uptimes) is read on
  * every request from the kernel without a process: /proc on linux, host_statistics64 on macos, statfs for disk.
+ * windows reads its model from the registry with one `reg query`, and its memory from node (GlobalMemoryStatusEx).
  */
 
 export type SystemInfo = {
@@ -155,6 +157,27 @@ export function parseDfMount(text: string): string | null {
 	return m?.[1] ?? null;
 }
 
+/** `reg query <key>`: the key's values as name to data, REG_SZ and the rest alike */
+export function parseRegValues(text: string): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const line of text.split(/\r?\n/)) {
+		const m = line.match(/^\s+(\S+)\s+REG_\w+\s+(.*?)\s*$/);
+		if (m) out[m[1] as string] = m[2] as string;
+	}
+	return out;
+}
+
+/**
+ * the windows name and version. the kernel says 10.0 on windows 10 and 11 alike, and so does the product name in
+ * the registry, so 11 is told by its build (22000 and up). a server edition keeps the name os.version() gives it
+ */
+export function windowsRelease(kernel: string, osVersion: string): { name: string; version: string } {
+	const server = osVersion.match(/^Windows Server (\d{4})/);
+	if (server) return { name: "Windows Server", version: server[1] as string };
+	const build = Number(kernel.split(".")[2] ?? 0);
+	return { name: "Windows", version: build >= 22000 ? "11" : kernel.startsWith("10.") ? "10" : kernel };
+}
+
 // ---------- reading the machine ----------
 
 /** what a static read leaves out because a command timed out; such a read is tried again later */
@@ -166,7 +189,7 @@ let timedOut = false;
  */
 const run = (cmd: string, args: string[], timeout = 5000) =>
 	new Promise<string | null>((resolve) => {
-		const child = execFile(cmd, args, { encoding: "utf8", maxBuffer: 1 << 20 }, (err, out) => {
+		const child = execFile(cmd, args, { encoding: "utf8", maxBuffer: 1 << 20, windowsHide: true }, (err, out) => {
 			clearTimeout(timer);
 			resolve(err ? null : out);
 		});
@@ -182,7 +205,7 @@ async function readStatic(dataDir: string): Promise<Static> {
 	const plat = platform();
 	const cores = cpus().length;
 	const cpuModel = cpus()[0]?.model?.trim() || "unknown";
-	const mountP = run("df", ["-P", dataDir]).then((out) => (out ? parseDfMount(out) : null));
+	const mountP = plat === "win32" ? Promise.resolve(null) : run("df", ["-P", dataDir]).then((out) => (out ? parseDfMount(out) : null));
 	const base = { platform: plat, kernel: release(), arch: arch() };
 	if (plat === "darwin") {
 		const [plist, sys, profiler] = await Promise.all([
@@ -222,8 +245,18 @@ async function readStatic(dataDir: string): Promise<Static> {
 			mount: await mountP,
 		};
 	}
+	if (plat === "win32") {
+		// hardware strings the firmware put in the registry; one short reg.exe, never powershell (a second or more to start)
+		const bios = parseRegValues((await run("reg", ["query", "HKLM\\HARDWARE\\DESCRIPTION\\System\\BIOS"])) ?? "");
+		const product = bios.SystemProductName?.trim() || null;
+		const vendor = bios.SystemManufacturer?.trim() || null;
+		const junk = (s: string | null) => (!s || /^(to be filled|default string|system product name|none|not specified)/i.test(s) ? null : s);
+		const virtual = [vendor, product].some((x) => !!x && VIRTUAL.test(x));
+		// statfs on windows answers for the drive the data dir is on, so the drive's root is the mount
+		return { os: { ...base, ...windowsRelease(release(), version()) }, machine: { model: junk(product), identifier: null, virtual }, cpu: { model: cpuModel, cores }, mount: parse(dataDir).root || null };
+	}
 	return {
-		os: { ...base, name: plat === "win32" ? "Windows" : plat, version: release() },
+		os: { ...base, name: plat, version: release() },
 		machine: { model: null, identifier: null, virtual: false },
 		cpu: { model: cpuModel, cores },
 		mount: await mountP,
@@ -277,6 +310,7 @@ function memory(): SystemInfo["memory"] {
 		const c = macCounters();
 		if (c) return { total, available: macAvailable(total, c) };
 	}
+	// windows: freemem() is GlobalMemoryStatusEx's available physical memory, standby cache included, as task manager counts it
 	return { total, available: freemem() };
 }
 

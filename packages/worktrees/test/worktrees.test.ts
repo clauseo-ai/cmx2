@@ -28,7 +28,8 @@ function put(root: string, files: Record<string, string>) {
 
 /** a repository shaped like a web project: tracked code, then everything a dev server needs that git ignores */
 function project(label: string) {
-	const base = realpathSync(mkdtempSync(join(tmpdir(), `cmx2-wt-${label}-`)));
+	// native: on windows tmpdir() is an 8.3 short name (RUNNER~1) and only the native realpath gives the long one git and the service report
+	const base = realpathSync.native(mkdtempSync(join(tmpdir(), `cmx2-wt-${label}-`)));
 	const repo = join(base, "app");
 	put(repo, {
 		".gitignore": ["node_modules/", ".env", ".env.*", ".npmrc", "*.pem", "cache/", "certificates/", "vault/", "scratch.log"].join("\n"),
@@ -106,8 +107,8 @@ describe("create", () => {
 		expect(existsSync(join(d, "certificates/localhost.pem"))).toBe(true);
 		expect(readFileSync(join(d, "cache/fixtures.json"), "utf8")).toBe("[1,2,3]\n");
 		expect(readFileSync(join(d, "vault/readme.txt"), "utf8")).toBe("the vault\n");
-		expect(readlinkSync(join(d, "node_modules"))).toBe(join(repo, "node_modules"));
-		expect(readlinkSync(join(d, "packages/ui/node_modules"))).toBe(join(repo, "packages/ui/node_modules"));
+		expect(realpathSync.native(readlinkSync(join(d, "node_modules")))).toBe(realpathSync.native(join(repo, "node_modules")));
+		expect(realpathSync.native(readlinkSync(join(d, "packages/ui/node_modules")))).toBe(realpathSync.native(join(repo, "packages/ui/node_modules")));
 		expect(c.linked).toEqual(["node_modules", "packages/ui/node_modules"]);
 		// .worktreeinclude brought vault/ whole, less the key the allowlist does not name
 		expect(c.left).toEqual([".npmrc", "deploy.pem", "vault/prod.key"]);

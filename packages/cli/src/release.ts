@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { dataDir } from "@cmx2/engine/config";
+import { isCompiled } from "@cmx2/platform";
 
 /** stamped by scripts/build.ts from `--repo` (the release workflow passes GITHUB_REPOSITORY) */
 declare const CMX2_REPO: string | undefined;
@@ -11,7 +13,7 @@ declare const CMX2_REPO: string | undefined;
  * time, so an upgrade can only come from where the binary did. no guessed default: an unclaimed name
  * would hand whoever registers it every upgrade. CMX2_REPO names a fork; CMX2_RELEASE_BASE (or
  * `cmx2 upgrade --from`) points at any url or directory laid out like a release: the binaries named
- * `cmx2-<os>-<arch>` next to a SHA256SUMS file.
+ * `cmx2-<os>-<arch>` (`.exe` on windows) next to a SHA256SUMS file, which is what `bun scripts/build.ts --all` writes.
  */
 export const DEFAULT_REPO: string | undefined = typeof CMX2_REPO === "string" && CMX2_REPO ? CMX2_REPO : undefined;
 
@@ -22,23 +24,42 @@ export function releaseBase(version?: string, env = process.env): string {
 	return version ? `https://github.com/${repo}/releases/download/v${version.replace(/^v/, "")}` : `https://github.com/${repo}/releases/latest/download`;
 }
 
-/** the release asset for this machine: cmx2-darwin-arm64, cmx2-linux-x64, ... */
-export function assetName(platform = process.platform, arch = process.arch): string {
-	const os = platform === "darwin" ? "darwin" : platform === "linux" ? "linux" : undefined;
-	if (!os) throw new Error(`there is no cmx2 build for ${platform}; darwin and linux only`);
+/** what `bun scripts/build.ts --all` builds and a release publishes */
+export const RELEASE_TARGETS = ["bun-darwin-arm64", "bun-darwin-x64", "bun-linux-x64", "bun-linux-arm64", "bun-windows-x64", "bun-windows-arm64"] as const;
+
+/** the bun compile target for an os and arch: bun-darwin-arm64, bun-windows-x64, ... */
+export function buildTarget(platform: string = process.platform, arch: string = process.arch): string {
+	const os = platform === "darwin" ? "darwin" : platform === "linux" ? "linux" : platform === "win32" ? "windows" : undefined;
+	if (!os) throw new Error(`there is no cmx2 build for ${platform}; macos, linux and windows only`);
 	const a = arch === "arm64" ? "arm64" : arch === "x64" ? "x64" : undefined;
 	if (!a) throw new Error(`there is no cmx2 build for ${arch}; arm64 and x64 only`);
-	return `cmx2-${os}-${a}`;
+	return `bun-${os}-${a}`;
+}
+
+/** the release file a target builds to: cmx2-linux-x64, cmx2-windows-x64.exe */
+export function targetFile(target: string): string {
+	const name = `cmx2-${target.replace(/^bun-/, "")}`;
+	return target.includes("-windows-") ? `${name}.exe` : name;
+}
+
+/** the release asset for this machine: cmx2-darwin-arm64, cmx2-linux-x64, cmx2-windows-x64.exe, ... */
+export function assetName(platform: string = process.platform, arch: string = process.arch): string {
+	return targetFile(buildTarget(platform, arch));
+}
+
+/** the file name of the binary on this os: cmx2, or cmx2.exe on windows */
+export function binaryName(platform: string = process.platform): string {
+	return platform === "win32" ? "cmx2.exe" : "cmx2";
 }
 
 /** where `serve --install` keeps its copy of the binary (a binary under ~/Documents stalls launchd on a tcc prompt) */
-export function installedBinary(env = process.env): string {
-	return join(dataDir(env), "bin", "cmx2");
+export function installedBinary(env = process.env, platform: string = process.platform): string {
+	return join(dataDir(env), "bin", binaryName(platform));
 }
 
 /** true when this process is a compiled cmx2 binary rather than bun running the source */
 export function compiled(): boolean {
-	return import.meta.url.includes("/$bunfs/");
+	return isCompiled(import.meta.url);
 }
 
 export function sha256(bytes: Uint8Array): string {
@@ -57,7 +78,7 @@ export function sumFor(sums: string, name: string): string | undefined {
 /** bytes from a url or from a file in a local directory */
 export async function fetchBytes(base: string, name: string): Promise<Uint8Array> {
 	if (!/^https?:\/\//.test(base)) {
-		const path = join(base.replace(/^file:\/\//, ""), name);
+		const path = join(base.startsWith("file:") ? fileURLToPath(base) : base, name);
 		if (!existsSync(path)) throw new Error(`${path} is not there`);
 		return new Uint8Array(readFileSync(path));
 	}

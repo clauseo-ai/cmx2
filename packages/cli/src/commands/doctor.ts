@@ -8,7 +8,8 @@ import { VERSION } from "@cmx2/server";
 import { authHeaders } from "../daemon.ts";
 import { redact } from "../redact.ts";
 import { compiled, installedBinary } from "../release.ts";
-import { serviceState } from "../service.ts";
+import { BASH_HINT, findGitBash } from "@cmx2/platform";
+import { ps, serviceState } from "../service.ts";
 import { ADHOC_NOTE, certificateKind, signatureOf } from "../signing.ts";
 
 export const help = `cmx2 doctor: what is wrong on this machine, in plain words
@@ -18,8 +19,9 @@ usage:
 
 it checks the profile parses, each provider has a key, the default model answers a one-token request,
 the daemon answers and sits inside its memory budget, nothing else holds its port, the service unit is
-installed and runs the copied binary, and the data dir is writable with room left. every problem comes
-with the fix. it exits 1 when something is wrong.
+installed and runs the copied binary, and the data dir is writable with room left. on windows it also
+checks git for windows' bash, git, long paths and who holds the port (a cmx2 inside wsl, say). every
+problem comes with the fix. it exits 1 when something is wrong.
 
   --redact    mask hostnames, urls, ip addresses, your user name and home, and anything key-shaped, so
               the report can be pasted in public. keys are never printed, with or without it
@@ -58,6 +60,46 @@ function portTaken(host: string, port: number): Promise<boolean> {
 		s.once("error", () => done(false));
 		s.setTimeout(1000, () => done(false));
 	});
+}
+
+const WIN = process.platform === "win32";
+
+/** windows: the process listening on a port, by pid and name, or undefined when no windows process does */
+function portOwner(port: number): { pid: number; name: string } | undefined {
+	const r = ps(`$c = Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; [Console]::Write("$($c.OwningProcess) $($p.ProcessName)") }`);
+	const m = r.out.match(/^(\d+) ?(.*)$/);
+	return m ? { pid: Number(m[1]), name: m[2]!.trim() } : undefined;
+}
+
+/**
+ * windows: whether the port belongs to something other than a native cmx2. a cmx2 built for linux inside wsl
+ * answers on localhost too (wsl forwards its ports), and two daemons cannot share one port
+ */
+async function otherDaemon(base: string, port: number, headers: Record<string, string>): Promise<Check | undefined> {
+	const stop = `stop that one first (inside wsl: cmx2 serve --uninstall, or wsl --shutdown from windows), or give this one another port with server.port in cmx2.jsonc`;
+	const sys = await fetch(`${base}/global/system`, { headers, signal: AbortSignal.timeout(3000) }).catch(() => undefined);
+	const os = sys?.ok ? ((await sys.json().catch(() => ({}))) as { os?: { platform?: string; name?: string } }).os : undefined;
+	if (os?.platform && os.platform !== "win32") return { level: "fail", what: "other daemon", detail: `the cmx2 on ${base} runs on ${os.name ?? os.platform}, not this windows machine: a linux build inside wsl, most likely`, fix: stop };
+	const owner = portOwner(port);
+	if (!owner) return { level: "warn", what: "other daemon", detail: `no windows process owns port ${port}, yet something answers there: a listener inside wsl (mirrored networking), most likely`, fix: stop };
+	if (/^wslrelay$/i.test(owner.name)) return { level: "fail", what: "other daemon", detail: `port ${port} is wsl's relay (pid ${owner.pid}): a program inside a wsl distro holds it, a linux cmx2 most likely`, fix: stop };
+	if (!/^(cmx2|bun)$/i.test(owner.name)) return { level: "warn", what: "other daemon", detail: `port ${port} belongs to ${owner.name || "an unnamed process"} (pid ${owner.pid}), not cmx2`, fix: `stop it, or give cmx2 another port with server.port in cmx2.jsonc` };
+	return undefined;
+}
+
+/** windows: what the tools need that macos and linux have anyway, and the long path switch */
+function windowsChecks(): Check[] {
+	const out: Check[] = [];
+	const bash = findGitBash();
+	if ("error" in bash) out.push({ level: "fail", what: "git bash", detail: `${bash.error}. the shell tool runs every command in git for windows' bash`, fix: BASH_HINT });
+	else out.push({ level: "ok", what: "git bash", detail: `${bash.path} (found through ${bash.from === "CMX2_GIT_BASH" ? "CMX2_GIT_BASH" : bash.from === "git" ? "the git on PATH" : "the usual install places"})` });
+	const git = Bun.which("git");
+	if (git) out.push({ level: "ok", what: "git", detail: `found at ${git}` });
+	else out.push({ level: "fail", what: "git", detail: "git is not on PATH, so checkouts, diffs and worktrees fail", fix: "winget install --id Git.Git -e, then open a new terminal" });
+	const lp = ps("(Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem' -Name LongPathsEnabled -ErrorAction SilentlyContinue).LongPathsEnabled");
+	if (lp.out.trim() === "1") out.push({ level: "ok", what: "long paths", detail: "windows long paths are on (LongPathsEnabled is 1)" });
+	else out.push({ level: "warn", what: "long paths", detail: "windows long paths are off, so a path past 260 characters fails (deep node_modules in a worktree, say)", fix: "in an administrator powershell: Set-ItemProperty -Path HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem -Name LongPathsEnabled -Value 1; and git config --global core.longpaths true" });
+	return out;
 }
 
 async function probe(config: Config): Promise<Check> {
@@ -111,7 +153,7 @@ export async function main(args: string[]) {
 	const add = (c: Check) => checks.push(c);
 
 	add({ level: "note", what: "cmx2", detail: `${VERSION} on ${process.platform}-${process.arch}, ${compiled() ? `binary ${process.execPath}` : `source under bun ${Bun.version}`}` });
-	if (compiled() && process.execPath.startsWith(join(homedir(), "Documents"))) {
+	if (!WIN && compiled() && process.execPath.startsWith(join(homedir(), "Documents"))) {
 		add({ level: "warn", what: "binary location", detail: "this binary sits under ~/Documents; launchd stalls for minutes on a privacy prompt when it starts binaries from there", fix: "cmx2 serve --install runs a copy from ~/.local/share/cmx2/bin, so install the service instead of pointing a unit at this file" });
 	}
 	// the copy the service runs is the one macos keeps grants for
@@ -148,11 +190,15 @@ export async function main(args: string[]) {
 	const host = !config || config.server.hostname === "0.0.0.0" ? "127.0.0.1" : config.server.hostname;
 	const base = `http://${host}:${port}`;
 	const headers = authHeaders();
+	const serveLog = WIN ? join(dataDir(), "log", "serve.log") : "~/.local/share/cmx2/log/serve.log";
+	const lsof = WIN ? `Get-NetTCPConnection -LocalPort ${port} -State Listen` : `lsof -iTCP:${port} -sTCP:LISTEN`;
+	let portInUse = false;
 	let timedOut = false;
 	const health = await fetch(`${base}/global/health`, { headers, signal: AbortSignal.timeout(2000) }).catch((e: unknown) => {
 		timedOut = e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
 		return undefined;
 	});
+	if (health) portInUse = true;
 	if (health?.status === 401) {
 		add({ level: "warn", what: "daemon", detail: `something on ${base} wants credentials this shell does not have`, fix: "set CMX2_SERVER_PASSWORD, or run cmx2 pair on this machine once so local commands get a credential" });
 	} else if (health?.ok) {
@@ -169,36 +215,44 @@ export async function main(args: string[]) {
 			}
 		}
 	} else if (timedOut) {
-		add({ level: "fail", what: "daemon", detail: `${base} did not answer /global/health within 2 s`, fix: `lsof -iTCP:${port} -sTCP:LISTEN names the process; if it is cmx2 its main thread is busy or the machine is swapping (sample <pid> 3 shows where), and the log is ~/.local/share/cmx2/log/serve.log` });
+		portInUse = true;
+		add({ level: "fail", what: "daemon", detail: `${base} did not answer /global/health within 2 s`, fix: `${lsof} names the process; if it is cmx2 its main thread is busy or the machine is swapping${WIN ? "" : " (sample <pid> 3 shows where)"}, and the log is ${serveLog}` });
 	} else if (await portTaken(host, port)) {
-		add({ level: "fail", what: "daemon", detail: `something that is not cmx2 holds port ${port} on ${host}`, fix: `stop it, or pick another port with server.port in cmx2.jsonc (lsof -iTCP:${port} -sTCP:LISTEN names it)` });
+		portInUse = true;
+		add({ level: "fail", what: "daemon", detail: `something that is not cmx2 holds port ${port} on ${host}`, fix: `stop it, or pick another port with server.port in cmx2.jsonc (${lsof} names it)` });
 	} else {
 		add({ level: "note", what: "daemon", detail: `nothing listens on ${base}`, fix: "cmx2 serve runs one in a terminal; cmx2 serve --install runs one as a service. plain cmx2 starts its own when none is up" });
 	}
 
+	if (WIN && portInUse) {
+		const other = await otherDaemon(base, port, headers);
+		if (other) add(other);
+	}
+
 	// the service
-	const s = serviceState();
+	const s = await serviceState();
 	if (!s.installed) {
 		add({ level: "note", what: "service", detail: `not installed (${s.unit})`, fix: "cmx2 serve --install, on a machine that should serve all the time" });
 	} else {
 		const problems: string[] = [];
 		if (!s.running) problems.push(s.loaded ? "loaded but not running" : "installed but not loaded");
 		if (s.binary && !existsSync(s.binary)) problems.push(`its binary ${s.binary} is gone`);
-		if (s.binary?.startsWith(join(homedir(), "Documents"))) problems.push("it runs a binary under ~/Documents, which stalls launchd on a privacy prompt");
-		else if (s.binary && s.binary !== installedBinary()) problems.push(`it runs ${s.binary}, not the copy in ${installedBinary()}`);
+		if (!WIN && s.binary?.startsWith(join(homedir(), "Documents"))) problems.push("it runs a binary under ~/Documents, which stalls launchd on a privacy prompt");
+		else if (s.binary && (WIN ? s.binary.toLowerCase() !== installedBinary().toLowerCase() : s.binary !== installedBinary())) problems.push(`it runs ${s.binary}, not the copy in ${installedBinary()}`);
 		if (config && s.port && s.port !== config.server.port && !values.port) problems.push(`it listens on ${s.port}, the profile says ${config.server.port}`);
 		add({
 			level: problems.length ? (s.running ? "warn" : "fail") : "ok",
 			what: "service",
 			detail: `${s.unit}${s.running ? `, running (pid ${s.pid})` : ""}${problems.length ? `; ${problems.join("; ")}` : ", runs the copied binary"}`,
-			...(problems.length ? { fix: "cmx2 serve --install again rewrites the unit and copies the binary; the log is ~/.local/share/cmx2/log/serve.log" } : {}),
+			...(problems.length ? { fix: `cmx2 serve --install again rewrites the ${WIN ? "task" : "unit"} and copies the binary; the log is ${serveLog}` } : {}),
 		});
 	}
 
 	// grep, glob and the web client's file search run ripgrep; without it they fail at the first call
 	const rg = Bun.which("rg");
 	if (rg) add({ level: "ok", what: "ripgrep", detail: `found at ${rg}` });
-	else add({ level: "warn", what: "ripgrep", detail: "rg is not on PATH, so the grep and glob tools and file search fail", fix: process.platform === "darwin" ? "brew install ripgrep" : "install ripgrep (apt install ripgrep, dnf install ripgrep); a service needs it on the PATH it was installed with" });
+	else add({ level: "warn", what: "ripgrep", detail: "rg is not on PATH, so the grep and glob tools and file search fail", fix: process.platform === "darwin" ? "brew install ripgrep" : WIN ? "winget install BurntSushi.ripgrep.MSVC, then open a new terminal; the service sees it after cmx2 serve --install or your next logon" : "install ripgrep (apt install ripgrep, dnf install ripgrep); a service needs it on the PATH it was installed with" });
+	if (WIN) for (const c of windowsChecks()) add(c);
 
 	// the data dir
 	const data = dataDir();

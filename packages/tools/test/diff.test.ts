@@ -35,7 +35,8 @@ function mutate(lines: string[], r: () => number): string[] {
 	return out.filter((l) => l !== undefined);
 }
 
-test("counts match git's numstat and the patch applies, over random edits (including a missing final newline)", async () => {
+// windows: GNU patch is not on the runner's PATH; the patch format checked here is the same on every platform
+test.skipIf(process.platform === "win32")("counts match git's numstat and the patch applies, over random edits (including a missing final newline)", async () => {
 	const env = scratch("diff");
 	const r = rng(7);
 	for (let i = 0; i < 60; i++) {
@@ -85,7 +86,8 @@ async function againstGit(env: { cwd: string }, name: string, a: string, b: stri
 	return out;
 }
 
-test("a change further apart than Myers searches is split on the lines both sides have once, and the counts are git's", async () => {
+// windows: GNU patch is not on the runner's PATH; the patch format checked here is the same on every platform
+test.skipIf(process.platform === "win32")("a change further apart than Myers searches is split on the lines both sides have once, and the counts are git's", async () => {
 	const env = scratch("far");
 	// a replace_all changing 600 of 6000 lines: 1200 edits, past the 1000 Myers is allowed
 	const lines = Array.from({ length: 6000 }, (_, i) => `row ${i} of the table`);
@@ -137,7 +139,8 @@ test("a region replaced whole when there is nothing to split on counts what the 
 	expect(d.patch.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).length + d.patch.split("\n").filter((l) => l.startsWith("-") && !l.startsWith("---")).length).toBeLessThanOrEqual(3000);
 });
 
-test("a patch is cut at a hunk boundary at the cap, with no marker in it, and what is kept applies", async () => {
+// windows: GNU patch is not on the runner's PATH; the patch format checked here is the same on every platform
+test.skipIf(process.platform === "win32")("a patch is cut at a hunk boundary at the cap, with no marker in it, and what is kept applies", async () => {
 	const env = scratch("cut");
 	const a = Array.from({ length: 20_000 }, (_, i) => `row ${i}`).join("\n") + "\n";
 	const b = a.replaceAll("row 1", "ROW 1");

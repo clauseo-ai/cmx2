@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { isAbsolute, join, relative, win32 } from "node:path";
+import { IS_WINDOWS } from "@cmx2/platform";
 import type { UserBlock } from "@cmx2/engine/session";
 import { isHeicMime, sniffHeic } from "@cmx2/tools";
 import { badRequest } from "./http.ts";
@@ -58,8 +59,22 @@ function headOf(abs: string, n: number): Uint8Array | undefined {
 	}
 }
 
+/**
+ * a windows path from a file url, read leniently: file:///C:/x as the standard writes it, and what clients build by
+ * hand from a windows path, file://C:\x or the same with its backslashes percent-encoded (encodeURI). file://host/share
+ * is a unc path
+ */
+export function windowsFileUrlPath(url: string): string {
+	const p = decodeURIComponent(url.replace(/^file:/i, "")).replace(/\\/g, "/");
+	const drive = p.match(/^\/*(?:localhost\/+)?([A-Za-z]:)(\/.*)?$/i);
+	if (drive) return win32.normalize(`${drive[1]}${drive[2] ?? "/"}`);
+	if (/^\/\/[^/]/.test(p)) return win32.normalize(`\\\\${p.slice(2)}`);
+	return win32.resolve(p.replace(/^\/\/(?=\/)/, ""));
+}
+
 function fileUrlPath(url: string): string {
 	try {
+		if (IS_WINDOWS) return windowsFileUrlPath(url);
 		return decodeURIComponent(new URL(url).pathname);
 	} catch {
 		throw badRequest(`${url} is not a file url`);
@@ -102,7 +117,7 @@ function pdfText(bytes: Uint8Array, filename: string): string {
 	try {
 		const src = join(dir, "in.pdf");
 		writeFileSync(src, bytes);
-		const r = spawnSync("pdftotext", ["-layout", src, "-"], { encoding: "utf8", timeout: 30_000, maxBuffer: 16 * 1024 * 1024 });
+		const r = spawnSync("pdftotext", ["-layout", src, "-"], { encoding: "utf8", timeout: 30_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true });
 		if (r.error || r.status !== 0) return `<file path="${filename}">\n(a pdf, ${bytes.length} bytes; this host has no pdftotext to read it, so only its name came through)\n</file>`;
 		const text = r.stdout.length > MENTION_MAX_BYTES ? `${r.stdout.slice(0, MENTION_MAX_BYTES)}\n(cut at 50 KB)` : r.stdout;
 		return `<file path="${filename}">\n${text}\n</file>`;

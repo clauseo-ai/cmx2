@@ -10,7 +10,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.14
+          bun-version: 1.4.3
+      - name: what the tests need on the machine (ripgrep, imagemagick, a git identity)
+        run: |
+          sudo apt-get install -y ripgrep imagemagick
+          git config --global user.name ci
+          git config --global user.email ci@example.invalid
       - run: bun install --frozen-lockfile
       - run: bunx tsc --noEmit -p .
       - run: bun test packages
@@ -18,3 +23,198 @@ jobs:
         run: bun packages/contract/src/generate.ts --check
       - name: no strings from the maintainer's pattern list
         run: scripts/check-public.sh
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        id: setup-bun
+        continue-on-error: true
+        with:
+          bun-version: 1.4.3
+      - name: bun from npm when the github release download fails (it has answered 504 on windows runners)
+        if: steps.setup-bun.outcome == 'failure'
+        run: npm install -g bun@1.4.3
+      - name: what the tests need on the machine (ripgrep, a git identity)
+        run: |
+          choco install ripgrep -y --no-progress
+          git config --global user.name ci
+          git config --global user.email ci@example.invalid
+      - run: bun install --frozen-lockfile
+      # bun run, not bunx: the bunx an npm-installed bun leaves on windows does not start
+      - run: bun run typecheck
+      # one step per package, each run even when an earlier one failed, so a failure names its area
+      - { name: "test platform", if: "!cancelled()", run: bun test packages/platform }
+      - { name: "test tools", if: "!cancelled()", run: bun test packages/tools }
+      - { name: "test procs", if: "!cancelled()", run: bun test packages/procs }
+      - { name: "test worktrees", if: "!cancelled()", run: bun test packages/worktrees }
+      - { name: "test store", if: "!cancelled()", run: bun test packages/store }
+      - { name: "test engine", if: "!cancelled()", run: bun test packages/engine }
+      - { name: "test actors", if: "!cancelled()", run: bun test packages/actors }
+      - { name: "test routing, prompts, contract, client", if: "!cancelled()", run: bun test packages/routing packages/prompts packages/contract packages/client }
+      - { name: "test cli", if: "!cancelled()", run: bun test packages/cli }
+      - { name: "test server", if: "!cancelled()", run: bun test packages/server }
+      - { name: "test tui", if: "!cancelled()", run: bun test packages/tui }
+  # the windows binary end to end on a throwaway runner: build, install the logon task, upgrade over the running
+  # exe, restart, uninstall. ports 4831 and up, never the default 4097
+  windows-binary:
+    # x64 must pass; the arm64 runner is a try (bun builds a windows arm64 binary, nothing here has run one yet)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-11-arm' }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PORT: "4831"
+      LABEL: dev.cmx2.serve
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        id: setup-bun
+        continue-on-error: true
+        with:
+          bun-version: 1.4.3
+      - name: bun from npm when the github release download fails
+        if: steps.setup-bun.outcome == 'failure'
+        run: npm install -g bun@1.4.3
+      - name: what the binary needs on the machine (ripgrep, a git identity)
+        run: |
+          choco install ripgrep -y --no-progress
+          git config --global user.name ci
+          git config --global user.email ci@example.invalid
+      - name: a data and config dir with a space in the path, so the task's quoting is tested
+        run: |
+          "CMX2_DATA_DIR=$env:RUNNER_TEMP\cmx2 data" >> $env:GITHUB_ENV
+          "CMX2_CONFIG_DIR=$env:RUNNER_TEMP\cmx2 config" >> $env:GITHUB_ENV
+          # the profile points at scripts/ci-provider.ts, the canned endpoint the run smoke below uses
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\cmx2 config" | Out-Null
+          Set-Content -Encoding utf8NoBOM "$env:RUNNER_TEMP\cmx2 config\cmx2.jsonc" '{ "model": "smoke/canned", "server": { "port": 4831 }, "providers": { "smoke": { "api": "openai-completions", "baseUrl": "http://127.0.0.1:4832/v1", "apiKey": "unused", "models": { "canned": { "name": "canned" } } }, "anthropic": { "blacklist": ["*"] } } }'
+      - run: bun install --frozen-lockfile
+      - name: build the binary natively
+        run: |
+          bun scripts/build.ts --out dist
+          if ($LASTEXITCODE) { exit 1 }
+          Get-Item dist\cmx2.exe
+      - name: --version, --help and doctor
+        run: |
+          $v = dist\cmx2.exe --version
+          "version: $v"
+          if ($LASTEXITCODE -or $v -notmatch '^\d+\.\d+\.\d+') { exit 1 }
+          dist\cmx2.exe --help
+          if ($LASTEXITCODE) { exit 1 }
+          # no provider key here, so doctor exits 1; it has to run and print the windows checks
+          $out = dist\cmx2.exe doctor --offline --port $env:PORT | Out-String
+          $out
+          if ($LASTEXITCODE -gt 1) { exit 1 }
+          foreach ($w in 'git bash', 'ripgrep', 'long paths', 'service') { if ($out -notmatch $w) { "doctor did not report $w"; exit 1 } }
+          exit 0
+      - name: serve --install, then the task, the process tree and serve --status
+        run: |
+          dist\cmx2.exe serve --install --port $env:PORT
+          $code = $LASTEXITCODE
+          schtasks /Query /TN $env:LABEL /V /FO LIST
+          Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'cmx2.exe', 'conhost.exe' } | Select-Object ProcessId, ParentProcessId, Name, CommandLine | Format-List
+          if ($code) { "install exited $code"; exit 1 }
+          Invoke-RestMethod "http://127.0.0.1:$env:PORT/global/health" | Format-List
+          & "$env:CMX2_DATA_DIR\bin\cmx2.exe" serve --status
+          if ($LASTEXITCODE) { exit 1 }
+          schtasks /Query /TN $env:LABEL /XML
+          dist\cmx2.exe doctor --offline --port $env:PORT
+          exit 0
+      - name: the supervisor starts the daemon again when it is killed
+        run: |
+          function Wait-Health([int]$not = 0, [int]$secs = 60) { $until = (Get-Date).AddSeconds($secs); while ((Get-Date) -lt $until) { try { $h = Invoke-RestMethod "http://127.0.0.1:$env:PORT/global/health" -TimeoutSec 2; if ($h.pid -and $h.pid -ne $not) { return $h } } catch {}; Start-Sleep -Milliseconds 500 }; throw "no daemon other than $not answered on $env:PORT" }
+          $before = Wait-Health
+          Stop-Process -Id $before.pid -Force
+          $after = Wait-Health -not $before.pid
+          "killed $($before.pid), the supervisor started $($after.pid)"
+      - name: what schtasks /End stops (it decides how restart and uninstall clean up)
+        run: |
+          function Wait-Health([int]$not = 0, [int]$secs = 60) { $until = (Get-Date).AddSeconds($secs); while ((Get-Date) -lt $until) { try { $h = Invoke-RestMethod "http://127.0.0.1:$env:PORT/global/health" -TimeoutSec 2; if ($h.pid -and $h.pid -ne $not) { return $h } } catch {}; Start-Sleep -Milliseconds 500 }; throw "no daemon other than $not answered on $env:PORT" }
+          $h = Wait-Health
+          schtasks /End /TN $env:LABEL
+          Start-Sleep 3
+          $left = Get-CimInstance Win32_Process | Where-Object { $_.Name -in 'cmx2.exe', 'conhost.exe' } | Select-Object ProcessId, ParentProcessId, Name, CommandLine
+          $left | Format-List
+          $still = try { Invoke-RestMethod "http://127.0.0.1:$env:PORT/global/health" -TimeoutSec 2 } catch { $null }
+          "after schtasks /End: daemon $($h.pid) answers: $([bool]$still); cmx2 processes left: $(@($left | Where-Object Name -eq 'cmx2.exe').Count)"
+          # back to a running service the way a person would: install again, which stops what is left first
+          dist\cmx2.exe serve --install --port $env:PORT
+          if ($LASTEXITCODE) { exit 1 }
+      - name: cmx2 upgrade --from a dir made by build.ts --all swaps the running exe and restarts
+        run: |
+          bun scripts/build.ts --all --version 99.0.0 --out dist2
+          if ($LASTEXITCODE) { exit 1 }
+          Get-Content dist2\SHA256SUMS
+          dist\cmx2.exe upgrade --from "$PWD\dist2"
+          if ($LASTEXITCODE) { exit 1 }
+          $h = Invoke-RestMethod "http://127.0.0.1:$env:PORT/global/health"
+          $h | Format-List
+          if ($h.version -ne '99.0.0') { "health says $($h.version), not 99.0.0"; exit 1 }
+          Get-ChildItem "$env:CMX2_DATA_DIR\bin" | Format-Table Name, Length
+          if (-not (Get-ChildItem "$env:CMX2_DATA_DIR\bin\cmx2.exe.old-*")) { "the old exe was not renamed aside"; exit 1 }
+          $v = & "$env:CMX2_DATA_DIR\bin\cmx2.exe" --version
+          if ($v -ne '99.0.0') { "the installed exe says $v"; exit 1 }
+      # a platform smoke for the binary, not a model test and not an integration test with a mock: the canned
+      # endpoint (scripts/ci-provider.ts) answers with one fixed shell call and quotes its output back, so cmx2 run
+      # drives the real daemon, the shell tool and git bash inside the binary end to end without a provider key
+      - name: cmx2 run answers through the installed daemon, and its shell tool runs in git bash
+        run: |
+          $prov = Start-Process bun -ArgumentList 'scripts/ci-provider.ts', '4832' -PassThru -NoNewWindow -RedirectStandardOutput "$env:RUNNER_TEMP\provider.log"
+          Start-Sleep 2
+          $out = & "$env:CMX2_DATA_DIR\bin\cmx2.exe" run "run the smoke command" | Out-String
+          $code = $LASTEXITCODE
+          $out
+          Stop-Process -Id $prov.Id -Force
+          Get-Content "$env:RUNNER_TEMP\provider.log"
+          if ($code) { "cmx2 run exited $code"; exit 1 }
+          if ($out -notmatch 'MINGW|MSYS') { "no MINGW or MSYS in the answer"; exit 1 }
+          if ($out -notmatch 'smoke-42') { "no smoke-42 in the answer"; exit 1 }
+      - name: serve --uninstall removes the task and stops every process
+        run: |
+          $out = dist\cmx2.exe serve --uninstall | Out-String
+          $out
+          if ($LASTEXITCODE) { exit 1 }
+          # the daemon is asked to exit and the supervisor told not to start it again, nothing killed
+          if ($out -notmatch 'stopped the daemon, pid \d+, and its supervisor') { "uninstall did not stop the daemon gracefully"; exit 1 }
+          Start-Sleep 2
+          schtasks /Query /TN $env:LABEL 2>$null
+          if (-not $LASTEXITCODE) { "the task is still there"; exit 1 }
+          $left = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'cmx2.exe' -or ($_.Name -eq 'conhost.exe' -and $_.CommandLine -match 'cmx2') }
+          $left | Select-Object ProcessId, Name, CommandLine | Format-List
+          if ($left) { "processes are left"; exit 1 }
+          $still = try { Invoke-RestMethod "http://127.0.0.1:$env:PORT/global/health" -TimeoutSec 2 } catch { $null }
+          if ($still) { "something still answers on $env:PORT"; exit 1 }
+          dist\cmx2.exe serve --status
+          "status exit: $LASTEXITCODE (1 is not installed)"
+          exit 0
+      # a platform smoke for the binary, not a model test and not an integration test with a mock: the canned
+      # endpoint (scripts/ci-provider.ts) answers with one fixed shell call and quotes its output back, so cmx2 run
+      # drives the real daemon, the shell tool and git bash inside the binary end to end without a provider key
+      - name: cmx2 run with no daemon up starts one inside itself and answers the same way
+        run: |
+          $up = try { Invoke-RestMethod "http://127.0.0.1:$env:PORT/global/health" -TimeoutSec 2 } catch { $null }
+          if ($up) { "a daemon still answers on $env:PORT"; exit 1 }
+          $prov = Start-Process bun -ArgumentList 'scripts/ci-provider.ts', '4832' -PassThru -NoNewWindow -RedirectStandardOutput "$env:RUNNER_TEMP\provider.log"
+          Start-Sleep 2
+          $out = & dist\cmx2.exe run "run the smoke command" | Out-String
+          $code = $LASTEXITCODE
+          $out
+          Stop-Process -Id $prov.Id -Force
+          Get-Content "$env:RUNNER_TEMP\provider.log"
+          if ($code) { "cmx2 run exited $code"; exit 1 }
+          if ($out -notmatch 'MINGW|MSYS') { "no MINGW or MSYS in the answer"; exit 1 }
+          if ($out -notmatch 'smoke-42') { "no smoke-42 in the answer"; exit 1 }
+      - name: serve.log
+        if: always()
+        run: |
+          Get-Content "$env:CMX2_DATA_DIR\log\serve.log" -ErrorAction SilentlyContinue | Select-Object -Last 200
+          Get-ChildItem "$env:CMX2_DATA_DIR" -ErrorAction SilentlyContinue

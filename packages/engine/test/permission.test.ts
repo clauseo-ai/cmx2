@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { checksFor, commandPrefix, DEFAULT_PERMISSION, evaluate, rulesFromConfig, wildcardMatch } from "../src/permission.ts";
 
 test("wildcards: * spans, ? is one character, a trailing ' *' also matches the bare command", () => {
@@ -37,10 +39,30 @@ test("the shipped default allows work in the directory, asks for env files and f
 });
 
 test("path checks name the path relative to the working directory and the directory an always answer covers", () => {
+	// on windows the same names resolve on the current drive and read with backslashes
+	const win = process.platform === "win32";
 	const [edit, ext] = checksFor("edit", { path: "../other/x.ts" }, "/w/app");
-	expect(edit).toMatchObject({ permission: "edit", patterns: ["/w/other/x.ts"] });
-	expect(ext).toMatchObject({ permission: "external_directory", patterns: ["/w/other/*"], always: ["/w/other/*"] });
+	expect(edit).toMatchObject({ permission: "edit", patterns: [win ? resolve("/w/other/x.ts") : "/w/other/x.ts"] });
+	const dir = win ? `${resolve("/w/other")}\\*` : "/w/other/*";
+	expect(ext).toMatchObject({ permission: "external_directory", patterns: [dir], always: [dir] });
 	expect(checksFor("grep", { pattern: "x" }, "/w")[0]!.patterns).toEqual(["."]);
+});
+
+test.skipIf(process.platform !== "win32")("windows paths: drive letters and case do not matter, a drive's root is one directory, ~\\ is home", () => {
+	const rules = [...rulesFromConfig(DEFAULT_PERMISSION), { permission: "external_directory", pattern: "c:/data/reports/*", action: "allow" as const }, { permission: "edit", pattern: "C:\\Data\\Reports\\*", action: "deny" as const }];
+	const decide = (tool: string, path: string, cwd = "C:\\work\\repo") => checksFor(tool, { path }, cwd).map((c) => `${c.permission}:${c.patterns.map((p) => evaluate(rules, c.permission, p).action).join(",")}`);
+	expect(decide("read", "C:\\DATA\\reports\\ses_x-1.md")).toEqual(["read:allow", "external_directory:allow"]);
+	expect(decide("edit", "c:\\data\\REPORTS\\ses_x-1.md")).toEqual(["edit:deny", "external_directory:allow"]);
+	// inside the working directory whatever the case of its letters
+	expect(decide("edit", "c:\\WORK\\repo\\src\\a.ts")).toEqual(["edit:allow"]);
+	expect(checksFor("edit", { path: "src/a.ts" }, "C:\\work\\repo")[0]!.patterns).toEqual(["src\\a.ts"]);
+	// another drive is outside, and a file at a drive's root asks for the root as C:\*, not C:\\*
+	expect(decide("read", "D:\\x.txt")).toEqual(["read:allow", "external_directory:ask"]);
+	expect(checksFor("read", { path: "C:\\x.txt" }, "C:\\work")[1]!.patterns).toEqual(["C:\\*"]);
+	expect(evaluate([{ permission: "external_directory", pattern: "C:\\*", action: "allow" }], "external_directory", "c:\\*").action).toBe("allow");
+	expect(checksFor("read", { path: "~\\notes.txt" }, "C:\\work")[0]!.metadata.path).toBe(join(homedir(), "notes.txt"));
+	// commands keep their case
+	expect(evaluate([{ permission: "shell", pattern: "rm *", action: "deny" }], "shell", "RM x").action).toBe("ask");
 });
 
 test("jobs, terminals and deferred tools are checked like the tools they stand for", () => {

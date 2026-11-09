@@ -11,7 +11,7 @@
  *
  * run: bun test packages/server/test/edits.test.ts
  */
-import { afterAll, expect, test } from "bun:test";
+import { afterAll, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,7 +24,11 @@ import { Value } from "typebox/value";
 import { nonce } from "../../eval/src/harness.ts";
 import { serve } from "../src/index.ts";
 
-const root = realpathSync(mkdtempSync(join(tmpdir(), "cmx2-edits-")));
+// windows starts git, cmd.exe and a daemon slower than bun's 5 s default allows for these
+if (process.platform === "win32") setDefaultTimeout(30_000);
+
+// native: windows' temp dir is an 8.3 short name (RUNNER~1) that only the native realpath expands, as the daemon does
+const root = realpathSync.native(mkdtempSync(join(tmpdir(), "cmx2-edits-")));
 const work = join(root, "work");
 mkdirSync(work);
 
