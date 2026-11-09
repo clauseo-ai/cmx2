@@ -27,6 +27,7 @@
       },
       "dependencies": {
         "@cmx2/engine": "workspace:*",
+        "@cmx2/platform": "workspace:*",
         "@cmx2/routing": "workspace:*",
         "@cmx2/server": "workspace:*",
         "@cmx2/store": "workspace:*",
@@ -52,6 +53,7 @@
       "name": "@cmx2/engine",
       "version": "0.0.0",
       "dependencies": {
+        "@cmx2/platform": "workspace:*",
         "@cmx2/prompts": "workspace:*",
         "@cmx2/tools": "workspace:*",
         "@earendil-works/pi-agent-core": "0.99.1",
@@ -68,10 +70,15 @@
         "@cmx2/engine": "workspace:*",
       },
     },
+    "packages/platform": {
+      "name": "@cmx2/platform",
+      "version": "0.0.0",
+    },
     "packages/procs": {
       "name": "@cmx2/procs",
       "version": "0.0.0",
       "dependencies": {
+        "@cmx2/platform": "workspace:*",
         "@cmx2/tools": "workspace:*",
       },
     },
@@ -93,6 +100,7 @@
         "@cmx2/actors": "workspace:*",
         "@cmx2/contract": "workspace:*",
         "@cmx2/engine": "workspace:*",
+        "@cmx2/platform": "workspace:*",
         "@cmx2/procs": "workspace:*",
         "@cmx2/routing": "workspace:*",
         "@cmx2/store": "workspace:*",
@@ -109,6 +117,7 @@
       "name": "@cmx2/store",
       "version": "0.0.0",
       "dependencies": {
+        "@cmx2/platform": "workspace:*",
         "@cmx2/tools": "workspace:*",
       },
     },
@@ -116,6 +125,7 @@
       "name": "@cmx2/tools",
       "version": "0.0.0",
       "dependencies": {
+        "@cmx2/platform": "workspace:*",
         "@earendil-works/pi-codemode": "0.99.1",
         "@earendil-works/pi-mcp": "0.99.1",
         "quickjs-wasi": "3.6.2",
@@ -140,6 +150,9 @@
     "packages/worktrees": {
       "name": "@cmx2/worktrees",
       "version": "0.0.0",
+      "dependencies": {
+        "@cmx2/platform": "workspace:*",
+      },
     },
   },
   "packages": {
@@ -196,6 +209,8 @@
     "@cmx2/engine": ["@cmx2/engine@workspace:packages/engine"],
 
     "@cmx2/eval": ["@cmx2/eval@workspace:packages/eval"],
+
+    "@cmx2/platform": ["@cmx2/platform@workspace:packages/platform"],
 
     "@cmx2/procs": ["@cmx2/procs@workspace:packages/procs"],
 
