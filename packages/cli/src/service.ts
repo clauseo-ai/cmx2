@@ -1,11 +1,14 @@
 import { authHeaders } from "./daemon.ts";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { dataDir, loadConfig } from "@cmx2/engine/config";
+import { killTree, pidAlive } from "@cmx2/platform";
 import { compareVersions, compiled, installedBinary } from "./release.ts";
 import { type SignResult, signatureOf, signBinary, signLine } from "./signing.ts";
+import { readSupervisor, stillRuns, supervisorFile } from "./supervise.ts";
 import { fail } from "./util.ts";
+import { decodeOutput, parseTaskXml, pathHas, renderTaskXml, type TaskSpec, utf16File, withPathEntry } from "./windows.ts";
 
 /**
  * `cmx2 serve --install`: the daemon as a per-user service. launchd on macos, a systemd user unit on
@@ -15,6 +18,11 @@ import { fail } from "./util.ts";
  * secrets never go in the unit. keys set in the installing shell (ANTHROPIC_API_KEY and friends, and any
  * `$NAME` the profile's providers reference) are written to `<data dir>/service.env`, mode 0600, which
  * the unit reads at start. the data dir is not the profile, so a profile kept in git never holds them.
+ *
+ * on windows it is a task scheduler task that runs `serve --supervise` (windows.ts and supervise.ts say why).
+ * the supervisor reads the same service.env. mode 0600 means nothing on ntfs; what keeps the file to you there is
+ * the acl of your profile directory, which only you, SYSTEM and the administrators can read. a data dir moved
+ * outside the profile (CMX2_DATA_DIR) has whatever acl that place gives it.
  */
 
 export interface UnitSpec {
@@ -40,6 +48,8 @@ function systemdName(label: string): string {
 }
 
 export function unitPath(platform = process.platform, label = serviceLabel(), home = homedir()): string {
+	// windows: the definition schtasks /Create was given, kept for reading; the task itself lives in task scheduler
+	if (platform === "win32") return join(dataDir(), `${label}.task.xml`);
 	if (platform === "darwin") return join(home, "Library", "LaunchAgents", `${label}.plist`);
 	return join(process.env.XDG_CONFIG_HOME || join(home, ".config"), "systemd", "user", `${systemdName(label)}.service`);
 }
@@ -151,10 +161,11 @@ export function parseEnvFile(text: string): Record<string, string> {
 }
 
 /** runs a command; one that is not installed is a failed run that says so, not an exception */
-export function run(cmd: string[]): { ok: boolean; out: string; missing?: boolean } {
+export function run(cmd: string[], o: { env?: Record<string, string> } = {}): { ok: boolean; out: string; missing?: boolean } {
 	try {
-		const p = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
-		return { ok: p.exitCode === 0, out: `${p.stdout.toString()}${p.stderr.toString()}`.trim() };
+		const p = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe", windowsHide: true, ...(o.env ? { env: { ...process.env, ...o.env } } : {}) });
+		const text = (b: Buffer) => (process.platform === "win32" ? decodeOutput(b) : b.toString());
+		return { ok: p.exitCode === 0, out: `${text(p.stdout)}${text(p.stderr)}`.trim() };
 	} catch (e) {
 		if ((e as { code?: string }).code !== "ENOENT") throw e;
 		return { ok: false, out: `${cmd[0]} was not found on PATH`, missing: true };
@@ -177,11 +188,73 @@ export interface ServiceState {
 	binary?: string;
 	port?: number;
 	hostname?: string;
+	/** windows: the env file the task's supervisor reads, whose directory is the service's data dir */
+	envFile?: string;
 }
 
-/** reads the unit file and asks launchd or systemd how it is doing */
-export function serviceState(): ServiceState {
+/** a loopback address for a bind address */
+function reach(hostname: string | undefined): string {
+	return !hostname || hostname === "0.0.0.0" ? "127.0.0.1" : hostname;
+}
+
+export interface Health {
+	name?: string;
+	version?: string;
+	pid?: number;
+	/** it answered 401: something is there, behind credentials this shell lacks */
+	locked?: true;
+}
+
+/** what /global/health says on host:port, or undefined when nothing answers */
+export async function healthAt(host: string, port: number, timeout = 1500): Promise<Health | undefined> {
+	const res = await fetch(`http://${host}:${port}/global/health`, { headers: authHeaders(), signal: AbortSignal.timeout(timeout) }).catch(() => undefined);
+	if (res?.status === 401) return { locked: true };
+	if (!res?.ok) return undefined;
+	return (await res.json().catch(() => ({}))) as Health;
+}
+
+/** polls health until `ok` holds or `ms` pass */
+async function waitHealth(host: string, port: number, ok: (h: Health) => boolean, ms: number): Promise<Health | undefined> {
+	const until = Date.now() + ms;
+	while (Date.now() < until) {
+		const h = await healthAt(host, port, 1000);
+		if (h && ok(h)) return h;
+		await Bun.sleep(250);
+	}
+	return undefined;
+}
+
+/** windows: the task's definition as task scheduler holds it, or undefined when there is no such task */
+function queryTask(label: string): ReturnType<typeof parseTaskXml> | undefined {
+	const r = run(["schtasks", "/Query", "/TN", label, "/XML"]);
+	return r.ok ? parseTaskXml(r.out) : undefined;
+}
+
+/** windows: a process's file name (cmx2.exe), from tasklist's csv, which is not localized */
+export function imageName(pid: number): string | undefined {
+	const r = run(["tasklist", "/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"]);
+	for (const line of r.out.split(/\r?\n/)) {
+		const m = line.match(/^"([^"]+)","(\d+)"/);
+		if (m && Number(m[2]) === pid) return m[1];
+	}
+	return undefined;
+}
+
+/** reads the unit file and asks launchd or systemd how it is doing; on windows, asks task scheduler and the daemon */
+export async function serviceState(): Promise<ServiceState> {
 	const label = serviceLabel();
+	if (process.platform === "win32") {
+		const s: ServiceState = { platform: process.platform, label, unit: `task scheduler task ${label}`, installed: false, loaded: false, running: false };
+		const t = queryTask(label);
+		if (!t) return s;
+		Object.assign(s, { installed: true, loaded: true, binary: t.binary, port: t.port, hostname: t.hostname, envFile: t.envFile });
+		const h = s.port ? await healthAt(reach(s.hostname), s.port) : undefined;
+		if (h?.name === "cmx2" || h?.locked) {
+			s.running = true;
+			if (h.pid) s.pid = h.pid;
+		}
+		return s;
+	}
 	const unit = unitPath();
 	const s: ServiceState = { platform: process.platform, label, unit, installed: existsSync(unit), loaded: false, running: false };
 	if (s.installed) {
@@ -214,12 +287,75 @@ export function serviceState(): ServiceState {
 /** the command that restarts the installed unit, for printing */
 export function restartCommand(): string {
 	const label = serviceLabel();
+	if (process.platform === "win32") return `schtasks /End /TN ${label} && schtasks /Run /TN ${label}`;
 	return process.platform === "darwin" ? `launchctl kickstart -k gui/${uid()}/${label}` : `systemctl --user restart ${systemdName(label)}.service`;
 }
 
 /** restarts the installed unit; false with the reason when it could not */
-export function restartService(): { ok: boolean; out: string } {
+export async function restartService(): Promise<{ ok: boolean; out: string }> {
+	if (process.platform === "win32") return restartWindows();
 	return run(restartCommand().split(" "));
+}
+
+/**
+ * windows: the daemon is asked to restart through its api (it exits 0 and the supervisor starts the binary at the
+ * installed path again, the new one after an upgrade), and the restart counts once health names a new pid. when
+ * the api does not do it, the task is ended, whatever it left running is stopped, and the task is run again
+ */
+async function restartWindows(): Promise<{ ok: boolean; out: string }> {
+	const s = await serviceState();
+	if (!s.installed) return { ok: false, out: `there is no task named ${s.label}` };
+	if (!s.port) return { ok: false, out: `the task ${s.label} names no --port` };
+	const host = reach(s.hostname);
+	const before = await healthAt(host, s.port);
+	const fresh = (h: Health) => h.name === "cmx2" && !!h.pid && h.pid !== before?.pid;
+	if (before?.pid) {
+		const r = await fetch(`http://${host}:${s.port}/global/restart`, { method: "POST", headers: authHeaders(), signal: AbortSignal.timeout(5000) }).catch(() => undefined);
+		if (r?.ok) {
+			const h = await waitHealth(host, s.port, fresh, 45_000);
+			if (h) return { ok: true, out: `the supervisor started a fresh daemon, pid ${h.pid}` };
+		}
+	}
+	await stopWindows(s);
+	const r = run(["schtasks", "/Run", "/TN", s.label]);
+	if (!r.ok) return { ok: false, out: `schtasks /Run failed: ${r.out}` };
+	const h = await waitHealth(host, s.port, fresh, 45_000);
+	return h ? { ok: true, out: `the task started again, pid ${h.pid}` } : { ok: false, out: `schtasks /Run started the task but nothing new answered on ${host}:${s.port}` };
+}
+
+/**
+ * windows: stops what the task runs. schtasks /End ends the process the task started; the supervisor it recorded
+ * is then killed if it is still there (so it cannot start the daemon again), and the daemon is asked to exit
+ * through /global/restart, which stops its sessions' processes on the way out, and killed with its tree when it
+ * does not go. a cmx2 on the port that this supervisor did not start is left alone. returns what it did
+ */
+async function stopWindows(s: ServiceState): Promise<string[]> {
+	const notes: string[] = [];
+	run(["schtasks", "/End", "/TN", s.label]);
+	const record = supervisorFile(s.envFile ? dirname(s.envFile) : dataDir());
+	const rec = readSupervisor(record);
+	const image = basename(s.binary ?? installedBinary());
+	if (rec && stillRuns(rec.pid, rec.stamp, imageName, image)) {
+		try {
+			process.kill(rec.pid);
+			notes.push(`stopped the supervisor, pid ${rec.pid}`);
+		} catch (e) {
+			notes.push(`could not stop the supervisor, pid ${rec.pid}: ${(e as Error).message}`);
+		}
+	}
+	const child = rec?.child && stillRuns(rec.child, rec.childStamp, imageName, image) ? rec.child : undefined;
+	if (child) {
+		const host = reach(s.hostname);
+		const h = s.port ? await healthAt(host, s.port) : undefined;
+		if (h?.pid === child) await fetch(`http://${host}:${s.port}/global/restart`, { method: "POST", headers: authHeaders(), signal: AbortSignal.timeout(5000) }).catch(() => undefined);
+		for (let i = 0; i < 60 && pidAlive(child); i++) await Bun.sleep(250);
+		if (pidAlive(child)) {
+			killTree(child);
+			notes.push(`killed the daemon, pid ${child}, which did not exit when asked`);
+		} else notes.push(`stopped the daemon, pid ${child}`);
+	}
+	if (rec) rmSync(record, { force: true });
+	return notes;
 }
 
 /**
@@ -229,12 +365,98 @@ export function restartService(): { ok: boolean; out: string } {
  */
 export function placeBinary(from: string, to: string): SignResult {
 	mkdirSync(dirname(to), { recursive: true });
+	if (process.platform === "win32") {
+		placeWindows(from, to);
+		return { kind: "skipped" };
+	}
 	const tmp = `${to}.new-${process.pid}`;
 	copyFileSync(from, tmp);
 	chmodSync(tmp, 0o755);
 	const signed = signBinary(tmp);
 	renameSync(tmp, to);
 	return signed;
+}
+
+/**
+ * windows will not overwrite or delete an exe that runs, but it renames one. the new file is copied beside the
+ * target first, the target is renamed to `<name>.old-<ms>`, and the copy is renamed into place; when that last
+ * step fails the old file is renamed back. the renamed copies are removed when nothing runs them any more: this
+ * tries every time, and one still running (the supervisor, until the task restarts) stays for the next try
+ */
+export function placeWindows(from: string, to: string, now = Date.now()): { aside?: string } {
+	if (resolve(from).toLowerCase() === resolve(to).toLowerCase()) return {};
+	const tmp = `${to}.new-${process.pid}`;
+	copyFileSync(from, tmp);
+	let aside: string | undefined;
+	try {
+		if (existsSync(to)) {
+			aside = `${to}.old-${now}`;
+			renameSync(to, aside);
+		}
+		renameSync(tmp, to);
+	} catch (e) {
+		rmSync(tmp, { force: true });
+		if (aside && !existsSync(to)) renameSync(aside, to);
+		throw e;
+	}
+	removeOld(to);
+	return aside ? { aside } : {};
+}
+
+/** best effort: the `.old-*` copies a windows upgrade left, except one that still runs */
+export function removeOld(to: string): string[] {
+	const left: string[] = [];
+	const prefix = `${basename(to)}.old-`;
+	let names: string[] = [];
+	try {
+		names = readdirSync(dirname(to));
+	} catch {
+		return left;
+	}
+	for (const n of names) {
+		if (!n.startsWith(prefix)) continue;
+		try {
+			rmSync(join(dirname(to), n), { force: true });
+		} catch {
+			left.push(join(dirname(to), n));
+		}
+	}
+	return left;
+}
+
+export type PathResult = { kind: "present" | "registered" | "added"; dir: string } | { kind: "failed"; dir: string; why: string };
+
+/** powershell without a profile, its output in utf-8 so a non-ascii user name comes through */
+export function ps(script: string, env?: Record<string, string>) {
+	return run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", `[Console]::OutputEncoding = [Text.Encoding]::UTF8; ${script}`], env ? { env } : {});
+}
+
+/**
+ * windows: `dir` on the user's PATH (HKCU\Environment), so cmx2 is found in a new terminal. a symlink in a
+ * PATH dir, what macos and linux get, needs developer mode on windows. the value is read raw and written back as
+ * REG_EXPAND_SZ, so entries like %USERPROFILE%\x keep working; [Environment]::SetEnvironmentVariable would read
+ * them expanded and write REG_SZ. setting and clearing a throwaway variable through it then sends the
+ * WM_SETTINGCHANGE that tells explorer, and so the next terminal, the PATH changed
+ */
+export function addToUserPath(dir: string): PathResult {
+	if (pathHas(process.env.PATH ?? "", dir)) return { kind: "present", dir };
+	const read = ps("$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment'); if ($k) { [Console]::Write($k.GetValue('Path', '', 'DoNotExpandEnvironmentNames')) }");
+	if (!read.ok) return { kind: "failed", dir, why: read.out || "powershell could not read it" };
+	const next = withPathEntry(read.out, dir);
+	if (next === undefined) return { kind: "registered", dir };
+	const write = ps(
+		"$k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment'); $k.SetValue('Path', $env:CMX2_USER_PATH, [Microsoft.Win32.RegistryValueKind]::ExpandString); $k.Close(); [Environment]::SetEnvironmentVariable('CMX2_PATH_CHANGED', '1', 'User'); [Environment]::SetEnvironmentVariable('CMX2_PATH_CHANGED', $null, 'User')",
+		{ CMX2_USER_PATH: next },
+	);
+	return write.ok ? { kind: "added", dir } : { kind: "failed", dir, why: write.out || "powershell could not write it" };
+}
+
+/** what addToUserPath did, in the shape linkNotes prints */
+export function pathNotes(r: PathResult): string[] {
+	if (r.kind === "failed") return [`path       could not add ${r.dir} to your user PATH: ${r.why}. add it in settings, under "edit environment variables for your account"`];
+	if (r.kind === "present") return [`path       ${r.dir} is on your PATH`];
+	if (r.kind === "registered") return [`path       ${r.dir} is on your user PATH; open a new terminal if cmx2 is not found in this one`];
+	return [`path       added ${r.dir} to your user PATH. open a new terminal and cmx2 is found there`];
 }
 
 /** where the `cmx2` on your PATH lives: $CMX2_INSTALL_DIR (made absolute), else ~/.local/bin, the same place scripts/install.sh uses */
@@ -389,8 +611,9 @@ export function same(a: string, b: string): boolean {
 }
 
 export async function install(opts: { port?: string; hostname?: string }) {
-	if (process.platform !== "darwin" && process.platform !== "linux") fail(`serve --install knows launchd (macos) and systemd (linux), not ${process.platform}`);
-	if (!compiled()) fail("serve --install copies the cmx2 binary, and this is bun running the source. build one with bun scripts/build.ts and run dist/cmx2 serve --install, or install a release with scripts/install.sh");
+	const win = process.platform === "win32";
+	if (process.platform !== "darwin" && process.platform !== "linux" && !win) fail(`serve --install knows launchd (macos), systemd (linux) and task scheduler (windows), not ${process.platform}`);
+	if (!compiled()) fail(`serve --install copies the cmx2 binary, and this is bun running the source. build one with bun scripts/build.ts and run ${win ? "dist\\cmx2.exe" : "dist/cmx2"} serve --install${win ? "" : ", or install a release with scripts/install.sh"}`);
 	// before anything is copied or written: without systemd there is no user manager to install into
 	if (process.platform === "linux" && run(["systemctl", "--version"]).missing) {
 		fail("systemctl was not found, so there is no systemd user manager to install a service into. run cmx2 serve in a terminal, or under your own supervisor (it exits 0 on /global/restart and expects to be started again)");
@@ -403,18 +626,28 @@ export async function install(opts: { port?: string; hostname?: string }) {
 	const binary = installedBinary();
 	const logDir = join(data, "log");
 	mkdirSync(logDir, { recursive: true });
+	// windows: a task already installed is stopped first; its daemon holds the port and its supervisor the binary
+	const stopped = win ? await (async () => {
+		const prev = await serviceState();
+		return prev.installed ? await stopWindows(prev) : [];
+	})() : [];
 	// a copy install.sh placed, or one an older version left ad hoc, is signed by placing it over itself
 	const signed = !same(process.execPath, binary) ? placeBinary(process.execPath, binary) : signatureOf(binary)?.adhoc ? placeBinary(binary, binary) : undefined;
-	const linked = keepLink(binary, { install: true });
+	const linkLines = win ? pathNotes(addToUserPath(dirname(binary))) : linkNotes(keepLink(binary, { install: true }), binary);
 
-	// keys from this shell go to the 0600 env file, merged over what an earlier install left
+	// keys from this shell go to the 0600 env file, merged over what an earlier install left. on windows the
+	// paths the daemon needs go there too: a task has no environment of its own to set
 	const envFile = join(data, "service.env");
-	const kept = existsSync(envFile) ? parseEnvFile(readFileSync(envFile, "utf8")) : {};
+	const plainNames = win ? ["CMX2_CONFIG_DIR", "CMX2_DATA_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "CMX2_GIT_BASH"] : [];
+	const kept = existsSync(envFile) ? parseEnvFile(readFileSync(envFile, "utf8").replace(/\r\n/g, "\n")) : {};
+	for (const k of plainNames) delete kept[k];
 	const fromShell: Record<string, string> = {};
 	for (const k of keyNames(config)) if (process.env[k]) fromShell[k] = process.env[k]!;
+	const plain: Record<string, string> = {};
+	for (const k of plainNames) if (process.env[k]) plain[k] = process.env[k]!;
 	const keys = { ...kept, ...fromShell };
-	if (Object.keys(keys).length) {
-		writeFileSync(envFile, renderEnvFile(keys), { mode: 0o600 });
+	if (Object.keys(keys).length || Object.keys(plain).length) {
+		writeFileSync(envFile, renderEnvFile({ ...plain, ...keys }), { mode: 0o600 });
 		chmodSync(envFile, 0o600);
 	}
 
@@ -424,7 +657,14 @@ export async function install(opts: { port?: string; hostname?: string }) {
 	const unit = unitPath();
 	mkdirSync(dirname(unit), { recursive: true });
 
-	if (process.platform === "darwin") {
+	if (win) {
+		const task: TaskSpec = { label: spec.label, user: windowsUser(), conhost: join(process.env.SystemRoot || process.env.windir || "C:\\Windows", "System32", "conhost.exe"), binary, envFile, port, hostname, workingDirectory: homedir() };
+		writeFileSync(unit, utf16File(renderTaskXml(task)));
+		const c = run(["schtasks", "/Create", "/TN", spec.label, "/XML", unit, "/F"]);
+		if (!c.ok) fail(`task scheduler would not take ${unit}: ${c.out || "no reason given"}`);
+		const r = run(["schtasks", "/Run", "/TN", spec.label]);
+		if (!r.ok) fail(`the task ${spec.label} is installed but would not start: ${r.out || "no reason given"}. it starts at your next logon; read ${join(logDir, "serve.log")}`);
+	} else if (process.platform === "darwin") {
 		writeFileSync(unit, renderLaunchd(spec));
 		const target = `gui/${uid()}`;
 		// a loaded agent must be booted out before launchd takes the new plist
@@ -448,34 +688,50 @@ export async function install(opts: { port?: string; hostname?: string }) {
 		run(["systemctl", "--user", "restart", name]);
 	}
 
-	// the daemon answers within a few seconds or the unit is wrong
-	const host = hostname === "0.0.0.0" ? "127.0.0.1" : hostname;
-	let health: { version?: string; pid?: number } | undefined;
-	for (let i = 0; i < 40 && !health; i++) {
-		await Bun.sleep(250);
-		const res = await fetch(`http://${host}:${port}/global/health`, { headers: authHeaders(), signal: AbortSignal.timeout(1000) }).catch(() => undefined);
-		if (res?.ok) health = (await res.json()) as typeof health;
-		// a daemon behind a password or paired credentials still answers, just not to us
-		else if (res?.status === 401) health = {};
-	}
-	console.log(`installed ${unit}`);
+	// the daemon answers within a few seconds or the unit is wrong (a windows binary's first start is slower: defender reads all of it)
+	const host = reach(hostname);
+	const waitS = win ? 30 : 10;
+	const health = await waitHealth(host, port, () => true, waitS * 1000);
+	console.log(`installed ${win ? `${spec.label}, a task scheduler task that starts at logon (definition in ${unit})` : unit}`);
+	for (const line of stopped) console.log(`before     ${line}`);
 	console.log(`binary     ${binary}`);
 	const signNote = signed && signLine(signed);
 	if (signNote) console.log(signNote);
-	for (const line of linkNotes(linked, binary)) console.log(line);
+	for (const line of linkLines) console.log(line);
 	console.log(`logs       ${join(logDir, "serve.log")}`);
-	if (Object.keys(fromShell).length) console.log(`keys       ${Object.keys(fromShell).join(", ")} from this shell, kept in ${envFile} (mode 600)`);
+	const guard = win ? "readable by you, SYSTEM and administrators through your profile's acl" : "mode 600";
+	if (Object.keys(fromShell).length) console.log(`keys       ${Object.keys(fromShell).join(", ")} from this shell, kept in ${envFile} (${guard})`);
 	else if (!Object.keys(keys).length) console.log(`keys       none in this shell; the daemon sees only what cmx2.jsonc names (a literal, $NAME from ${envFile}, or !command)`);
 	if (health) console.log(`running    http://${host}:${port}${health.version ? `, cmx2 ${health.version}, pid ${health.pid}` : " (it asks for credentials)"}`);
-	else fail(`the unit is loaded but nothing answered on ${host}:${port} after 10 s. read ${join(logDir, "serve.log")}; a port already taken is the usual cause`);
+	else fail(`the ${win ? "task" : "unit"} is loaded but nothing answered on ${host}:${port} after ${waitS} s. read ${join(logDir, "serve.log")}; a port already taken is the usual cause`);
 	if (hostname === "0.0.0.0") console.log("it listens on every interface. keep that to a private network, and pair clients with cmx2 pair");
 	if (process.platform === "linux" && !/Linger=yes/.test(run(["loginctl", "show-user", process.env.USER || String(uid()), "--property=Linger"]).out)) {
 		console.log("to keep it running when you are logged out and after a reboot: loginctl enable-linger $USER");
 	}
 }
 
+/** windows: DOMAIN\user, the account the task runs as */
+function windowsUser(): string {
+	const user = process.env.USERNAME;
+	if (user) return process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\${user}` : user;
+	return run(["whoami"]).out.trim();
+}
+
 export async function uninstall() {
-	const s = serviceState();
+	const s = await serviceState();
+	if (process.platform === "win32") {
+		if (!s.installed) {
+			console.log(`no service installed (there is no ${s.unit})`);
+			return;
+		}
+		const notes = await stopWindows(s);
+		const d = run(["schtasks", "/Delete", "/TN", s.label, "/F"]);
+		if (!d.ok) fail(`task scheduler would not delete ${s.label}: ${d.out}`);
+		rmSync(unitPath(), { force: true });
+		for (const line of notes) console.log(line);
+		console.log(`removed the ${s.unit}. the binary in ${dirname(installedBinary())} (and its place on your PATH), your sessions and your data stay`);
+		return;
+	}
 	if (!s.installed && !s.loaded) {
 		console.log(`no service installed (${s.unit} is not there)`);
 		return;
@@ -483,9 +739,9 @@ export async function uninstall() {
 	if (process.platform === "darwin") {
 		if (s.loaded) {
 			const r = run(["launchctl", "bootout", `gui/${uid()}/${s.label}`]);
-			if (!r.ok && serviceState().loaded) fail(`launchd would not unload ${s.label}: ${r.out}`);
+			if (!r.ok && (await serviceState()).loaded) fail(`launchd would not unload ${s.label}: ${r.out}`);
 			// bootout returns before launchd lets go of the label; wait so a status right after tells the truth
-			for (let i = 0; i < 50 && serviceState().loaded; i++) await Bun.sleep(100);
+			for (let i = 0; i < 50 && (await serviceState()).loaded; i++) await Bun.sleep(100);
 		}
 	} else {
 		run(["systemctl", "--user", "disable", "--now", `${systemdName(s.label)}.service`]);
@@ -496,7 +752,7 @@ export async function uninstall() {
 }
 
 export async function status() {
-	const s = serviceState();
+	const s = await serviceState();
 	if (!s.installed) {
 		console.log(`not installed. cmx2 serve --install sets it up (${s.unit})`);
 		if (s.loaded) console.log(`but ${s.label} is still loaded; cmx2 serve --uninstall clears it`);
@@ -506,12 +762,11 @@ export async function status() {
 	console.log(`unit       ${s.unit}`);
 	console.log(`binary     ${s.binary ?? "unknown"}`);
 	console.log(`listens    ${s.hostname ?? "?"}:${s.port ?? "?"}`);
-	console.log(`state      ${s.running ? `running, pid ${s.pid}` : s.loaded ? "loaded, not running" : "not loaded"}`);
+	// windows: task scheduler's own state is localized text, so running means the daemon answers
+	if (process.platform !== "win32") console.log(`state      ${s.running ? `running, pid ${s.pid}` : s.loaded ? "loaded, not running" : "not loaded"}`);
 	if (s.port) {
-		const host = s.hostname === "0.0.0.0" || !s.hostname ? "127.0.0.1" : s.hostname;
-		const res = await fetch(`http://${host}:${s.port}/global/health`, { headers: authHeaders(), signal: AbortSignal.timeout(1500) }).catch(() => undefined);
-		const h = res?.ok ? ((await res.json()) as { version: string; pid: number }) : undefined;
-		console.log(`answers    ${h ? `yes, cmx2 ${h.version}, pid ${h.pid}` : "no"}`);
+		const h = await healthAt(reach(s.hostname), s.port);
+		console.log(`answers    ${h?.name === "cmx2" ? `yes, cmx2 ${h.version}, pid ${h.pid}` : h?.locked ? "yes, behind credentials this shell does not have" : "no"}`);
 		if (!h) process.exitCode = 1;
 	}
 }

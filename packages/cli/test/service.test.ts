@@ -47,7 +47,7 @@ test("the systemd unit restarts always, reads the env file if present and quotes
 	expect(unit).not.toMatch(/API_KEY/);
 });
 
-test("the env file round-trips values with quotes and spaces, the way sh reads it", () => {
+test.skipIf(process.platform === "win32")("the env file round-trips values with quotes and spaces, the way sh reads it", () => {
 	const vars = { ANTHROPIC_API_KEY: "sk-ant-abc'def ghi", OTHER: "$not expanded" };
 	const text = renderEnvFile(vars);
 	expect(parseEnvFile(text)).toEqual(vars);

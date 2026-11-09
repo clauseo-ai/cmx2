@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { compiledRoot } from "@cmx2/platform";
 import { connect } from "../daemon.ts";
 
 export const help = `cmx2 tui: the terminal client (plain cmx2 runs this)
@@ -21,7 +22,8 @@ the theme file included.`;
  * the daemon's import graph. a binary embeds it at tui/src/index.js (scripts/build.ts).
  */
 function entry(): string {
-	if (import.meta.url.includes("/$bunfs/")) return "file:///$bunfs/root/tui/src/index.js";
+	const root = compiledRoot(import.meta.url);
+	if (root) return `${root}tui/src/index.js`;
 	return new URL("../../../tui/src/index.ts", import.meta.url).href;
 }
 
