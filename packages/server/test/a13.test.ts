@@ -144,7 +144,8 @@ async function cut(how: "SIGTERM" | "SIGKILL") {
 	}
 }
 
-test("a13: a message a SIGTERM restart cut off reads the same as its last logged event", async () => {
+// windows has no SIGTERM to catch: kill("SIGTERM") there is TerminateProcess, the same as the SIGKILL case below
+test.skipIf(process.platform === "win32")("a13: a message a SIGTERM restart cut off reads the same as its last logged event", async () => {
 	const r = await cut("SIGTERM");
 	expect(r.cutOff?.finish).toBe("aborted");
 	expect(r.row?.time?.completed).toBe(r.cutOff?.time?.completed);

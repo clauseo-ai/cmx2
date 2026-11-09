@@ -360,7 +360,8 @@ test("pairing: a client's name cannot inject log lines or escapes; the auth dir 
 	chmodOf(join(dir, "auth"), 0o755);
 	const p = new Pairing(dir);
 	const { token } = p.begin();
-	expect(statOf(join(dir, "auth")).mode & 0o777).toBe(0o700);
+	// ntfs has no mode bits; the user profile's acl guards the directory there
+	if (process.platform !== "win32") expect(statOf(join(dir, "auth")).mode & 0o777).toBe(0o700);
 	const r = p.exchange(token, "phone\ncmx2: paired attacker (cred_x)\u001b[2J");
 	expect(r.name).not.toMatch(/[\n\u001b]/);
 	expect(() => p.exchange(token, "again")).toThrow("already used");
@@ -381,7 +382,11 @@ test("cmx2 serve reads CMX2_SERVER_PASSWORD and keeps it out of every process it
 	await d.start();
 	try {
 		const out = join(dir, "env.txt");
-		await d.api("/pty", { command: "sh", args: ["-c", `printf 'pw=%s' "$CMX2_SERVER_PASSWORD" > ${out}`], cwd: dir });
+		if (process.platform === "win32") {
+			// windows has no terminals yet; a plain job starts through the same process registry with the same env
+			const s = await d.api("/session", { directory: dir });
+			await d.api(`/session/${s.id}/procs`, { command: `printf 'pw=%s' "$CMX2_SERVER_PASSWORD" > '${out.replaceAll("\\", "/")}'` });
+		} else await d.api("/pty", { command: "sh", args: ["-c", `printf 'pw=%s' "$CMX2_SERVER_PASSWORD" > ${out}`], cwd: dir });
 		const said = await until(async () => ((await Bun.file(out).exists()) ? await Bun.file(out).text() : undefined), "the terminal's env line");
 		console.log(`a terminal started by a daemon with a password set: ${said}`);
 		expect(said).toBe("pw=");

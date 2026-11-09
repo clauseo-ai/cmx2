@@ -24,7 +24,8 @@ import { Value } from "typebox/value";
 import { nonce } from "../../eval/src/harness.ts";
 import { serve } from "../src/index.ts";
 
-const root = realpathSync(mkdtempSync(join(tmpdir(), "cmx2-edits-")));
+// native: windows' temp dir is an 8.3 short name (RUNNER~1) that only the native realpath expands, as the daemon does
+const root = realpathSync.native(mkdtempSync(join(tmpdir(), "cmx2-edits-")));
 const work = join(root, "work");
 mkdirSync(work);
 

@@ -186,14 +186,10 @@ describe("making checkouts", () => {
 
 describe("the run lock", () => {
 	test("merge and discard refuse while another process holds the lock of a session in the checkout", async () => {
-		const lockFile = join(DATA, "locks", `${session}.lock`);
+		// another process holding the lock: a bun that takes it through the daemon's own RunLocks (flock off windows,
+		// LockFileEx on windows), so the holder's json names that process
 		const holder = Bun.spawn(
-			[
-				"python3",
-				"-c",
-				`import fcntl,json,os,time,sys\nf=open(sys.argv[1],"a+")\nfcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)\nf.truncate(0)\nf.write(json.dumps({"pid":os.getpid(),"host":"another-daemon","since":int(time.time()*1000)}))\nf.flush()\nprint("held",flush=True)\ntime.sleep(60)`,
-				lockFile,
-			],
+			[process.execPath, "-e", `import { RunLocks } from ${JSON.stringify(join(import.meta.dir, "../src/lock.ts"))}; new RunLocks(${JSON.stringify(DATA)}).acquire(${JSON.stringify(session)}); console.log("held"); await Bun.sleep(60000);`],
 			{ stdout: "pipe" },
 		);
 		const reader = holder.stdout.getReader();

@@ -11,7 +11,8 @@ import { serve } from "../src/index.ts";
  * routes through the generated client, in process (the daemon's handler as fetch, no socket). no
  * model is called here: turns are driven against a real daemon and the real provider in the m2 eval.
  */
-const root = realpathSync(mkdtempSync(join(tmpdir(), "cmx2-server-")));
+// native: windows' temp dir is an 8.3 short name (RUNNER~1) that only the native realpath expands, as the daemon does
+const root = realpathSync.native(mkdtempSync(join(tmpdir(), "cmx2-server-")));
 const work = join(root, "work");
 mkdirSync(work);
 const config = { ...structuredClone(DEFAULTS), sources: [] };

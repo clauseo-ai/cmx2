@@ -46,7 +46,8 @@ test("pairing: a one-time token becomes a bearer once; after that requests need 
 	expect((await get("/global/health")).status).toBe(200);
 	const pairing = new Pairing(data);
 	const local = readFileSync(join(data, "auth", "local.token"), "utf8").trim();
-	expect(statSync(join(data, "auth", "local.token")).mode & 0o777).toBe(0o600);
+	// ntfs has no mode bits; the user profile's acl guards the file there
+	if (process.platform !== "win32") expect(statSync(join(data, "auth", "local.token")).mode & 0o777).toBe(0o600);
 	const { token } = pairing.begin();
 	const r = await fetch(`${base}/pair`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token, name: "phone" }) });
 	expect(r.status).toBe(200);

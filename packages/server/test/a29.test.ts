@@ -54,6 +54,11 @@ const dirOf = (name: string) => {
 	mkdirSync(d, { recursive: true });
 	return d;
 };
+/**
+ * the stand-in ripgreps are sh scripts found on PATH by name, which windows does not run (it looks for rg.exe or a
+ * .cmd), so the tests that need one are posix only; the deadline and caching they check are the same code there
+ */
+const standInTest = process.platform === "win32" ? test.skip : test;
 const slowPath = `${SLOW_BIN}:${process.env.PATH}`;
 const realPath = process.env.PATH!;
 
@@ -73,7 +78,7 @@ afterAll(() => {
 });
 
 describe("a29: /find/file does not hold the daemon", () => {
-	test("a slow walk answers what it found at the deadline, flagged truncated, while other requests are answered promptly", async () => {
+	standInTest("a slow walk answers what it found at the deadline, flagged truncated, while other requests are answered promptly", async () => {
 		process.env.PATH = slowPath;
 		process.env.CMX2_FIND_DEADLINE_MS = "1500";
 		const dir = dirOf("slow");
@@ -100,7 +105,7 @@ describe("a29: /find/file does not hold the daemon", () => {
 		console.log(`a29 slow walk: answered in ${Math.round(took)}ms, ${latencies.length} health probes during it, slowest ${Math.round(Math.max(...latencies))}ms`);
 	});
 
-	test("asks that arrive while a walk runs share it: one rg for many requests", async () => {
+	standInTest("asks that arrive while a walk runs share it: one rg for many requests", async () => {
 		process.env.PATH = slowPath;
 		process.env.CMX2_FIND_DEADLINE_MS = "700";
 		const dir = dirOf("shared");
@@ -111,7 +116,7 @@ describe("a29: /find/file does not hold the daemon", () => {
 		expect(spawns() - before).toBe(1);
 	});
 
-	test("a cut listing is not cached as whole: the next ask inside the ttl still says truncated, without a new walk", async () => {
+	standInTest("a cut listing is not cached as whole: the next ask inside the ttl still says truncated, without a new walk", async () => {
 		process.env.PATH = slowPath;
 		process.env.CMX2_FIND_DEADLINE_MS = "300";
 		const dir = dirOf("cut");
@@ -141,7 +146,7 @@ describe("a29: /find/file does not hold the daemon", () => {
 		expect(dirs).toEqual(["src/"]);
 	});
 
-	test("a ripgrep that closes its output and then hangs is cut at the deadline, flagged truncated, and ended", async () => {
+	standInTest("a ripgrep that closes its output and then hangs is cut at the deadline, flagged truncated, and ended", async () => {
 		const rg = standIn("closed", "exec 1>&-\nexec sleep 30");
 		process.env.PATH = rg.path;
 		process.env.CMX2_FIND_DEADLINE_MS = "800";
@@ -153,7 +158,7 @@ describe("a29: /find/file does not hold the daemon", () => {
 		expect(await gone(rg.pid(), 2000)).toBe(true);
 	});
 
-	test("a ripgrep that ignores SIGTERM is killed after a short grace, and the answer does not wait for it", async () => {
+	standInTest("a ripgrep that ignores SIGTERM is killed after a short grace, and the answer does not wait for it", async () => {
 		const rg = standIn("deaf", "trap '' TERM\necho a.txt\nexec sleep 30");
 		process.env.PATH = rg.path;
 		process.env.CMX2_FIND_DEADLINE_MS = "800";
@@ -166,7 +171,7 @@ describe("a29: /find/file does not hold the daemon", () => {
 		expect(await gone(rg.pid(), 3000)).toBe(true);
 	});
 
-	test("asks against a large cached listing do not hold the daemon: the best paths are kept as it goes, not sorted whole", async () => {
+	standInTest("asks against a large cached listing do not hold the daemon: the best paths are kept as it goes, not sorted whole", async () => {
 		const list = join(SCRATCH, "big-listing.txt");
 		const lines: string[] = [];
 		for (let i = 0; i < 200_000; i++) lines.push(`p${i % 500}/q${i % 97}/r${i}/file${i}.ts`);
@@ -225,7 +230,7 @@ describe("a29: /find/file does not hold the daemon", () => {
 		expect([r.status, r.headers.get("x-truncated"), await r.json(), spawns() - before]).toEqual([200, null, [], 0]);
 	});
 
-	test("a walk that failed with nothing listed is flagged truncated and is not cached: the next ask walks again", async () => {
+	standInTest("a walk that failed with nothing listed is flagged truncated and is not cached: the next ask walks again", async () => {
 		process.env.PATH = slowPath;
 		process.env.CMX2_FIND_DEADLINE_MS = "5000";
 		const dir = dirOf("failing");
