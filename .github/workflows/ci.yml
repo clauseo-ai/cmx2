@@ -75,10 +75,10 @@ jobs:
         id: setup-bun
         continue-on-error: true
         with:
-          bun-version: 1.3.14
+          bun-version: 1.4.3
       - name: bun from npm when the github release download fails
         if: steps.setup-bun.outcome == 'failure'
-        run: npm install -g bun@1.3.14
+        run: npm install -g bun@1.4.3
       - name: what the binary needs on the machine (ripgrep, a git identity)
         run: |
           choco install ripgrep -y --no-progress
