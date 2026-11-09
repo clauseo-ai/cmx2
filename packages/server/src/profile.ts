@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { type Config, ConfigError, EFFORTS, type Effort } from "@cmx2/engine/config";
 import { applyEdits, modify, type ParseError, parse, printParseErrorCode } from "jsonc-parser";
 
@@ -90,7 +90,7 @@ function redactDeep(v: unknown, underMap = false, key = ""): unknown {
  */
 export function redactConfig(config: Config): Record<string, unknown> {
 	const { sources, ...rest } = config;
-	return { ...(redactDeep(rest) as Record<string, unknown>), sources: sources.map((s) => s.split("/").pop()) };
+	return { ...(redactDeep(rest) as Record<string, unknown>), sources: sources.map((s) => basename(s)) };
 }
 
 /** true when a value in the patch is one of our own masks: writing it back would destroy the real value */

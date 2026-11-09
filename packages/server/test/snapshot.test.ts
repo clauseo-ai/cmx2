@@ -203,6 +203,17 @@ test("the project's own .git is left alone", async () => {
 	expect(log.stdout.toString()).toBe("?? a.txt\n");
 });
 
+/** the command lines of git processes still working on a tree: pgrep off windows, the process table through cim on windows */
+function gitsIn(dir: string): string[] {
+	if (process.platform !== "win32") {
+		const out = Bun.spawnSync(["pgrep", "-f", `git.*--work-tree ${dir}`]).stdout.toString().trim();
+		return out ? out.split("\n") : [];
+	}
+	const ps = Bun.spawnSync(["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='git.exe'\" | ForEach-Object { $_.CommandLine }"], { windowsHide: true });
+	expect(ps.exitCode).toBe(0);
+	return ps.stdout.toString().split(/\r?\n/).filter((l) => l.includes("--work-tree") && l.toLowerCase().includes(dir.toLowerCase()));
+}
+
 test("close lets work in flight finish, then refuses new work and leaves no git running", async () => {
 	const { dir, snaps } = setup({ repo: true });
 	for (let i = 0; i < 200; i++) put(dir, `f${i}.txt`, `${i}\n`);
@@ -210,8 +221,7 @@ test("close lets work in flight finish, then refuses new work and leaves no git 
 	await snaps.close(5_000);
 	expect(await inflight).toMatch(/^[0-9a-f]{40}$/);
 	expect(await snaps.track(dir)).toBeUndefined();
-	const left = Bun.spawnSync(["pgrep", "-f", `git.*--work-tree ${dir}`]).stdout.toString().trim();
-	expect(left).toBe("");
+	expect(gitsIn(dir)).toEqual([]);
 });
 
 test("a work tree removed after its first snapshot is reported as gone, not as a missing git", async () => {

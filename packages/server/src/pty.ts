@@ -27,8 +27,12 @@ export function ptyJson(p: ProcInfo) {
 	};
 }
 
-/** `/pty/shells`: the login shells this host lists, the user's own first */
+/** what a terminal request answers on windows, where bun has no pty */
+export const TTY_UNAVAILABLE = "terminals are not available on windows yet; run the command without tty (as a plain job or in the foreground)";
+
+/** `/pty/shells`: the login shells this host lists, the user's own first; none on windows, which has no terminals yet */
 export function shells() {
+	if (process.platform === "win32") return [];
 	const listed = existsSync("/etc/shells")
 		? readFileSync("/etc/shells", "utf8")
 				.split("\n")

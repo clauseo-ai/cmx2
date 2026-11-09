@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { messagesJson } from "../src/pages.ts";
 import { ProjectLists } from "../src/project-lists.ts";
 import { SessionUpdates } from "../src/session-updates.ts";
@@ -137,23 +137,31 @@ test("a git that hangs is stopped: the last status known (none at first) for a s
 	Bun.spawnSync([real, "init", "-q", "-b", "trunk", dir]);
 	const bin = join(dir, ".bin");
 	mkdirSync(bin);
-	writeFileSync(join(bin, "git"), `#!/bin/sh\n[ -e "${bin}/hang" ] && sleep 30\nexec "${real}" "$@"\n`);
-	chmodSync(join(bin, "git"), 0o755);
+	// the stand-in git hangs while bin/hang exists. windows runs a .cmd found on PATH, and cmd.exe and git start slower
+	// there, so the deadlines are wider
+	const win = process.platform === "win32";
+	if (win) writeFileSync(join(bin, "git.cmd"), `@echo off\r\nif exist "${bin}\\hang" ping -n 31 127.0.0.1 >nul\r\n"${real}" %*\r\n`);
+	else {
+		writeFileSync(join(bin, "git"), `#!/bin/sh\n[ -e "${bin}/hang" ] && sleep 30\nexec "${real}" "$@"\n`);
+		chmodSync(join(bin, "git"), 0o755);
+	}
+	const timeoutMs = win ? 2_000 : 300;
+	const unknownMs = win ? 2_500 : 400;
 	writeFileSync(join(bin, "hang"), "");
 	const before = process.env.PATH;
-	process.env.PATH = `${bin}:${before}`;
+	process.env.PATH = `${bin}${delimiter}${before}`;
 	try {
-		const v = new VcsCache({ timeoutMs: 300, unknownMs: 400 });
+		const v = new VcsCache({ timeoutMs, unknownMs });
 		const t0 = performance.now();
 		await v.load(dir);
-		expect(performance.now() - t0).toBeLessThan(3_000);
+		expect(performance.now() - t0).toBeLessThan(timeoutMs + 2_700);
 		expect(v.timeouts).toBe(1);
 		expect(v.fresh(dir)).toBe(true);
 		expect(v.of(dir)).toBeUndefined();
 		expect(v.inline).toBe(0);
 		// git answers again: after the unknown spell the next load has the branch
-		Bun.spawnSync(["rm", join(bin, "hang")]);
-		await Bun.sleep(450);
+		rmSync(join(bin, "hang"));
+		await Bun.sleep(unknownMs + 50);
 		expect(v.fresh(dir)).toBe(false);
 		await v.load(dir);
 		// the stand-in lives in the repository, so the tree is dirty

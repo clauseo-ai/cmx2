@@ -2,6 +2,8 @@ import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
+import { IS_WINDOWS } from "@cmx2/platform";
 import type { UserBlock } from "@cmx2/engine/session";
 import { isHeicMime, sniffHeic } from "@cmx2/tools";
 import { badRequest } from "./http.ts";
@@ -60,6 +62,8 @@ function headOf(abs: string, n: number): Uint8Array | undefined {
 
 function fileUrlPath(url: string): string {
 	try {
+		// windows: file:///C:/x and the file://C:\x a client may build by hand both name C:\x
+		if (IS_WINDOWS) return fileURLToPath(new URL(url));
 		return decodeURIComponent(new URL(url).pathname);
 	} catch {
 		throw badRequest(`${url} is not a file url`);
@@ -102,7 +106,7 @@ function pdfText(bytes: Uint8Array, filename: string): string {
 	try {
 		const src = join(dir, "in.pdf");
 		writeFileSync(src, bytes);
-		const r = spawnSync("pdftotext", ["-layout", src, "-"], { encoding: "utf8", timeout: 30_000, maxBuffer: 16 * 1024 * 1024 });
+		const r = spawnSync("pdftotext", ["-layout", src, "-"], { encoding: "utf8", timeout: 30_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true });
 		if (r.error || r.status !== 0) return `<file path="${filename}">\n(a pdf, ${bytes.length} bytes; this host has no pdftotext to read it, so only its name came through)\n</file>`;
 		const text = r.stdout.length > MENTION_MAX_BYTES ? `${r.stdout.slice(0, MENTION_MAX_BYTES)}\n(cut at 50 KB)` : r.stdout;
 		return `<file path="${filename}">\n${text}\n</file>`;

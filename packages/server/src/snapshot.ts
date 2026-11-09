@@ -76,6 +76,7 @@ async function run(args: string[], opts: { cwd?: string; stdin?: string; env?: R
 			stderr: "pipe",
 			env: { ...baseEnv(), ...opts.env },
 			timeout: TIMEOUT_MS,
+			windowsHide: true,
 		});
 	} catch (e) {
 		const missing = (e as { code?: string }).code === "ENOENT";

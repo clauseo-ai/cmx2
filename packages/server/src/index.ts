@@ -1,7 +1,9 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import { open as openFile, readdir, realpath, stat } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { basename, isAbsolute, join, resolve } from "node:path";
+import { IS_WINDOWS } from "@cmx2/platform";
 import { CONTRACT_VERSION, EVENTS, type EventType } from "@cmx2/contract";
 import { ActorError, Actors, agentTools, type Host, IDLE_WAIT_MS, ReportFiles, type SpawnInput } from "@cmx2/actors";
 import { type Config, ConfigError, configDir, dataDir as defaultDataDir, type Effort, loadConfig, loadConfigAsync, machineName, userNotes } from "@cmx2/engine/config";
@@ -26,7 +28,7 @@ import { browse, knownProject, projectOf, projectOfAsync } from "./fs.ts";
 import { Reach, waitingText } from "./reach.ts";
 import { systemInfo } from "./system.ts";
 import { blocksOf, type PartInput, type Resize } from "./parts.ts";
-import { ptyJson, shells, type TermSocketData, Terminals } from "./pty.ts";
+import { ptyJson, shells, type TermSocketData, Terminals, TTY_UNAVAILABLE } from "./pty.ts";
 import { type ProcEvent, type ProcInfo, Procs, type SweepResult } from "@cmx2/procs";
 import { badRequest, bodyOf, errorResponse, HttpError, intParam, notFound, queryOf } from "./http.ts";
 import { RunLockHeld, RunLocks } from "./lock.ts";
@@ -2514,7 +2516,7 @@ export function serve(opts: ServeOptions) {
 	const mcp = new McpPool({
 		dataDir: data,
 		version: VERSION,
-		cwd: real(process.env.HOME ?? process.cwd()),
+		cwd: real(process.env.HOME ?? (IS_WINDOWS ? homedir() : process.cwd())),
 		onChange: (st) => publish("global", "mcp.status", { name: st.name, status: st.status, transport: st.transport, tools: st.tools, ...(st.error ? { error: scrubText(st.error) } : {}), ...(st.sessions ? { sessions: st.sessions } : {}), ...(st.caller !== undefined ? { caller: st.caller } : {}), ...(st.instructions !== undefined ? { instructions: st.instructions } : {}) }),
 		log: (line) => console.error(line),
 	});
@@ -3021,7 +3023,7 @@ export function serve(opts: ServeOptions) {
 			try {
 				const r = patchProfile(configDir(), patch, () => checkProfileKeys(reload()));
 				await doReload();
-				return json({ path: r.path.split("/").pop(), changed: r.changed, config: redactConfig(config) });
+				return json({ path: basename(r.path), changed: r.changed, config: redactConfig(config) });
 			} catch (e) {
 				if (e instanceof ConfigError) throw badRequest(e.message);
 				throw e;
@@ -3032,8 +3034,10 @@ export function serve(opts: ServeOptions) {
 		}
 		if (p === "/pty/shells" && method === "GET") return json(shells());
 		if (p === "/pty" && method === "POST") {
+			// bun's pty is posix only
+			if (IS_WINDOWS) throw new HttpError(501, "NotSupportedError", TTY_UNAVAILABLE);
 			const b = await bodyOf<{ command?: string; args?: string[]; cwd?: string; title?: string; env?: Record<string, string>; origin?: "tui" | "model" }>(req, "createPty");
-			const cwd = b.cwd ? await realAsync(resolve(b.cwd)) : ((await directoryOf(req, url)) ?? real(process.env.HOME ?? process.cwd()));
+			const cwd = b.cwd ? await realAsync(resolve(b.cwd)) : ((await directoryOf(req, url)) ?? real(process.env.HOME ?? (IS_WINDOWS ? homedir() : process.cwd())));
 			await reachFor(cwd);
 			if (!(await stat(cwd).catch(() => undefined))?.isDirectory()) throw badRequest(`directory ${cwd} does not exist`);
 			const command = b.command ? [b.command, ...(b.args ?? []).map((a) => `'${a.replace(/'/g, "'\\''")}'`)].join(" ") : "";
@@ -3074,6 +3078,7 @@ export function serve(opts: ServeOptions) {
 			const stored = row(id);
 			if (stored.archived_at) throw new HttpError(409, "ConflictError", `session ${id} has ended; start a new one`);
 			const b = await bodyOf<{ command: string; tty?: boolean; title?: string; keep?: string; detach?: boolean; serve?: boolean; notify?: { on_exit?: boolean; on_pattern?: string; on_port?: number } }>(req, "startProc");
+			if (b.tty && IS_WINDOWS) throw new HttpError(501, "NotSupportedError", TTY_UNAVAILABLE);
 			const info = procs.spawn({ ...b, cwd: stored.directory, sessionID: id, origin: "user" });
 			return json(procJson(info), 201);
 		}
