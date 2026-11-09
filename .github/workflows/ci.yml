@@ -96,6 +96,9 @@ jobs:
         run: |
           "CMX2_DATA_DIR=$env:RUNNER_TEMP\cmx2 data" >> $env:GITHUB_ENV
           "CMX2_CONFIG_DIR=$env:RUNNER_TEMP\cmx2 config" >> $env:GITHUB_ENV
+          # the profile points at scripts/ci-provider.ts, the canned endpoint the run smoke below uses
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\cmx2 config" | Out-Null
+          Set-Content -Encoding utf8NoBOM "$env:RUNNER_TEMP\cmx2 config\cmx2.jsonc" '{ "model": "smoke/canned", "server": { "port": 4831 }, "providers": { "smoke": { "api": "openai-completions", "baseUrl": "http://127.0.0.1:4832/v1", "apiKey": "unused", "models": { "canned": { "name": "canned" } } }, "anthropic": { "blacklist": ["*"] } } }'
       - run: bun install --frozen-lockfile
       - name: build the binary natively
         run: |
@@ -162,6 +165,21 @@ jobs:
           if (-not (Get-ChildItem "$env:CMX2_DATA_DIR\bin\cmx2.exe.old-*")) { "the old exe was not renamed aside"; exit 1 }
           $v = & "$env:CMX2_DATA_DIR\bin\cmx2.exe" --version
           if ($v -ne '99.0.0') { "the installed exe says $v"; exit 1 }
+      # a platform smoke for the binary, not a model test and not an integration test with a mock: the canned
+      # endpoint (scripts/ci-provider.ts) answers with one fixed shell call and quotes its output back, so cmx2 run
+      # drives the real daemon, the shell tool and git bash inside the binary end to end without a provider key
+      - name: cmx2 run answers through the installed daemon, and its shell tool runs in git bash
+        run: |
+          $prov = Start-Process bun -ArgumentList 'scripts/ci-provider.ts', '4832' -PassThru -NoNewWindow -RedirectStandardOutput "$env:RUNNER_TEMP\provider.log"
+          Start-Sleep 2
+          $out = & "$env:CMX2_DATA_DIR\bin\cmx2.exe" run "run the smoke command" | Out-String
+          $code = $LASTEXITCODE
+          $out
+          Stop-Process -Id $prov.Id -Force
+          Get-Content "$env:RUNNER_TEMP\provider.log"
+          if ($code) { "cmx2 run exited $code"; exit 1 }
+          if ($out -notmatch 'MINGW|MSYS') { "no MINGW or MSYS in the answer"; exit 1 }
+          if ($out -notmatch 'smoke-42') { "no smoke-42 in the answer"; exit 1 }
       - name: serve --uninstall removes the task and stops every process
         run: |
           $out = dist\cmx2.exe serve --uninstall | Out-String
@@ -180,6 +198,23 @@ jobs:
           dist\cmx2.exe serve --status
           "status exit: $LASTEXITCODE (1 is not installed)"
           exit 0
+      # a platform smoke for the binary, not a model test and not an integration test with a mock: the canned
+      # endpoint (scripts/ci-provider.ts) answers with one fixed shell call and quotes its output back, so cmx2 run
+      # drives the real daemon, the shell tool and git bash inside the binary end to end without a provider key
+      - name: cmx2 run with no daemon up starts one inside itself and answers the same way
+        run: |
+          $up = try { Invoke-RestMethod "http://127.0.0.1:$env:PORT/global/health" -TimeoutSec 2 } catch { $null }
+          if ($up) { "a daemon still answers on $env:PORT"; exit 1 }
+          $prov = Start-Process bun -ArgumentList 'scripts/ci-provider.ts', '4832' -PassThru -NoNewWindow -RedirectStandardOutput "$env:RUNNER_TEMP\provider.log"
+          Start-Sleep 2
+          $out = & dist\cmx2.exe run "run the smoke command" | Out-String
+          $code = $LASTEXITCODE
+          $out
+          Stop-Process -Id $prov.Id -Force
+          Get-Content "$env:RUNNER_TEMP\provider.log"
+          if ($code) { "cmx2 run exited $code"; exit 1 }
+          if ($out -notmatch 'MINGW|MSYS') { "no MINGW or MSYS in the answer"; exit 1 }
+          if ($out -notmatch 'smoke-42') { "no smoke-42 in the answer"; exit 1 }
       - name: serve.log
         if: always()
         run: |
