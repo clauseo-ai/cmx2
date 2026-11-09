@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { armCpuName, linuxRelease, linuxVirtual, macAvailable, macFamily, parseDfMount, parseMeminfo, parseOsRelease, parsePlistStrings, parseVmStat, safeMount, systemInfo } from "../src/system.ts";
+import { armCpuName, linuxRelease, linuxVirtual, macAvailable, macFamily, parseDfMount, parseMeminfo, parseOsRelease, parsePlistStrings, parseRegValues, parseVmStat, safeMount, systemInfo, windowsRelease } from "../src/system.ts";
 
 /** the parsers behind /global/system, over recorded files from real machines */
 const fx = (name: string) => readFileSync(join(import.meta.dir, "fixtures", "system", name), "utf8");
@@ -72,6 +72,14 @@ test("df -P: the mount point, spaces included; a mount in the home reads from ~"
 	expect(safeMount("/", "/home/someone")).toBe("/");
 });
 
+test("windows: the bios key's values from reg query, and 11 told from 10 by the build", () => {
+	const reg = "\r\nHKEY_LOCAL_MACHINE\\HARDWARE\\DESCRIPTION\\System\\BIOS\r\n    BiosMajorRelease    REG_DWORD    0x4\r\n    SystemManufacturer    REG_SZ    Microsoft Corporation\r\n    SystemProductName    REG_SZ    Virtual Machine\r\n    BaseBoardProduct    REG_SZ    \r\n\r\n";
+	expect(parseRegValues(reg)).toEqual({ BiosMajorRelease: "0x4", SystemManufacturer: "Microsoft Corporation", SystemProductName: "Virtual Machine", BaseBoardProduct: "" });
+	expect(windowsRelease("10.0.26100", "Windows 10 Pro")).toEqual({ name: "Windows", version: "11" });
+	expect(windowsRelease("10.0.19045", "Windows 10 Home")).toEqual({ name: "Windows", version: "10" });
+	expect(windowsRelease("10.0.20348", "Windows Server 2022 Datacenter")).toEqual({ name: "Windows Server", version: "2022" });
+});
+
 test("systemInfo on this machine: the agreed shape, static half reused", async () => {
 	const read = systemInfo(import.meta.dir);
 	const a = await read();
@@ -83,6 +91,11 @@ test("systemInfo on this machine: the agreed shape, static half reused", async (
 	expect(a.memory.available).toBeLessThanOrEqual(a.memory.total);
 	expect(a.daemon.rss).toBeGreaterThan(0);
 	if (a.disk) expect(a.disk.total).toBeGreaterThanOrEqual(a.disk.available);
+	if (process.platform === "win32") {
+		expect(a.os.name).toStartWith("Windows");
+		expect(a.disk?.path).toMatch(/^[A-Za-z]:\\$/);
+		console.log(`windows system: ${JSON.stringify({ os: a.os, machine: a.machine, cpu: a.cpu.model, memory: a.memory, disk: a.disk })}`);
+	}
 	const b = await read();
 	expect(b.os).toBe(a.os);
 	expect(b.at).toBeGreaterThanOrEqual(a.at);
