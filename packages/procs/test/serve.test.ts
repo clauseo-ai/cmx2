@@ -145,7 +145,8 @@ function fakeLsof(name: string, body: string): string {
 	return path;
 }
 
-test("ptys are not swept: an open terminal starts no sweep and gets no port updates; its ports come on demand", async () => {
+// bun's pty (terminal:) is posix only
+test.skipIf(process.platform === "win32")("ptys are not swept: an open terminal starts no sweep and gets no port updates; its ports come on demand", async () => {
 	const own: ProcEvent[] = [];
 	const p2 = new Procs({ dataDir: join(root, "data-pty"), onEvent: (e) => own.push(e), killGrace: 500, portSweepMs: SWEEP });
 	const port = freePort();
@@ -160,7 +161,8 @@ test("ptys are not swept: an open terminal starts no sweep and gets no port upda
 	await p2.stopAll();
 });
 
-test("an lsof that hangs is killed at the timeout, said once, and the sweep keeps going", async () => {
+// the fake lsof scripts below are posix only: windows sweeps with netstat and ignores the lsof option
+test.skipIf(process.platform === "win32")("an lsof that hangs is killed at the timeout, said once, and the sweep keeps going", async () => {
 	const pids = join(root, "hung.pids");
 	// the background sleep keeps lsof's stdout open after lsof itself is killed, so only the hard deadline ends the read
 	const lsof = fakeLsof("lsof-hang", `sleep 30 & echo $! >> ${pids}\nexec sleep 30`);
@@ -185,7 +187,7 @@ test("an lsof that hangs is killed at the timeout, said once, and the sweep keep
 	}
 });
 
-test("an lsof that exists but fails to start is tried again next sweep; only a missing lsof turns the sweep off", async () => {
+test.skipIf(process.platform === "win32")("an lsof that exists but fails to start is tried again next sweep; only a missing lsof turns the sweep off", async () => {
 	// a bad interpreter makes the start fail (ENOENT from the spawn) while the file is there, as EAGAIN or EMFILE would
 	const broken = fakeLsof("lsof-broken", "");
 	writeFileSync(broken, "#!/nonexistent/interpreter\n");
@@ -212,7 +214,7 @@ test("an lsof that exists but fails to start is tried again next sweep; only a m
 	}
 });
 
-test("stop during a sweep: the answer that lands after stop changes nothing and no sweep follows", async () => {
+test.skipIf(process.platform === "win32")("stop during a sweep: the answer that lands after stop changes nothing and no sweep follows", async () => {
 	const lsof = fakeLsof("lsof-slow", 'sleep 0.4; exec lsof "$@"');
 	const own: ProcEvent[] = [];
 	const p4 = new Procs({ dataDir: join(root, "data-stop"), onEvent: (e) => own.push(e), killGrace: 500, portSweepMs: 50, lsof });

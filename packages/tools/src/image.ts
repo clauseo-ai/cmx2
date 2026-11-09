@@ -207,7 +207,7 @@ async function runTool(argv: string[], timeoutMs: number): Promise<boolean> {
 	// bun reads timeout 0 as "no timeout" and a negative one throws, so a spent allowance never reaches the spawn
 	if (!(timeoutMs > 0)) return false;
 	try {
-		const p = Bun.spawn(argv, { stdout: "ignore", stderr: "ignore", timeout: timeoutMs, killSignal: "SIGKILL" });
+		const p = Bun.spawn(argv, { stdout: "ignore", stderr: "ignore", timeout: timeoutMs, killSignal: "SIGKILL", windowsHide: true });
 		return (await p.exited) === 0;
 	} catch {
 		return false;
@@ -234,14 +234,33 @@ export function imageConverter(): Converter | null {
 				dst,
 			],
 		};
-	} else if (Bun.which("magick")) {
-		converter = { name: "magick", argv: magickArgv("magick") };
-	} else if (Bun.which("convert")) {
-		converter = { name: "convert", argv: magickArgv("convert") };
 	} else {
-		converter = null;
+		const found = findMagick();
+		converter = found ? { name: found.name, argv: magickArgv(found.bin) } : null;
 	}
 	return converter;
+}
+
+/**
+ * imagemagick on PATH: `magick`, else imagemagick 6's `convert`. on windows only `magick` counts, and never one under
+ * the windows directory: `convert` there is System32's convert.exe, the fat-to-ntfs disk converter
+ */
+export function findMagick(
+	o: { platform?: string; which?: (cmd: string) => string | null; systemRoot?: string } = {},
+): { name: "magick" | "convert"; bin: string } | undefined {
+	const platform = o.platform ?? process.platform;
+	const which = o.which ?? ((cmd: string) => Bun.which(cmd));
+	if (platform !== "win32") {
+		if (which("magick")) return { name: "magick", bin: "magick" };
+		if (which("convert")) return { name: "convert", bin: "convert" };
+		return undefined;
+	}
+	const root = (o.systemRoot ?? process.env.SystemRoot ?? process.env.windir ?? "C:\\Windows").replace(/[\\/]+$/, "").toLowerCase();
+	const path = which("magick");
+	if (!path) return undefined;
+	const p = path.replace(/\//g, "\\").toLowerCase();
+	if (p.startsWith(`${root.replace(/\//g, "\\")}\\`)) return undefined;
+	return { name: "magick", bin: path };
 }
 
 export type ResizedImage =
@@ -462,7 +481,7 @@ export function listsHeic(listing: string): boolean {
 /** imagemagick reads heic only when it was built with libheif and the coder loads, which `-list format` tells */
 async function magickReadsHeic(bin: string): Promise<boolean> {
 	try {
-		const p = Bun.spawn([bin, "-list", "format"], { stdout: "pipe", stderr: "ignore", timeout: imageTimeouts.probeMs, killSignal: "SIGKILL" });
+		const p = Bun.spawn([bin, "-list", "format"], { stdout: "pipe", stderr: "ignore", timeout: imageTimeouts.probeMs, killSignal: "SIGKILL", windowsHide: true });
 		const out = await new Response(p.stdout).text();
 		return (await p.exited) === 0 && listsHeic(out);
 	} catch {
@@ -488,7 +507,7 @@ async function probeHost(): Promise<HeicDecoder[]> {
 			decode: (bytes, max, size, timeoutMs) => convert(c, bytes, "image/heic", { ...(size && Math.max(size.width, size.height) > max ? { max } : {}), format: "jpeg", quality: JPEG_QUALITY, timeoutMs }),
 		});
 	}
-	for (const bin of ["magick", "convert"]) {
+	for (const bin of process.platform === "win32" ? [findMagick()?.bin].filter((b): b is string => !!b) : ["magick", "convert"]) {
 		if (!Bun.which(bin) || !(await magickReadsHeic(bin))) continue;
 		found.push(magickHeicDecoder(bin));
 		break;
@@ -662,12 +681,12 @@ function pngMayHaveAlpha(b: Uint8Array): boolean | undefined {
 
 /** whether every pixel of a png with an alpha channel is fully opaque; needs imagemagick, false without it */
 async function pngIsOpaque(bytes: Uint8Array): Promise<boolean> {
-	const magick = Bun.which("magick");
+	const magick = process.platform === "win32" ? findMagick()?.bin : Bun.which("magick");
 	if (!magick) return false;
 	const src = join(tmpdir(), `cmx2-image-${randomUUID()}-opaque.png`);
 	try {
 		writeFileSync(src, bytes);
-		const p = Bun.spawn([magick, "identify", "-format", "%[opaque]", src], { stdout: "pipe", stderr: "ignore", timeout: imageTimeouts.probeMs, killSignal: "SIGKILL" });
+		const p = Bun.spawn([magick, "identify", "-format", "%[opaque]", src], { stdout: "pipe", stderr: "ignore", timeout: imageTimeouts.probeMs, killSignal: "SIGKILL", windowsHide: true });
 		const out = await new Response(p.stdout).text();
 		return (await p.exited) === 0 && out.trim() === "True";
 	} catch {

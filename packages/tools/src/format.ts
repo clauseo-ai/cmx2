@@ -84,7 +84,7 @@ export async function formatFile(file: string, cwd: string): Promise<Formatted |
 	const f = formatterFor(file, cwd);
 	if (!f) return undefined;
 	const before = readFileSync(file);
-	const proc = Bun.spawn(f.argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+	const proc = Bun.spawn(f.argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true });
 	const timer = setTimeout(() => proc.kill("SIGKILL"), TIMEOUT_MS);
 	const [err, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
 	clearTimeout(timer);

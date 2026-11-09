@@ -71,7 +71,8 @@ test("buffer: head and tail with absolute cursors, the gap reported as dropped",
 	expect(new TextDecoder().decode(small.read(2, 3).bytes)).toBe("cde");
 });
 
-test("pty: spawn, write, read with cursors, resize, origin", async () => {
+// bun's pty (terminal:) is posix only; on windows a tty spawn throws (win.test.ts shows what the model sees)
+test.skipIf(process.platform === "win32")("pty: spawn, write, read with cursors, resize, origin", async () => {
 	const p = track(procs.spawn({ command: "cat", tty: true, sessionID: "ses_a", origin: "model", cols: 100, rows: 30 }));
 	expect(p.id).toStartWith("pty_");
 	expect(p.origin).toBe("model");
@@ -218,9 +219,12 @@ test("crash: a daemon killed with jobs alive; the next daemon's sweep stops the 
 	expect(sweep.killed.map((e) => e.pid)).toEqual([pids.orphan]);
 	expect(sweep.adopted.map((e) => e.pid)).toEqual([pids.kept]);
 	expect(alive(pids.orphan)).toBe(false);
-	const pgrep = Bun.spawnSync(["pgrep", "-f", "sleep 300"]).stdout.toString().trim();
-	console.log(`pgrep -f 'sleep 300' after sweep: ${JSON.stringify(pgrep)}`);
-	expect(pgrep.split("\n").filter(Boolean).map(Number)).not.toContain(pids.orphan);
+	// windows has no pgrep; alive() above already checked the orphan's pid
+	if (process.platform !== "win32") {
+		const pgrep = Bun.spawnSync(["pgrep", "-f", "sleep 300"]).stdout.toString().trim();
+		console.log(`pgrep -f 'sleep 300' after sweep: ${JSON.stringify(pgrep)}`);
+		expect(pgrep.split("\n").filter(Boolean).map(Number)).not.toContain(pids.orphan);
+	}
 	const adopted = next.list().find((p) => p.pid === pids.kept)!;
 	expect(adopted).toMatchObject({ keep: "kept-sleeper", adopted: true, status: "running", sessionID: "ses_crash" });
 	// a second sweep finds nothing new: the dead daemon's journal was consumed
@@ -266,7 +270,8 @@ test("an on_port watch probes every 250 ms for its first 30 s, then every 2 s", 
 	expect([30_000, 60_000, 3_600_000].map(probeDelay)).toEqual([2_000, 2_000, 2_000]);
 });
 
-test("with lsof missing from PATH an on_port watch still gives its notice, and the process lives on", async () => {
+// posix only: PATH=/bin is what takes lsof away; windows looks ports up with netstat
+test.skipIf(process.platform === "win32")("with lsof missing from PATH an on_port watch still gives its notice, and the process lives on", async () => {
 	const dir = realpathSync(mkdtempSync(join(tmpdir(), "cmx2-procs-path-")));
 	const script = join(dir, "probe.ts");
 	await Bun.write(

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
+import { forgetTree, IS_WINDOWS, killTree, trackTree, treeAlive, treeSpawnOptions } from "@cmx2/platform";
 import { Type } from "typebox";
 import { resolvePath, shown } from "./fs.ts";
 import { clip, clipNote } from "./limits.ts";
@@ -78,13 +79,26 @@ function walkUp(from: string, test: (dir: string) => string | undefined): string
 	}
 }
 
-/** a command's executable: the project's node_modules/.bin, cmx2's own, then PATH */
-function executable(name: string, root: string): string | undefined {
+/**
+ * a command's executable: the project's node_modules/.bin, cmx2's own, then PATH. on windows a .bin holds shims, not
+ * the extensionless sh script windows cannot run: bun's are .exe, npm's are .cmd
+ */
+export function executable(name: string, root: string, from = import.meta.dir): string | undefined {
+	const names = IS_WINDOWS && !/\.(exe|cmd|bat|com)$/i.test(name) ? [`${name}.exe`, `${name}.cmd`] : [name];
 	const local = (dir: string) => {
-		const p = join(dir, "node_modules", ".bin", name);
-		return existsSync(p) ? p : undefined;
+		for (const n of names) {
+			const p = join(dir, "node_modules", ".bin", n);
+			if (existsSync(p)) return p;
+		}
+		return undefined;
 	};
-	return walkUp(root, local) ?? walkUp(import.meta.dir, local) ?? Bun.which(name) ?? undefined;
+	return walkUp(root, local) ?? walkUp(from, local) ?? Bun.which(name) ?? undefined;
+}
+
+/** argv that runs `exe` with `args`: a .cmd or .bat shim runs through cmd.exe, which Bun.spawn cannot skip */
+export function launchArgv(exe: string, args: string[]): string[] {
+	if (IS_WINDOWS && /\.(cmd|bat)$/i.test(exe)) return [process.env.ComSpec || "cmd.exe", "/d", "/s", "/c", exe, ...args];
+	return [exe, ...args];
 }
 
 function tsserverPath(root: string): string | undefined {
@@ -119,14 +133,17 @@ export class LspServer {
 		readonly root: string,
 		argv: string[],
 	) {
-		const proc = Bun.spawn(argv, { cwd: root, stdin: "pipe", stdout: "pipe", stderr: "pipe", detached: true });
+		const proc = Bun.spawn(argv, { cwd: root, stdin: "pipe", stdout: "pipe", stderr: "pipe", ...treeSpawnOptions() });
 		this.proc = proc;
+		trackTree(proc.pid);
 		void this.pump(proc.stdout as unknown as AsyncIterable<Uint8Array>);
 		void (async () => {
 			for await (const chunk of proc.stderr as unknown as AsyncIterable<Uint8Array>) this.stderr = (this.stderr + new TextDecoder().decode(chunk)).slice(-4000);
 		})();
 		void proc.exited.then(() => {
 			this.exited = true;
+			// windows: the job is let go once nothing in it runs; kill() lets go of it otherwise
+			if (IS_WINDOWS && !treeAlive(proc.pid)) forgetTree(proc.pid);
 			for (const p of this.pending.values()) {
 				clearTimeout(p.timer);
 				p.reject(new Error(`${config.command[0]} exited${this.stderr.trim() ? `: ${this.stderr.trim().split("\n").slice(-3).join(" ")}` : ""}`));
@@ -266,11 +283,8 @@ export class LspServer {
 	}
 
 	kill() {
-		try {
-			process.kill(-this.proc.pid, "SIGKILL");
-		} catch {
-			this.proc.kill("SIGKILL");
-		}
+		killTree(this.proc.pid, "SIGKILL");
+		forgetTree(this.proc.pid);
 	}
 }
 
@@ -317,7 +331,7 @@ export class LspPool {
 				if (tsserver) cfg = { ...config, initializationOptions: { tsserver: { path: tsserver }, ...config.initializationOptions } };
 			}
 			const server = (async () => {
-				const s = new LspServer(cfg, root, [exe, ...config.command.slice(1)]);
+				const s = new LspServer(cfg, root, launchArgv(exe, config.command.slice(1)));
 				try {
 					await s.initialize();
 				} catch (e) {

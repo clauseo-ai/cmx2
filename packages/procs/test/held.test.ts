@@ -10,6 +10,9 @@ import { Procs } from "../src/index.ts";
  * as a job of the session, so it is listed, read and reaped with the session like any other job
  */
 
+/** the background process's pid as this test can signal it: git bash's $! is its own numbering, the windows pid is in /proc */
+const BG_PID = process.platform === "win32" ? "$(cat /proc/$!/winpid)" : "$!";
+
 function alive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
@@ -38,7 +41,7 @@ function scratch() {
 test("a process that holds the call's pipes is listed as the session's job, and reaped with the session", async () => {
 	const { dir, procs } = scratch();
 	const sid = "ses_held";
-	const command = "sleep 30 & echo $!";
+	const command = `sleep 30 & echo ${BG_PID}`;
 	let sleepPid = 0;
 	try {
 		const env = { cwd: dir, spillDir: join(dir, "spill"), procs: procs.host(sid, dir) };

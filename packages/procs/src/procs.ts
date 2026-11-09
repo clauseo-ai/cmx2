@@ -1,8 +1,24 @@
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+	bashArgv,
+	bashEnv,
+	bashPath,
+	forgetTree,
+	IS_WINDOWS,
+	killTree,
+	pidAlive,
+	startStamp,
+	trackTree,
+	treeAlive,
+	treeOf,
+	treePids,
+	treeSpawnOptions,
+	windowsImageName,
+	windowsListeners,
+} from "@cmx2/platform";
 import type { ProcHost, ProcNotify, ProcRead, ProcSpawn, ProcSummary } from "@cmx2/tools";
 import { incompleteTail, OutputBuffer } from "./buffer.ts";
 
@@ -124,6 +140,8 @@ interface Entry {
 	liveTimer?: ReturnType<typeof setInterval>;
 	/** when its ports were last set, so a sweep that began before does not undo a newer answer */
 	portsAt: number;
+	/** windows: the signal kill() was asked for, since a terminated job reports only an exit code */
+	killedWith?: NodeJS.Signals;
 }
 
 const HEAD = 64 * 1024;
@@ -161,7 +179,7 @@ const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-_]/
 async function outputOf(cmd: string[], ms: number): Promise<string> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore" });
+		const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "ignore", windowsHide: true });
 		timer = setTimeout(() => proc.kill(), ms);
 		return await new Response(proc.stdout).text();
 	} catch {
@@ -171,9 +189,26 @@ async function outputOf(cmd: string[], ms: number): Promise<string> {
 	}
 }
 
-/** processes listening on a tcp port, with their process group, from lsof and ps (spawned async, so the loop never waits on them) */
-export async function listenersOf(port: number): Promise<Array<{ pid: number; pgid: number; command: string }>> {
+/** what bun.spawn needs to start a terminal; windows has no pty in bun yet */
+export const TTY_UNAVAILABLE = "terminals are not available on windows yet; run the command without tty (as a plain job or in the foreground)";
+
+/**
+ * processes listening on a tcp port, with their process group, from lsof and ps (spawned async, so the loop never
+ * waits on them). windows: from netstat, with the group named by `roots` (the tree roots to look the pid up in) and
+ * the command from tasklist
+ */
+export async function listenersOf(port: number, roots: number[] = []): Promise<Array<{ pid: number; pgid: number; command: string }>> {
 	const out: Array<{ pid: number; pgid: number; command: string }> = [];
+	if (IS_WINDOWS) {
+		const found = await windowsListeners({ timeoutMs: 5000 });
+		if (typeof found === "string") return out;
+		for (const [pid, ports] of found) {
+			if (!ports.has(port)) continue;
+			const pgid = roots.find((r) => r === pid || treePids(r).includes(pid)) ?? treeOf(pid) ?? 0;
+			out.push({ pid, pgid, command: (await windowsImageName(pid)) ?? "" });
+		}
+		return out;
+	}
 	let pid = 0;
 	for (const line of (await outputOf(["lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpc"], 5000)).split("\n")) {
 		if (line.startsWith("p")) pid = Number(line.slice(1));
@@ -195,6 +230,17 @@ export async function listeningPorts(pgids: number[], opts: { timeoutMs?: number
 	const out = new Map<number, Set<number>>();
 	if (!pgids.length) return out;
 	const timeoutMs = opts.timeoutMs ?? SWEEP_LSOF_TIMEOUT_MS;
+	if (IS_WINDOWS) {
+		// no process groups and no lsof: every listener on the machine from netstat, kept where its pid is in a tree asked about
+		const found = await windowsListeners({ timeoutMs });
+		if (typeof found === "string") return found;
+		for (const root of pgids) {
+			const set = new Set<number>();
+			for (const pid of treePids(root)) for (const port of found.get(pid) ?? []) set.add(port);
+			if (set.size) out.set(root, set);
+		}
+		return out;
+	}
 	const exe = opts.lsof ?? "lsof";
 	let proc: ReturnType<typeof Bun.spawn>;
 	try {
@@ -241,32 +287,18 @@ export function stripAnsi(s: string): string {
 	return s.replace(ANSI, "");
 }
 
-/** start time of a live pid as ps prints it, or undefined when there is no such process */
-export function startOf(pid: number): string | undefined {
-	const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
-	const s = r.status === 0 ? r.stdout.trim() : "";
-	return s || undefined;
-}
+/** start time of a live pid as an opaque stamp (`ps -o lstart` as printed; the creation time in ms on windows), or undefined when there is no such process */
+export const startOf = startStamp;
 
-function groupAlive(pgid: number): boolean {
-	try {
-		process.kill(-pgid, 0);
-		return true;
-	} catch (e) {
-		return (e as { code?: string }).code === "EPERM";
-	}
-}
+/** whether any process of the group (the job, on windows) still runs */
+const groupAlive = treeAlive;
 
-function pidAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (e) {
-		return (e as { code?: string }).code === "EPERM";
-	}
-}
-
+/** a signal to the whole group, or the pid alone when the group is gone; windows terminates the job (or taskkill /T) whatever the signal */
 function signalGroup(pgid: number, pid: number, signal: NodeJS.Signals) {
+	if (IS_WINDOWS) {
+		killTree(pgid, signal);
+		return;
+	}
 	try {
 		process.kill(-pgid, signal);
 	} catch {
@@ -363,15 +395,18 @@ export class Procs {
 	spawn(opts: SpawnOptions): ProcInfo {
 		if (this.stopped) throw new Error("the process registry is shut down");
 		const tty = opts.tty === true;
+		// bun's terminal option is posix only
+		if (tty && IS_WINDOWS) throw new Error(TTY_UNAVAILABLE);
 		const cwd = resolve(opts.cwd ?? (opts.sessionID ? process.cwd() : homedir()));
 		if (!existsSync(cwd)) throw new Error(`working directory ${cwd} does not exist`);
-		const shell = process.env.SHELL || "/bin/bash";
+		// windows: git's bash, whatever SHELL says (it may name a bash that only means something inside git bash)
+		const shell = IS_WINDOWS ? (opts.argv ? "bash" : bashPath()) : process.env.SHELL || "/bin/bash";
+		const env: Record<string, string | undefined> = tty
+			? { ...process.env, TERM: "xterm-256color", ...bashEnv(), ...opts.env }
+			: { ...process.env, TERM: "dumb", PAGER: "cat", GIT_PAGER: "cat", ...bashEnv(), ...opts.env };
 		// a person's terminal is their login shell; a model's command is plain bash, the same as the shell tool
 		const argv =
-			opts.argv ?? (opts.command.trim() === "" ? [shell, "-l"] : opts.origin === "user" && tty ? [shell, "-lc", opts.command] : ["bash", "-c", opts.command]);
-		const env: Record<string, string | undefined> = tty
-			? { ...process.env, TERM: "xterm-256color", ...opts.env }
-			: { ...process.env, TERM: "dumb", PAGER: "cat", GIT_PAGER: "cat", ...opts.env };
+			opts.argv ?? (opts.command.trim() === "" ? [shell, "-l"] : opts.origin === "user" && tty ? [shell, "-lc", opts.command] : bashArgv(opts.command, { env }));
 		const id = randomId(tty ? "pty" : "job");
 		const buffer = new OutputBuffer(this.head, this.tail);
 		const info: ProcInfo = {
@@ -379,7 +414,7 @@ export class Procs {
 			pid: 0,
 			command: opts.command.trim() === "" ? argv.join(" ") : opts.command,
 			cwd,
-			title: opts.title ?? (opts.command.trim() || shell.split("/").pop() || "shell"),
+			title: opts.title ?? (opts.command.trim() || shell.split(/[\\/]/).pop() || "shell"),
 			tty,
 			status: "running",
 			exitCode: null,
@@ -425,7 +460,8 @@ export class Procs {
 			} as never);
 		} else {
 			// no stdin: a job that wants input is a pty. its own process group, so a kill takes its children
-			child = Bun.spawn(argv, { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
+			child = Bun.spawn(argv, { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe", ...treeSpawnOptions() });
+			trackTree(child.pid);
 		}
 		entry.child = child;
 		info.pid = child.pid;
@@ -493,7 +529,7 @@ export class Procs {
 		try {
 			(child as unknown as { terminal?: { close(): void } }).terminal?.close();
 		} catch {}
-		this.markExited(e, child.exitCode, child.signalCode ?? undefined);
+		this.markExited(e, child.exitCode, child.signalCode ?? e.killedWith);
 	}
 
 	private markExited(e: Entry, code: number | null, signal?: string) {
@@ -511,6 +547,8 @@ export class Procs {
 		e.info.armed = null;
 		if (signal) e.info.signal = signal;
 		e.child = undefined;
+		// windows: the job handle goes (the group is not killed after its exit, here as on posix)
+		forgetTree(e.pgid);
 		this.wake(e);
 		this.writeJournal();
 		this.emit({ type: "proc.exited", info: { ...e.info } });
@@ -545,7 +583,7 @@ export class Procs {
 			if ((await portOpen(port, "127.0.0.1")) || (await portOpen(port, "::1"))) {
 				if (e.info.status !== "running") return;
 				// whose port is it: a port another process already held is news, not the job coming up
-				const owners = await listenersOf(port).catch(() => []);
+				const owners = await listenersOf(port, [e.pgid]).catch(() => []);
 				// the job may have exited while lsof ran: no port and no notice after its exit
 				if (e.info.status !== "running" || this.stopped) return;
 				const mine = owners.filter((o) => o.pgid === e.info.pid);
@@ -627,16 +665,16 @@ export class Procs {
 		this.sweeps++;
 		if (found === "missing") {
 			this.noLsof = true;
-			console.error("cmx2: lsof is not installed, so job ports are looked up only when asked for");
+			console.error(`cmx2: ${IS_WINDOWS ? "netstat" : "lsof"} is not installed, so job ports are looked up only when asked for`);
 			return;
 		}
 		if (found === "failed") {
-			if (!this.failSaid) console.error("cmx2: lsof could not be started this time; job ports keep their last value until a sweep answers");
+			if (!this.failSaid) console.error(`cmx2: ${IS_WINDOWS ? "netstat" : "lsof"} could not be started this time; job ports keep their last value until a sweep answers`);
 			this.failSaid = true;
 			return;
 		}
 		if (found === "slow") {
-			if (!this.slowSaid) console.error(`cmx2: lsof did not answer within ${this.opts.lsofTimeoutMs ?? SWEEP_LSOF_TIMEOUT_MS} ms and was killed; job ports keep their last value until a sweep answers`);
+			if (!this.slowSaid) console.error(`cmx2: ${IS_WINDOWS ? "netstat" : "lsof"} did not answer within ${this.opts.lsofTimeoutMs ?? SWEEP_LSOF_TIMEOUT_MS} ms and was killed; job ports keep their last value until a sweep answers`);
 			this.slowSaid = true;
 			return;
 		}
@@ -755,6 +793,7 @@ export class Procs {
 			const check = () => (e.info.status !== "running" ? done() : e.waiters.add(check));
 			e.waiters.add(check);
 		});
+		if (IS_WINDOWS) e.killedWith ??= signal;
 		signalGroup(e.pgid, e.info.pid, signal);
 		if (signal !== "SIGKILL") {
 			clearTimeout(e.killTimer);
@@ -792,6 +831,12 @@ export class Procs {
 	async ports(id: string): Promise<number[]> {
 		const e = this.need(id);
 		if (e.info.status !== "running") return [];
+		if (IS_WINDOWS) {
+			const found = await listeningPorts([e.pgid]);
+			if (typeof found === "string") return e.info.ports;
+			this.setPorts(e, [...(found.get(e.pgid) ?? [])].sort((a, b) => a - b));
+			return e.info.ports;
+		}
 		const proc = Bun.spawn(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-g", String(e.pgid), "-Fn"], { stdout: "pipe", stderr: "ignore" });
 		const out = await new Response(proc.stdout).text();
 		await proc.exited;

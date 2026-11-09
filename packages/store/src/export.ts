@@ -1,8 +1,8 @@
-import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, createReadStream, existsSync, linkSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { arch, homedir, hostname, platform } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { IS_WINDOWS, pidAlive, processStartMs } from "@cmx2/platform";
 import { BundleError, BundleReader, type Range } from "./bundle.ts";
 import type { MessageRow, PartRow, Store, StoredSession } from "./index.ts";
 import { projectMessage } from "./projection.ts";
@@ -558,28 +558,28 @@ function unstage(store: Store, id: string, token?: string) {
 
 /** when this process started (ms), within a second: with the pid it names an importer even after the pid is reused */
 const PROCESS_STARTED = Math.round(Date.now() - process.uptime() * 1000);
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 /** a claim whose importer cannot be checked is cleared once it is this old */
 const STALE_CLAIM_MS = 60 * 60 * 1000;
 
 /**
  * whether the process that holds a claim still runs: true or false when the pid and its start time can be checked (ps
- * prints the start to the second), undefined when they cannot (no pid recorded, no ps)
+ * prints the start to the second; windows reads the creation time), undefined when they cannot (no pid recorded, no ps)
  */
 export function importerAlive(pid: number | null, started: number | null): boolean | undefined {
 	if (!pid || !started) return undefined;
-	try {
-		process.kill(pid, 0);
-	} catch (e) {
-		if ((e as { code?: string }).code === "ESRCH") return false;
-		if ((e as { code?: string }).code !== "EPERM") return undefined;
+	if (IS_WINDOWS) {
+		if (!pidAlive(pid)) return false;
+	} else {
+		try {
+			process.kill(pid, 0);
+		} catch (e) {
+			if ((e as { code?: string }).code === "ESRCH") return false;
+			if ((e as { code?: string }).code !== "EPERM") return undefined;
+		}
 	}
-	// ps prints the start in local time; asked in utc and read field by field, it does not depend on the reader's TZ
-	const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
-	const [, mon, day, time, year] = r.status === 0 ? r.stdout.trim().split(/\s+/) : [];
-	const month = MONTHS.indexOf(mon ?? "") + 1;
-	const at = month && day && time && year ? Date.parse(`${year}-${String(month).padStart(2, "0")}-${day.padStart(2, "0")}T${time}Z`) : Number.NaN;
-	if (Number.isNaN(at)) return undefined;
+	// ps -o lstart read in utc (to the second), or GetProcessTimes on windows
+	const at = processStartMs(pid);
+	if (at === undefined) return undefined;
 	// the pid runs; it is the importer only if it started when the importer did (a reused pid started later)
 	return Math.abs(at - started) < 2000;
 }

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import { bashArgv, bashEnv } from "@cmx2/platform";
 
 /**
  * checkouts: a branch of a repository in a directory of its own, so an agent can work, run the dev
@@ -185,7 +186,7 @@ interface GitResult {
 }
 
 function git(cwd: string, args: string[], env?: Record<string, string>): GitResult {
-	const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...env } });
+	const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...env }, windowsHide: true });
 	return { code: r.exitCode ?? 1, out: r.stdout.toString(), err: r.stderr.toString() };
 }
 
@@ -197,7 +198,7 @@ const TIMED_OUT = 124;
 /** git without blocking the event loop, for reads a client waits on; a git that hangs is killed after GIT_READ_TIMEOUT_MS */
 async function gitAsync(cwd: string, args: string[]): Promise<GitResult> {
 	try {
-		const p = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+		const p = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, windowsHide: true });
 		const done = Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		// raced, not awaited: a child git left behind can hold the pipes open after git itself is killed
@@ -661,7 +662,8 @@ export class Worktrees {
 		const runs: SetupRun[] = [];
 		for (const command of commands.map((c) => c.trim()).filter(Boolean)) {
 			const started = performance.now();
-			const p = Bun.spawn(["bash", "-lc", command], { cwd: directory, stdout: "pipe", stderr: "pipe", stdin: "ignore", env: { ...process.env, ...env } });
+			const procEnv = { ...process.env, ...bashEnv(), ...env };
+			const p = Bun.spawn(bashArgv(command, { login: true, env: procEnv }), { cwd: directory, stdout: "pipe", stderr: "pipe", stdin: "ignore", env: procEnv, windowsHide: true });
 			let timedOut = false;
 			const timer = setTimeout(() => {
 				timedOut = true;

@@ -218,7 +218,7 @@ export interface GlobDetails {
 }
 
 async function rg(args: string[], cwd: string, signal?: AbortSignal): Promise<{ code: number; out: string; err: string }> {
-	const proc = Bun.spawn(["rg", ...args], { cwd, stdout: "pipe", stderr: "pipe", signal });
+	const proc = Bun.spawn(["rg", ...args], { cwd, stdout: "pipe", stderr: "pipe", signal, windowsHide: true });
 	const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
 	return { code, out, err };
 }
