@@ -6,6 +6,9 @@ describe("compiledRoot", () => {
 		expect(compiledRoot("file:///$bunfs/root/cmx2")).toBe("file:///$bunfs/root/");
 		expect(compiledRoot("file:///B:/~BUN/root/cmx2.exe")).toBe("file:///B:/~BUN/root/");
 		expect(compiledRoot("file:///B:/~BUN/root/tools/src/codemode-worker.js")).toBe("file:///B:/~BUN/root/");
+		// what import.meta.url says inside a windows binary built by bun 1.4.3
+		expect(compiledRoot("file:///B:/%7EBUN/root/probe.exe")).toBe("file:///B:/%7EBUN/root/");
+		expect(new URL("tools/src/codemode-worker.js", compiledRoot("file:///B:/%7EBUN/root/cmx2.exe")).href).toBe("file:///B:/%7EBUN/root/tools/src/codemode-worker.js");
 		expect(compiledRoot("file:///Users/x/cmx2/packages/tools/src/run.ts")).toBeUndefined();
 	});
 });
