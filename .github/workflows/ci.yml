@@ -62,7 +62,13 @@ jobs:
   # the windows binary end to end on a throwaway runner: build, install the logon task, upgrade over the running
   # exe, restart, uninstall. ports 4831 and up, never the default 4097
   windows-binary:
-    runs-on: windows-latest
+    # x64 must pass; the arm64 runner is a try (bun builds a windows arm64 binary, nothing here has run one yet)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-11-arm' }}
     timeout-minutes: 40
     defaults:
       run:
@@ -91,11 +97,6 @@ jobs:
           "CMX2_DATA_DIR=$env:RUNNER_TEMP\cmx2 data" >> $env:GITHUB_ENV
           "CMX2_CONFIG_DIR=$env:RUNNER_TEMP\cmx2 config" >> $env:GITHUB_ENV
       - run: bun install --frozen-lockfile
-      - name: what a compiled module sees of itself on windows (import.meta.url, Bun.main, argv)
-        run: |
-          'console.log(JSON.stringify({ url: import.meta.url, path: import.meta.path, main: Bun.main, argv: process.argv, exec: process.execPath }))' > "$env:RUNNER_TEMP\probe.ts"
-          bun build --compile "$env:RUNNER_TEMP\probe.ts" --outfile "$env:RUNNER_TEMP\probe.exe"
-          & "$env:RUNNER_TEMP\probe.exe"
       - name: build the binary natively
         run: |
           bun scripts/build.ts --out dist
@@ -163,8 +164,11 @@ jobs:
           if ($v -ne '99.0.0') { "the installed exe says $v"; exit 1 }
       - name: serve --uninstall removes the task and stops every process
         run: |
-          dist\cmx2.exe serve --uninstall
+          $out = dist\cmx2.exe serve --uninstall | Out-String
+          $out
           if ($LASTEXITCODE) { exit 1 }
+          # the daemon is asked to exit and the supervisor told not to start it again, nothing killed
+          if ($out -notmatch 'stopped the daemon, pid \d+, and its supervisor') { "uninstall did not stop the daemon gracefully"; exit 1 }
           Start-Sleep 2
           schtasks /Query /TN $env:LABEL 2>$null
           if (-not $LASTEXITCODE) { "the task is still there"; exit 1 }

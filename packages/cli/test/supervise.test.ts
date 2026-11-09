@@ -75,4 +75,14 @@ test("the supervisor restarts the daemon when it dies and when /global/restart a
 	expect(log).toContain(`listening on http://127.0.0.1:${PORT}`);
 	expect(log).toContain("starting it again in 1 s");
 	expect(existsSync(join(root, "xdg", "cmx2", "supervisor.json"))).toBe(false);
+
+	// with the stop file in place the daemon's exit ends the supervisor too: the graceful stop uninstall uses
+	writeFileSync(join(data, "supervisor.stop"), "test\n");
+	await fetch(`http://127.0.0.1:${PORT}/global/restart`, { method: "POST" });
+	expect(await Promise.race([sup.exited, Bun.sleep(20_000).then(() => "still running")])).toBe(0);
+	sup = undefined;
+	expect(await health()).toBeUndefined();
+	expect(existsSync(join(data, "supervisor.stop"))).toBe(false);
+	expect(existsSync(join(data, "supervisor.json"))).toBe(false);
+	expect(readFileSync(join(data, "log", "serve.log"), "utf8")).toContain("asked to stop");
 }, 120_000);

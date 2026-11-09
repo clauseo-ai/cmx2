@@ -59,8 +59,7 @@ export function installedBinary(env = process.env, platform: string = process.pl
 
 /** true when this process is a compiled cmx2 binary rather than bun running the source */
 export function compiled(): boolean {
-	// decoded: a windows binary's url may carry the ~ of B:/~BUN/root/ as %7E
-	return isCompiled(decodeURIComponent(import.meta.url));
+	return isCompiled(import.meta.url);
 }
 
 export function sha256(bytes: Uint8Array): string {

@@ -23,6 +23,15 @@ export function nextDelay(previousMs: number, upMs: number): number {
 	return Math.min(30_000, previousMs * 2);
 }
 
+/**
+ * when this file is there the supervisor exits once its daemon does, instead of starting it again. stopping
+ * the daemon through /global/restart with it in place is the graceful stop: on windows, killing the supervisor
+ * takes the daemon down with it at once, before it stopped its sessions' processes
+ */
+export function stopFile(data = dataDir()): string {
+	return join(data, "supervisor.stop");
+}
+
 /** where a supervisor names itself and its daemon, so uninstall and a restart can stop them */
 export function supervisorFile(data = dataDir()): string {
 	return join(data, "supervisor.json");
@@ -82,6 +91,9 @@ export async function supervise(o: { envFile?: string; serveArgs: string[]; port
 		} catch {}
 	};
 	const record = supervisorFile(data);
+	const stopAsked = stopFile(data);
+	// a stop asked of an earlier supervisor is not meant for this one
+	rmSync(stopAsked, { force: true });
 	const self: SupervisorRecord = { pid: process.pid, stamp: startStamp(process.pid), ...(o.port ? { port: o.port } : {}) };
 	const write = (r: SupervisorRecord) => {
 		try {
@@ -144,6 +156,12 @@ export async function supervise(o: { envFile?: string; serveArgs: string[]; port
 			} catch (e) {
 				say(`could not start ${binary}: ${e instanceof Error ? e.message : String(e)}`);
 			}
+		}
+		if (existsSync(stopAsked)) {
+			rmSync(stopAsked, { force: true });
+			if (readSupervisor(record)?.pid === process.pid) rmSync(record, { force: true });
+			say("asked to stop; not starting the daemon again");
+			process.exit(0);
 		}
 		delay = nextDelay(delay, Date.now() - started);
 		if (stopping) break;

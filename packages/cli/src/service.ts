@@ -6,7 +6,7 @@ import { dataDir, loadConfig } from "@cmx2/engine/config";
 import { killTree, pidAlive } from "@cmx2/platform";
 import { compareVersions, compiled, installedBinary } from "./release.ts";
 import { type SignResult, signatureOf, signBinary, signLine } from "./signing.ts";
-import { readSupervisor, stillRuns, supervisorFile } from "./supervise.ts";
+import { readSupervisor, stillRuns, stopFile, supervisorFile } from "./supervise.ts";
 import { fail } from "./util.ts";
 import { decodeOutput, parseTaskXml, pathHas, renderTaskXml, type TaskSpec, utf16File, withPathEntry } from "./windows.ts";
 
@@ -287,7 +287,8 @@ export async function serviceState(): Promise<ServiceState> {
 /** the command that restarts the installed unit, for printing */
 export function restartCommand(): string {
 	const label = serviceLabel();
-	if (process.platform === "win32") return `schtasks /End /TN ${label} && schtasks /Run /TN ${label}`;
+	// schtasks /End leaves the supervisor and the daemon running; install stops them and runs the task again
+	if (process.platform === "win32") return "cmx2 serve --install";
 	return process.platform === "darwin" ? `launchctl kickstart -k gui/${uid()}/${label}` : `systemctl --user restart ${systemdName(label)}.service`;
 }
 
@@ -324,37 +325,51 @@ async function restartWindows(): Promise<{ ok: boolean; out: string }> {
 }
 
 /**
- * windows: stops what the task runs. schtasks /End ends the process the task started; the supervisor it recorded
- * is then killed if it is still there (so it cannot start the daemon again), and the daemon is asked to exit
- * through /global/restart, which stops its sessions' processes on the way out, and killed with its tree when it
- * does not go. a cmx2 on the port that this supervisor did not start is left alone. returns what it did
+ * windows: stops what the task runs. schtasks /End ends only the conhost the task started; the supervisor and
+ * the daemon below it keep running (seen on a hosted runner). so the supervisor is told to stop with a file,
+ * the daemon is asked to exit through /global/restart (it stops its sessions' processes on the way), and the
+ * supervisor then exits instead of starting it again. what is still there after 20 s is killed: the supervisor,
+ * which takes its daemon with it, and the daemon's tree. a cmx2 on the port this supervisor did not start is
+ * left alone. returns what it did
  */
 async function stopWindows(s: ServiceState): Promise<string[]> {
 	const notes: string[] = [];
 	run(["schtasks", "/End", "/TN", s.label]);
-	const record = supervisorFile(s.envFile ? dirname(s.envFile) : dataDir());
+	const data = s.envFile ? dirname(s.envFile) : dataDir();
+	const record = supervisorFile(data);
 	const rec = readSupervisor(record);
 	const image = basename(s.binary ?? installedBinary());
-	if (rec && stillRuns(rec.pid, rec.stamp, imageName, image)) {
-		try {
-			process.kill(rec.pid);
-			notes.push(`stopped the supervisor, pid ${rec.pid}`);
-		} catch (e) {
-			notes.push(`could not stop the supervisor, pid ${rec.pid}: ${(e as Error).message}`);
-		}
-	}
+	const sup = rec && stillRuns(rec.pid, rec.stamp, imageName, image) ? rec.pid : undefined;
 	const child = rec?.child && stillRuns(rec.child, rec.childStamp, imageName, image) ? rec.child : undefined;
-	if (child) {
+	if (!sup && !child) {
+		if (rec) rmSync(record, { force: true });
+		return notes;
+	}
+	const stop = stopFile(data);
+	if (sup) writeFileSync(stop, `${process.pid}\n`);
+	if (child && s.port) {
 		const host = reach(s.hostname);
-		const h = s.port ? await healthAt(host, s.port) : undefined;
+		const h = await healthAt(host, s.port);
 		if (h?.pid === child) await fetch(`http://${host}:${s.port}/global/restart`, { method: "POST", headers: authHeaders(), signal: AbortSignal.timeout(5000) }).catch(() => undefined);
-		for (let i = 0; i < 60 && pidAlive(child); i++) await Bun.sleep(250);
-		if (pidAlive(child)) {
+	}
+	const gone = (pid: number | undefined) => !pid || !pidAlive(pid);
+	for (let i = 0; i < 80 && !(gone(sup) && gone(child)); i++) await Bun.sleep(250);
+	if (gone(sup) && gone(child)) notes.push(`stopped ${[child ? `the daemon, pid ${child}` : "", sup ? `its supervisor, pid ${sup}` : ""].filter(Boolean).join(", and ")}`);
+	else {
+		if (sup && !gone(sup)) {
+			try {
+				process.kill(sup);
+			} catch {}
+			notes.push(`killed the supervisor, pid ${sup}, which did not stop when asked`);
+		}
+		await Bun.sleep(500);
+		if (child && !gone(child)) {
 			killTree(child);
 			notes.push(`killed the daemon, pid ${child}, which did not exit when asked`);
-		} else notes.push(`stopped the daemon, pid ${child}`);
+		}
 	}
-	if (rec) rmSync(record, { force: true });
+	rmSync(stop, { force: true });
+	rmSync(record, { force: true });
 	return notes;
 }
 
