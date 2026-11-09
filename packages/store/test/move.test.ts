@@ -11,6 +11,8 @@ import { exportSession, exportStream, importSession, MIGRATIONS, movedText, proj
  */
 
 const dir = mkdtempSync(join(tmpdir(), "cmx2-move-store-"));
+/** the folder the imports land in: a linux one, or one with a drive letter where the test runs on windows */
+const TARGET = process.platform === "win32" ? "C:\\home\\rohan\\x" : "/home/rohan/x";
 afterAll(() => {
 	try {
 		rmSync(dir, { recursive: true, force: true });
@@ -34,8 +36,7 @@ function source() {
 	return { s, id };
 }
 
-// the import target here is a linux path, which windows would resolve onto its current drive
-test.skipIf(process.platform === "win32")("an import onto another machine writes one moved record: moved_from, a notice the model reads, a synthetic timeline entry", async () => {
+test("an import onto another machine writes one moved record: moved_from, a notice the model reads, a synthetic timeline entry", async () => {
 	const { s, id } = source();
 	const e = exportSession(s, id);
 	expect(e.origin?.directory).toBe("/Users/rohan/x");
@@ -49,17 +50,17 @@ test.skipIf(process.platform === "win32")("an import onto another machine writes
 	const data = join(dir, "data-b");
 	const t = new Store(join(data, "cmx2.db"), { archivePath: null });
 	const before = { sessions: t.sessionCount(), messages: t.messageCount() };
-	const r = await importSession(t, readExport(JSON.stringify(e)), { dataDir: data, directory: "/home/rohan/x", here: { machine: "boxbox", os: "linux", arch: "x64", home: "/home/rohan" }, now: 500 });
-	expect(r.moved).toEqual({ from: e.origin, to: { machine: "boxbox", os: "linux", arch: "x64", directory: "/home/rohan/x", home: "/home/rohan" }, at: 500 });
+	const r = await importSession(t, readExport(JSON.stringify(e)), { dataDir: data, directory: TARGET, here: { machine: "boxbox", os: "linux", arch: "x64", home: "/home/rohan" }, now: 500 });
+	expect(r.moved).toEqual({ from: e.origin, to: { machine: "boxbox", os: "linux", arch: "x64", directory: TARGET, home: "/home/rohan" }, at: 500 });
 	const line = movedText(r.moved!);
 	expect(line).toBe(
-		"this thread moved from macmini (macos, /Users/rohan/x) to boxbox (linux, /home/rohan/x): a path under /Users/rohan/x is under /home/rohan/x now, and the home folder /Users/rohan is /home/rohan. paths, processes and dev servers from before the move belong to the old machine: re-check paths and restart anything you need.",
+		`this thread moved from macmini (macos, /Users/rohan/x) to boxbox (linux, ${TARGET}): a path under /Users/rohan/x is under ${TARGET} now, and the home folder /Users/rohan is /home/rohan. paths, processes and dev servers from before the move belong to the old machine: re-check paths and restart anything you need.`,
 	);
 	expect(JSON.parse(t.session(id)!.moved_from!)).toEqual(r.moved);
 	// two copied messages and the notice
 	expect({ sessions: t.sessionCount(), messages: t.messageCount() }).toEqual({ sessions: before.sessions + 1, messages: before.messages + 3 });
 	const lines = readFileSync(r.transcript!, "utf8").trim().split("\n").map((l) => JSON.parse(l));
-	expect(lines[0]).toMatchObject({ type: "header", cwd: "/home/rohan/x" });
+	expect(lines[0]).toMatchObject({ type: "header", cwd: TARGET });
 	expect(lines.filter((l) => l.message?.role === "notice")).toEqual([{ type: "message", message: { role: "notice", source: "moved", text: line, moved: r.moved, timestamp: 500 } }]);
 	const rows = t.messages(id).rows;
 	const last = rows.at(-1)!;
@@ -69,17 +70,31 @@ test.skipIf(process.platform === "win32")("an import onto another machine writes
 	t.close();
 });
 
-// reads the session the test above made, which windows skips
-test.skipIf(process.platform === "win32")("an export with no origin (from before 0.9.6) imports with no move", async () => {
+// reads the session the test above made
+test("an export with no origin (from before 0.9.6) imports with no move", async () => {
 	const s = new Store(join(dir, "data-a", "cmx2.db"), { archivePath: null });
 	const e = exportSession(s, "ses_move0001aaaaaaaaaaaa");
 	s.close();
 	delete e.origin;
 	const data = join(dir, "data-c");
 	const t = new Store(join(data, "cmx2.db"), { archivePath: null });
-	const r = await importSession(t, e, { dataDir: data, directory: "/home/rohan/x" });
+	const r = await importSession(t, e, { dataDir: data, directory: TARGET });
 	expect(r.moved).toBeUndefined();
 	expect(t.session(r.id)!.moved_from).toBeNull();
+	t.close();
+});
+
+test("a folder from another os family is refused, not mapped onto this machine", async () => {
+	const s = new Store(join(dir, "data-a", "cmx2.db"), { archivePath: null });
+	const e = exportSession(s, "ses_move0001aaaaaaaaaaaa");
+	s.close();
+	const data = join(dir, "data-d");
+	const t = new Store(join(data, "cmx2.db"), { archivePath: null });
+	// windows would resolve /home/rohan/x onto its current drive; posix reads C:\x as a relative name
+	const foreign = process.platform === "win32" ? "/home/rohan/x" : "C:\\work\\x";
+	const before = { sessions: t.sessionCount(), messages: t.messageCount() };
+	await expect(importSession(t, e, { dataDir: data, directory: foreign, asNew: true })).rejects.toThrow(process.platform === "win32" ? "no drive letter" : "not an absolute path");
+	expect({ sessions: t.sessionCount(), messages: t.messageCount() }).toEqual(before);
 	t.close();
 });
 

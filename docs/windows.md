@@ -100,6 +100,6 @@ upgrade checks the sum, checks the new exe runs, and swaps it in. windows will n
   - the restart fallback, used when the daemon does not answer a restart request, never ran on CI.
   - doctor's wsl check never ran against a real wsl. with wsl's mirrored networking it can only say that no windows process owns the port.
   - CI saw the user `PATH` change, but nothing checked that a new terminal finds `cmx2`.
-- **moving sessions between os families.** importing a session exported on macos or linux has a known problem with its folder path. the windows tests skip it; it is not fixed.
+- **moving sessions between os families.** a session exported on macos or linux names a folder windows does not have, so its import needs a windows folder (`directory` over http, `--directory` in `cmx2 session import`). a folder with no drive letter is refused, not mapped onto the current drive. only the unit tests have run this; no session has been moved from a mac to a real windows machine yet.
 - **the port sweep's cost.** the two `netstat` processes every 3 s have not been measured.
 - **the machine model** comes from bios strings, so a home-built pc may show none.

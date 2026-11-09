@@ -280,6 +280,8 @@ export interface BundleImportOptions {
 /** a folder an import is given: absolute, and the real path when it exists */
 function folder(dir: string): string {
 	if (!isAbsolute(dir)) throw new ExportError(`the directory ${dir} is not an absolute path`);
+	// windows calls /Users/x absolute and resolves it onto the current drive; a folder from a mac or linux bundle is not here
+	if (process.platform === "win32" && !/^(?:[a-zA-Z]:[\\/]|\\\\)/.test(dir)) throw new ExportError(`the directory ${dir} is not a windows path (it has no drive letter); send directory, a folder on this machine`);
 	const r = resolve(dir);
 	return existsSync(r) ? realpathSync(r) : r;
 }
