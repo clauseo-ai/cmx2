@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RunLockHeld, RunLocks } from "../src/lock.ts";
@@ -42,4 +42,17 @@ test("within one process a second holder is refused too, and release lets the ne
 	a.release("ses_y");
 	b.acquire("ses_y");
 	b.release("ses_y");
+});
+
+test.if(process.platform === "win32")("on windows the holder's json stays readable while the lock is held, and a second process is refused with the holder's pid", async () => {
+	const data = mkdtempSync(join(tmpdir(), "cmx2-lock-"));
+	const mine = new RunLocks(data, 4998);
+	mine.acquire("ses_w");
+	expect(JSON.parse(readFileSync(join(data, "locks", "ses_w.lock"), "utf8"))).toMatchObject({ pid: process.pid, port: 4998 });
+	const other = Bun.spawnSync([process.execPath, "-e", `import { RunLocks } from ${JSON.stringify(join(import.meta.dir, "../src/lock.ts"))}; try { new RunLocks(${JSON.stringify(data)}).acquire("ses_w"); console.log("took it"); } catch (e) { console.log(e.message); }`]);
+	expect(other.stdout.toString()).toContain(`pid ${process.pid}, port 4998`);
+	mine.release("ses_w");
+	expect(readFileSync(join(data, "locks", "ses_w.lock"), "utf8")).toBe("");
+	const after = Bun.spawnSync([process.execPath, "-e", `import { RunLocks } from ${JSON.stringify(join(import.meta.dir, "../src/lock.ts"))}; new RunLocks(${JSON.stringify(data)}).acquire("ses_w"); console.log("took it");`]);
+	expect(after.stdout.toString()).toContain("took it");
 });
