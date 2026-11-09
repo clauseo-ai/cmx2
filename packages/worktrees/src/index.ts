@@ -1,8 +1,9 @@
 import { dlopen, FFIType, read } from "bun:ffi";
 import { createHash } from "node:crypto";
-import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpath as realpathCb, realpathSync, rmSync, statfsSync, symlinkSync, writeFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, posix, resolve, sep } from "node:path";
+import { bashCommand } from "@cmx2/platform";
 
 /**
  * checkouts: a branch of a repository in a directory of its own, so an agent can work, run the dev
@@ -185,7 +186,7 @@ interface GitResult {
 }
 
 function git(cwd: string, args: string[], env?: Record<string, string>): GitResult {
-	const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...env } });
+	const r = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...env }, windowsHide: true });
 	return { code: r.exitCode ?? 1, out: r.stdout.toString(), err: r.stderr.toString() };
 }
 
@@ -197,7 +198,7 @@ const TIMED_OUT = 124;
 /** git without blocking the event loop, for reads a client waits on; a git that hangs is killed after GIT_READ_TIMEOUT_MS */
 async function gitAsync(cwd: string, args: string[]): Promise<GitResult> {
 	try {
-		const p = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+		const p = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" }, windowsHide: true });
 		const done = Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		// raced, not awaited: a child git left behind can hold the pipes open after git itself is killed
@@ -220,8 +221,12 @@ function timedOut(r: GitResult, what: string): WorktreeError | undefined {
 	return r.code === TIMED_OUT ? new WorktreeError("WorktreeFailedError", 504, `${what}: ${r.err}`, { timedOut: true }) : undefined;
 }
 
+const WIN = process.platform === "win32";
+
 async function realAsync(p: string): Promise<string> {
 	try {
+		// on windows only the native realpath expands 8.3 short names (RUNNER~1) to the long ones git reports
+		if (WIN) return await new Promise<string>((ok, no) => realpathCb.native(p, (e, r) => (e ? no(e) : ok(r))));
 		return await realpath(p);
 	} catch {
 		return resolve(p);
@@ -234,16 +239,32 @@ function must(cwd: string, args: string[], what: string, env?: Record<string, st
 	return r.out;
 }
 
+/**
+ * a path in the one form every comparison here uses. git reports C:/Users/runneradmin/... on windows
+ * while a temp dir may come in as C:\Users\RUNNER~1\...; the native realpath gives both the same long,
+ * backslashed spelling. posix keeps the plain realpath it always used.
+ */
 function real(p: string): string {
 	try {
-		return realpathSync(p);
+		return WIN ? realpathSync.native(p) : realpathSync(p);
 	} catch {
 		return resolve(p);
 	}
 }
 
+/** paths are compared case-insensitively on windows, whose file systems are */
+function key(p: string): string {
+	return WIN ? p.toLowerCase() : p;
+}
+
+function samePath(a: string, b: string): boolean {
+	return key(a) === key(b);
+}
+
 function inside(child: string, parent: string): boolean {
-	return child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
+	const c = key(child);
+	const p = key(parent);
+	return c === p || c.startsWith(p.endsWith(sep) ? p : p + sep);
 }
 
 /** the repository a directory belongs to: its work tree's top level and the primary checkout */
@@ -350,7 +371,8 @@ function walk(root: string, rel: string, depth: number, out: string[]) {
 		return;
 	}
 	for (const e of entries) {
-		const r = rel ? join(rel, e.name) : e.name;
+		// relative paths are reported with / everywhere, as git reports them; posix.join is join on posix
+		const r = rel ? posix.join(rel, e.name) : e.name;
 		if (e.isDirectory()) {
 			if (!HEAVY.has(e.name)) walk(root, r, depth + 1, out);
 		} else if (e.isFile()) out.push(r);
@@ -448,7 +470,7 @@ export class Worktrees {
 		const root = real(this.rootOf(primary));
 		if (!existsSync(root)) return [];
 		return worktreeList(primary)
-			.filter((t) => inside(t.path, root) && t.path !== root)
+			.filter((t) => inside(t.path, root) && !samePath(t.path, root))
 			.map((t) => this.info(primary, t));
 	}
 
@@ -475,7 +497,7 @@ export class Worktrees {
 		}
 		return Promise.all(
 			items
-				.filter((t) => inside(t.path, root) && t.path !== root)
+				.filter((t) => inside(t.path, root) && !samePath(t.path, root))
 				.map(async (t) => {
 					const cfg = t.branch ? await gitAsync(primary, ["config", "--get", `branch.${t.branch}.cmx2base`]) : undefined;
 					const late = cfg && timedOut(cfg, "reading a checkout's base");
@@ -495,9 +517,9 @@ export class Worktrees {
 	locate(dir: string): WorktreeInfo {
 		const d = real(dir);
 		const { primary } = repoOf(d);
-		if (d === primary) throw new WorktreeError("WorktreeRefusedError", 400, `${d} is the repository's main checkout, not one made for an agent`, { reason: "primary" satisfies RefusalReason });
+		if (samePath(d, primary)) throw new WorktreeError("WorktreeRefusedError", 400, `${d} is the repository's main checkout, not one made for an agent`, { reason: "primary" satisfies RefusalReason });
 		const root = real(this.rootOf(primary));
-		const t = worktreeList(primary).find((x) => x.path === d);
+		const t = worktreeList(primary).find((x) => samePath(x.path, d));
 		if (!t) throw new WorktreeError("WorktreeNotFoundError", 404, `no checkout at ${d}; it was merged, discarded or never made`);
 		if (!inside(d, root)) throw new WorktreeError("WorktreeRefusedError", 400, `${d} is a git worktree cmx2 did not make; merge or remove it with git`, { reason: "not_ours" satisfies RefusalReason });
 		return this.info(primary, t);
@@ -661,7 +683,8 @@ export class Worktrees {
 		const runs: SetupRun[] = [];
 		for (const command of commands.map((c) => c.trim()).filter(Boolean)) {
 			const started = performance.now();
-			const p = Bun.spawn(["bash", "-lc", command], { cwd: directory, stdout: "pipe", stderr: "pipe", stdin: "ignore", env: { ...process.env, ...env } });
+			const bash = bashCommand(command, { login: true, env: { ...process.env, ...env } });
+			const p = Bun.spawn(bash.argv, { cwd: directory, stdout: "pipe", stderr: "pipe", stdin: "ignore", env: bash.env, windowsHide: true });
 			let timedOut = false;
 			const timer = setTimeout(() => {
 				timedOut = true;

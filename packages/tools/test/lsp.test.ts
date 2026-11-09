@@ -29,7 +29,7 @@ test("definition, references, hover and symbols", async () => {
 	const locs = (def.details as { locations: LspLocation[] }).locations;
 	expect(locs[0]).toMatchObject({ path: join(env.cwd, "lib.ts"), line: 1, character: 17 });
 	const refs = await lsp.execute("c", { operation: "references", path: "lib.ts", line: 1, character: 17 });
-	expect((refs.details as { locations: LspLocation[] }).locations.map((l) => l.path.split("/").pop()).sort()).toEqual(["lib.ts", "main.ts", "main.ts"]);
+	expect((refs.details as { locations: LspLocation[] }).locations.map((l) => l.path.split(/[\\/]/).pop()).sort()).toEqual(["lib.ts", "main.ts", "main.ts"]);
 	const hover = await lsp.execute("c", { operation: "hover", path: "main.ts", line: 3, character: 20 });
 	expect(textOf(hover)).toContain("greet(name: string): string");
 	const syms = await lsp.execute("c", { operation: "symbols", path: "lib.ts" });

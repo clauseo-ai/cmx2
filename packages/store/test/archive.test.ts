@@ -182,4 +182,4 @@ test("rule 15: counts hold across import, restart and a full history read; archi
 	console.log(`message infos:  ${b.infoRaw} bytes raw -> ${b.infoStored} stored`);
 	console.log(`part bodies:    ${b.partRaw} bytes raw -> ${b.partStored} stored (${((100 * b.partStored) / b.partRaw).toFixed(1)}%)`);
 	console.log(`files:          opencode.db ${fileBytes(src)} bytes, archive.db ${fileBytes(archivePath)} bytes`);
-});
+}, 30_000);

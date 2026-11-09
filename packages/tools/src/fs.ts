@@ -17,9 +17,11 @@ export function resolvePath(env: ToolEnv, p: string): string {
 	return isAbsolute(expanded) ? expanded : resolve(env.cwd, expanded);
 }
 
+/** a path as the model is shown it: relative to the working directory when inside it, with / between parts on every platform */
 export function shown(env: ToolEnv, abs: string): string {
 	const rel = relative(env.cwd, abs);
-	return rel && !rel.startsWith("..") ? rel : abs;
+	if (!rel || rel.startsWith("..") || isAbsolute(rel)) return abs;
+	return process.platform === "win32" ? rel.replace(/\\/g, "/") : rel;
 }
 
 export interface ReadDetails {
@@ -218,7 +220,7 @@ export interface GlobDetails {
 }
 
 async function rg(args: string[], cwd: string, signal?: AbortSignal): Promise<{ code: number; out: string; err: string }> {
-	const proc = Bun.spawn(["rg", ...args], { cwd, stdout: "pipe", stderr: "pipe", signal });
+	const proc = Bun.spawn(["rg", ...args], { cwd, stdout: "pipe", stderr: "pipe", signal, windowsHide: true });
 	const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
 	return { code, out, err };
 }
