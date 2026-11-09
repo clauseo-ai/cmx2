@@ -22,7 +22,7 @@ the theme file included.`;
  * the daemon's import graph. a binary embeds it at tui/src/index.js (scripts/build.ts).
  */
 function entry(): string {
-	const root = compiledRoot(import.meta.url);
+	const root = compiledRoot(decodeURIComponent(import.meta.url));
 	if (root) return `${root}tui/src/index.js`;
 	return new URL("../../../tui/src/index.ts", import.meta.url).href;
 }

@@ -89,6 +89,11 @@ jobs:
           "CMX2_DATA_DIR=$env:RUNNER_TEMP\cmx2 data" >> $env:GITHUB_ENV
           "CMX2_CONFIG_DIR=$env:RUNNER_TEMP\cmx2 config" >> $env:GITHUB_ENV
       - run: bun install --frozen-lockfile
+      - name: what a compiled module sees of itself on windows (import.meta.url, Bun.main, argv)
+        run: |
+          'console.log(JSON.stringify({ url: import.meta.url, path: import.meta.path, main: Bun.main, argv: process.argv, exec: process.execPath }))' > "$env:RUNNER_TEMP\probe.ts"
+          bun build --compile "$env:RUNNER_TEMP\probe.ts" --outfile "$env:RUNNER_TEMP\probe.exe"
+          & "$env:RUNNER_TEMP\probe.exe"
       - name: build the binary natively
         run: |
           bun scripts/build.ts --out dist
