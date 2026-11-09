@@ -8,7 +8,7 @@ from nothing to a first session in five minutes.
 - [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) on your `PATH`. the grep and glob tools and file search run it. `brew install ripgrep` on macos, `apt install ripgrep` or `dnf install ripgrep` on linux.
 - git. the worktree features and many coding tasks call it.
 - a way to reach a model: an anthropic api key, or any other provider you set up in your profile (step 2).
-- [bun](https://bun.sh) 1.3.14, only if you build from source. the release binary bundles its runtime.
+- [bun](https://bun.sh) 1.4.3, only if you build from source. the release binary bundles its runtime.
 - optional, for heic photos (iphone images) sent to a model: nothing on macos (the built-in `sips` converts them). on linux, imagemagick built with heic support, or libheif's `heif-dec` or `heif-convert` with an hevc decoder. without one, cmx2 refuses a heic image and says what to install. png, jpeg, gif and webp need nothing.
 
 ## 1. install
