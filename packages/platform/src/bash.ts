@@ -95,7 +95,9 @@ export function bashPath(env: Record<string, string | undefined> = process.env):
 
 /**
  * argv for one command line: `bash -c <command>` (`-lc` with login). on windows it is git's bash, and the env
- * gets CHERE_INVOKING=1 so a login shell's profile stays in the working directory instead of going home
+ * gets CHERE_INVOKING=1 so a login shell's profile stays in the working directory instead of going home. the
+ * command goes on the command line as it is, which windows does not carry intact (see bashCommand): use this for
+ * fixed commands only, and bashCommand for anything a model or a person wrote
  */
 export function bashArgv(command: string, o: { login?: boolean; env?: Record<string, string | undefined> } = {}): string[] {
 	return [bashPath(o.env), o.login ? "-lc" : "-c", command];
@@ -104,4 +106,21 @@ export function bashArgv(command: string, o: { login?: boolean; env?: Record<str
 /** what a command's env needs on top of the caller's on this platform (nothing off windows) */
 export function bashEnv(): Record<string, string> {
 	return IS_WINDOWS ? { CHERE_INVOKING: "1" } : {};
+}
+
+/** on windows a command reaches bash in this env var, not on the command line */
+export const COMMAND_VAR = "CMX2_COMMAND";
+/** what windows' bash runs: the command from the env var, the var unset first so the command's children do not inherit it */
+export const WINDOWS_WRAPPER = `eval "unset ${COMMAND_VAR}; $${COMMAND_VAR}"`;
+
+/**
+ * argv and env that run one command line in bash: `bash -c <command>` (`-lc` with login) and `env` plus bashEnv().
+ * windows passes the command in COMMAND_VAR instead. bun quotes argv for windows' parser, and the msys runtime
+ * that starts git's bash reads its command line by other rules: it folds a doubled backslash into one. an env
+ * var arrives byte for byte, so the command line holds only a fixed wrapper, which has no backslash in it
+ */
+export function bashCommand(command: string, o: { login?: boolean; env?: Record<string, string | undefined> } = {}): { argv: string[]; env: Record<string, string | undefined> } {
+	const env = { ...(o.env ?? process.env), ...bashEnv() };
+	if (!IS_WINDOWS) return { argv: bashArgv(command, { login: o.login }), env };
+	return { argv: [bashPath(env), o.login ? "-lc" : "-c", WINDOWS_WRAPPER], env: { ...env, [COMMAND_VAR]: command } };
 }

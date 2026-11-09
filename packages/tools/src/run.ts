@@ -1,6 +1,7 @@
 import { CodemodeSandbox, type CodemodeTool, loadQuickJSWasm } from "@earendil-works/pi-codemode";
 // embedded in a compiled binary (bun's `type: "file"` gives a path its fs can read), the package file otherwise
 import quickjsWasm from "quickjs-wasi/quickjs.wasm" with { type: "file" };
+import { compiledRoot } from "@cmx2/platform";
 import { Type } from "typebox";
 import { imageParts } from "./image.ts";
 import { nestedDetails, titleLine, toolTitle } from "./record.ts";
@@ -16,7 +17,8 @@ import { type CallDecision, type ImagePart, text, type NestedCall, type TextPart
  * the worker entry next to this file. a compiled binary (scripts/build.ts) embeds it as a second
  * entrypoint under bun's virtual root, at its path below `packages/`
  */
-const WORKER = import.meta.url.includes("/$bunfs/") ? new URL("file:///$bunfs/root/tools/src/codemode-worker.js") : new URL(import.meta.url.endsWith(".ts") ? "./codemode-worker.ts" : "./codemode-worker.js", import.meta.url);
+const COMPILED_ROOT = compiledRoot(import.meta.url);
+const WORKER = COMPILED_ROOT ? new URL("tools/src/codemode-worker.js", COMPILED_ROOT) : new URL(import.meta.url.endsWith(".ts") ? "./codemode-worker.ts" : "./codemode-worker.js", import.meta.url);
 
 /** what a helper hands back to the script: the tool's text, or its machine-readable result */
 type Returns = "text" | "structured";

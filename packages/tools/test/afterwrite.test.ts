@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { formatFile, formatterFor } from "../src/format.ts";
 import { editTool, readTool, writeTool } from "../src/fs.ts";
 import { errorsAfterWrite, LspPool } from "../src/lsp.ts";
@@ -37,7 +37,11 @@ test("a prettier project: write lands formatted and says so; the file reads back
 	const env = scratch("prettier");
 	writeFileSync(join(env.cwd, ".prettierrc"), JSON.stringify({ semi: true, singleQuote: false }));
 	mkdirSync(join(env.cwd, "node_modules", ".bin"), { recursive: true });
-	symlinkSync(join(import.meta.dir, "..", "node_modules", ".bin", "prettier"), join(env.cwd, "node_modules", ".bin", "prettier"));
+	if (process.platform === "win32") {
+		// windows: an npm-style .cmd shim, the kind a .bin holds there (bun's own .exe shims need the .bunx file beside them)
+		const pkg = dirname(Bun.resolveSync("prettier/package.json", import.meta.dir));
+		writeFileSync(join(env.cwd, "node_modules", ".bin", "prettier.cmd"), `@"${process.execPath}" "${join(pkg, "bin", "prettier.cjs")}" %*\r\n`);
+	} else symlinkSync(join(import.meta.dir, "..", "node_modules", ".bin", "prettier"), join(env.cwd, "node_modules", ".bin", "prettier"));
 	const hooked = withHook(env, { format: true, diagnostics: false });
 	const r = await writeTool(hooked).execute("c", { path: "ugly.ts", content: "const  x={a:1,b:'two'}\nexport default   x" });
 	console.log(textOf(r));

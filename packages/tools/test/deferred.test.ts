@@ -62,7 +62,7 @@ test("skills: frontmatter with folded blocks, first dir wins, flush picks up a n
 	put(profile, "deploy", "---\nname: deploy\ndescription: the profile's older deploy\n---\nold\n");
 	put(profile, "review", "---\nname: review\ndescription: \"review a diff\"\n---\nread the diff twice.\n");
 	expect(frontmatter("---\nname: x\n---\nbody").meta).toEqual({ name: "x" });
-	expect(defaultSkillDirs("/w", "/cfg", "/h")).toEqual(["/w/.cmx2/skills", "/cfg/skills", "/h/.agents/skills", "/h/.claude/skills"]);
+	expect(defaultSkillDirs("/w", "/cfg", "/h")).toEqual([join("/w", ".cmx2", "skills"), join("/cfg", "skills"), join("/h", ".agents", "skills"), join("/h", ".claude", "skills")]);
 
 	const skills = new Skills([project, profile]);
 	expect(skills.list().map((s) => [s.name, s.description])).toEqual([

@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
+import { IS_WINDOWS } from "@cmx2/platform";
+import { binNames, launch } from "./shim.ts";
 
 /**
  * the project's formatter, run on a file write or edit just touched. a formatter counts only when the
@@ -35,9 +37,13 @@ function up(from: string, _cwd: string, test: (dir: string) => boolean): string 
 
 /** a formatter the project installed (node_modules/.bin, or its virtualenv for python tools), else one on the daemon's path */
 function bin(name: string, from: string): string | undefined {
-	for (const rel of [["node_modules", ".bin"], [".venv", "bin"], ["venv", "bin"]]) {
-		const local = up(from, "/", (d) => existsSync(join(d, ...rel, name)));
-		if (local) return join(local, ...rel, name);
+	// a windows venv keeps its programs in Scripts
+	const dirs = IS_WINDOWS ? [["node_modules", ".bin"], [".venv", "Scripts"], ["venv", "Scripts"]] : [["node_modules", ".bin"], [".venv", "bin"], ["venv", "bin"]];
+	for (const rel of dirs) {
+		for (const n of binNames(name)) {
+			const local = up(from, "/", (d) => existsSync(join(d, ...rel, n)));
+			if (local) return join(local, ...rel, n);
+		}
 	}
 	return Bun.which(name) ?? undefined;
 }
@@ -84,7 +90,8 @@ export async function formatFile(file: string, cwd: string): Promise<Formatted |
 	const f = formatterFor(file, cwd);
 	if (!f) return undefined;
 	const before = readFileSync(file);
-	const proc = Bun.spawn(f.argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+	const { argv, ...how } = launch(f.argv[0]!, f.argv.slice(1));
+	const proc = Bun.spawn(argv, { ...how, cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", windowsHide: true });
 	const timer = setTimeout(() => proc.kill("SIGKILL"), TIMEOUT_MS);
 	const [err, code] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
 	clearTimeout(timer);
