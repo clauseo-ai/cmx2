@@ -5,7 +5,8 @@
  */
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
@@ -44,10 +45,14 @@ test("the internals cmx2 relies on are byte-identical to the ones reviewed", () 
 
 test("the daemon's import graph has pi-ai, pi-agent-core, pi-codemode and pi-mcp, and not pi-coding-agent", () => {
 	// the bundler's metafile lists every module the cli can load, dynamic imports included
-	const script = `const r = await Bun.build({ entrypoints: ["packages/cli/src/index.ts"], target: "bun", metafile: true, outdir: "/tmp/cmx2-drift-build" }); if (!r.success) { console.error(r.logs.join("\\n")); process.exit(1); } console.log(JSON.stringify(Object.keys(r.metafile.inputs)));`;
-	const r = Bun.spawnSync(["bun", "-e", script], { cwd: ROOT });
+	const out = mkdtempSync(join(tmpdir(), "cmx2-drift-build-"));
+	const script = `const r = await Bun.build({ entrypoints: ["packages/cli/src/index.ts"], target: "bun", metafile: true, outdir: ${JSON.stringify(out)} }); if (!r.success) { console.error(r.logs.join("\\n")); process.exit(1); } console.log(JSON.stringify(Object.keys(r.metafile.inputs)));`;
+	// this bun, not "bun" from PATH: on windows that can be npm's bun.cmd, which refuses a script with quotes in it
+	const r = Bun.spawnSync([process.execPath, "-e", script], { cwd: ROOT });
+	rmSync(out, { recursive: true, force: true });
 	expect(r.exitCode, r.stderr.toString()).toBe(0);
-	const inputs = JSON.parse(r.stdout.toString()) as string[];
+	// windows names the inputs with backslashes
+	const inputs = (JSON.parse(r.stdout.toString()) as string[]).map((p) => p.replaceAll("\\", "/"));
 	const pi = [...new Set(inputs.map((p) => p.match(/@earendil-works\/(pi-[a-z-]+)/)?.[1]).filter(Boolean))].sort();
 	console.log(`pi packages in the daemon's graph (${inputs.length} modules): ${pi.join(", ")}`);
 	expect(pi).not.toContain("pi-coding-agent");
